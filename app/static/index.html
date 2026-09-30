@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Moyai Devin works on tasks in the cloud, with your team's Linear, Slack, and Notion connected.">
+  <title>Moyai Devin</title><link rel="icon" href="/static/favicon.svg"><link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <aside class="rail">
+    <a class="brand" href="/" aria-label="Moyai Devin home"><img src="/static/favicon.svg" alt=""><span>moyai<span class="brand-sub">DEVIN</span></span></a>
+    <button class="new-task primary" id="new-task"><span>＋</span> New session</button>
+    <nav aria-label="Workspace"><button class="nav-button active" data-view="tasks"><span>▤</span> Sessions <span class="count" id="task-count">0</span></button><button class="nav-button" data-view="connections"><span>◇</span> Organization</button><button class="nav-button" data-view="runtime"><span>▧</span> Runtime</button></nav>
+    <div class="rail-foot"><span class="avatar">T</span><div>Internal workspace<small>Private · local preview</small></div></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar"><span id="page-title">Sessions</span><div class="header-right"><span class="environment">Cloud agent</span><span class="key-hint">INTERNAL</span></div></header>
+    <main id="content"></main>
+  </div>
+  <div id="toast" role="status" hidden></div>
+  <dialog id="connection-dialog"><form id="connection-form"><button class="dialog-close" type="button" aria-label="Close">×</button><h2 id="connection-title">Connect an app</h2><div id="connection-body"></div></form></dialog>
+</body>
+</html>

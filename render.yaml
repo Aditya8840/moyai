@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: moyai-devin
+    runtime: python
+    region: oregon
+    plan: starter
+    numInstances: 1
+    buildCommand: pip install uv==0.11.17 && uv sync --frozen --no-dev
+    startCommand: .venv/bin/python render_start.py
+    healthCheckPath: /health
+    maxShutdownDelaySeconds: 90
+    autoDeployTrigger: "off"
+    disk:
+      name: moyai-state
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.7
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: DATA_DIR
+        value: /var/data/moyai
+      - key: RENDER_MIGRATION_STAGE
+        value: "true"
+      - key: BOOTSTRAP_MODAL_VOLUME
+        value: hermes-workspace-state
+      # Import existing secrets privately in the Render dashboard. Never regenerate
+      # ENCRYPTION_KEY or saved organization connections cannot be decrypted.

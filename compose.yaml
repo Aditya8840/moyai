@@ -1,0 +1,16 @@
+services:
+  workspace:
+    build: .
+    init: true
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - workspace-data:/data
+    restart: unless-stopped
+    stop_grace_period: 90s
+volumes:
+  workspace-data:
+

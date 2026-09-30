@@ -1,0 +1,61 @@
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
+
+
+def test_stdio_bridge_discovers_tools_and_forwards_only_run_token():
+    calls = []
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def reply(self, data):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode())
+
+        def do_GET(self):
+            assert self.headers["Authorization"] == "Bearer test-run-token"
+            assert self.path == "/tools"
+            self.reply([{"name": "linear_search", "description": "Fixture search", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}}}])
+
+        def do_POST(self):
+            assert self.headers["Authorization"] == "Bearer test-run-token"
+            assert self.path == "/tools/call"
+            calls.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            self.reply({"issues": [{"identifier": "LIT-123", "title": "Fixture issue"}]})
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    messages = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "linear_search", "arguments": {"query": "fixture"}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "unknown_method"},
+    ]
+    try:
+        script = Path(__file__).resolve().parents[1] / "sandbox" / "mcp_bridge.py"
+        result = subprocess.run([sys.executable, str(script)], input="\n".join(json.dumps(m) for m in messages)+"\n",
+                                text=True, capture_output=True, timeout=10,
+                                env={"PATH": os.environ["PATH"], "WORKSPACE_BROKER_URL": f"http://127.0.0.1:{server.server_port}", "WORKSPACE_RUN_TOKEN": "test-run-token"})
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    assert result.returncode == 0, result.stderr
+    output = [json.loads(line) for line in result.stdout.splitlines()]
+    assert len(output) == 4  # notifications never receive responses
+    assert output[0]["result"]["protocolVersion"] == "2025-03-26"
+    names = {tool["name"] for tool in output[1]["result"]["tools"]}
+    assert names == {"linear_search", "browser_open", "browser_read", "browser_click", "browser_fill"}
+    assert "Fixture issue" in output[2]["result"]["content"][0]["text"]
+    assert output[3]["error"]["code"] == -32601
+    assert calls == [{"name": "linear_search", "arguments": {"query": "fixture"}}]
+

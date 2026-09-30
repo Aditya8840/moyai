@@ -1,0 +1,553 @@
+import asyncio
+import hmac
+import json
+import re
+import secrets
+import time
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Literal
+from urllib.parse import urlparse
+from uuid import uuid4
+
+import httpx
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+from .config import Settings
+from .connectors import Connectors, ConnectorError, TOOLS
+from .db import Store, now
+from .runner import RunManager, TERMINAL
+from .persistence import Checkpoints, restore_checkpoint
+from .security import Security, digest
+from .slack import SlackSessions
+
+STATIC = Path(__file__).parent / "static"
+Provider = Literal["linear", "slack", "notion"]
+
+
+class NewRun(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    prompt: str = Field(min_length=3, max_length=16000)
+    repo_url: str = Field(default="", max_length=500)
+    mode: Literal["demo", "modal"] = "demo"
+    plugins: list[Provider] = Field(default_factory=list, max_length=3)
+    chat_enabled: bool = True
+
+    @field_validator("repo_url")
+    @classmethod
+    def repository(cls, value):
+        value = value.strip().removesuffix("/")
+        if value and not re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
+            raise ValueError("Use a public https://github.com/owner/repository URL.")
+        return value
+
+    @field_validator("prompt")
+    @classmethod
+    def prompt_text(cls, value):
+        if len(value.strip()) < 3:
+            raise ValueError("Enter a task of at least three characters.")
+        return value.strip()
+
+
+class TokenConnection(BaseModel):
+    token: str = Field(min_length=8, max_length=4096)
+
+
+class Decision(BaseModel):
+    decision: Literal["approve", "deny"]
+
+
+class ToolCall(BaseModel):
+    name: str = Field(max_length=80)
+    arguments: dict
+
+
+class Login(BaseModel):
+    password: str = Field(max_length=4096)
+
+
+class ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    content: str = Field(min_length=1, max_length=16000)
+    client_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,80}$")
+
+
+class ConnectionPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool
+    read_only: bool
+
+
+class OrganizationName(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    name: str = Field(min_length=1, max_length=80)
+
+
+def create_app(settings: Settings | None = None):
+    settings = settings or Settings()
+    restore_checkpoint(settings)
+    store = Store(settings.data_dir)
+    security = Security(settings)
+    connectors = Connectors(store, security, settings)
+    manager = RunManager(store, settings)
+    checkpoints = Checkpoints(store, settings)
+    manager.persist = checkpoints.flush
+    store.execute("INSERT OR IGNORE INTO organization(id,name) VALUES(1,?)", (settings.organization_name,))
+    slack = SlackSessions(store, connectors, manager, checkpoints, settings)
+    manager.prepare_context = slack.prepare
+    login_attempts = []
+
+    @asynccontextmanager
+    async def lifespan(app):
+        await manager.recover()
+        await checkpoints.flush()
+        slack.recover()
+        watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
+        try:
+            yield
+        finally:
+            await slack.shutdown()
+            await manager.shutdown()
+            if watcher:
+                watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
+            await checkpoints.flush()
+
+    app = FastAPI(title="Moyai Devin", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlparse(settings.public_url).hostname])
+    for key, value in {"store": store, "settings": settings, "security": security, "connectors": connectors, "manager": manager, "slack": slack}.items():
+        setattr(app.state, key, value)
+
+    @app.middleware("http")
+    async def boundaries(request, call_next):
+        if settings.trust_modal_proxy:
+            # Modal Server rewrites Host to the container's private IP and
+            # supplies the original host separately. Accept exactly our origin.
+            expected = urlparse(settings.public_url).netloc
+            if request.headers.get("x-forwarded-host") != expected:
+                return JSONResponse({"detail": "Invalid workspace host"}, status_code=400)
+            request.scope["headers"] = [(key, value) for key, value in request.scope["headers"] if key != b"host"] + [(b"host", expected.encode())]
+        if security.local and not settings.workspace_password and request.client and request.client.host not in {"127.0.0.1", "::1"}:
+            return JSONResponse({"detail": "Local preview only. Configure WORKSPACE_PASSWORD and PUBLIC_URL for remote access."}, status_code=403)
+        try:
+            length = int(request.headers.get("content-length", "0"))
+        except ValueError:
+            return JSONResponse({"detail": "Invalid request length"}, status_code=400)
+        if length > 5 * 1024 * 1024:
+            return JSONResponse({"detail": "Request too large"}, status_code=413)
+        response = await call_next(request)
+        if request.method in {"POST", "DELETE", "PUT", "PATCH"} or request.url.path.startswith("/oauth/"):
+            try:
+                await checkpoints.flush()
+            except Exception:
+                return JSONResponse({"detail": "Cloud persistence could not be confirmed. Refresh before retrying an action."}, status_code=503)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        if request.url.path.startswith(("/api/", "/oauth/", "/broker/")):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.exception_handler(ConnectorError)
+    async def connector_error(request, exc):
+        return JSONResponse({"detail": str(exc)}, status_code=502)
+
+    @app.get("/health")
+    async def health():
+        return {"status": "ok"}
+
+    @app.get("/api/session")
+    async def session(request: Request):
+        sid = security.session(request)
+        response = JSONResponse({})
+        if not sid and security.local and not settings.workspace_password:
+            sid = security.new_session(response)
+        role = security.role(request) or ("admin" if sid else None)
+        response.body = json.dumps({"authenticated": bool(sid), "csrf": security.csrf(sid) if sid else "", "local": security.local, "role": role}).encode()
+        response.headers["content-length"] = str(len(response.body))
+        return response
+
+    @app.post("/api/login")
+    async def login(body: Login, request: Request):
+        security.check_origin(request)
+        login_attempts[:] = [stamp for stamp in login_attempts if stamp > time.monotonic() - 60]
+        if len(login_attempts) >= 10:
+            raise HTTPException(429, "Too many sign-in attempts. Wait a minute.")
+        login_attempts.append(time.monotonic())
+        if settings.workspace_password and hmac.compare_digest(body.password, settings.workspace_password):
+            role = "admin"
+        elif settings.workspace_member_password and hmac.compare_digest(body.password, settings.workspace_member_password):
+            role = "member"
+        else:
+            raise HTTPException(401, "Incorrect workspace password.")
+        response = JSONResponse({"authenticated": True, "role": role})
+        security.new_session(response, role)
+        return response
+
+    @app.post("/api/logout")
+    async def logout(request: Request):
+        security.require(request, mutation=True)
+        response = JSONResponse({"ok": True})
+        response.delete_cookie("workspace_session", path="/")
+        return response
+
+    def missing_cloud():
+        missing = settings.missing_cloud()
+        if security.local:
+            missing.append("PUBLIC_URL (reachable HTTPS address)")
+        return missing
+
+    @app.get("/api/config")
+    async def config(request: Request):
+        security.require(request)
+        missing = missing_cloud()
+        return {"cloud_ready": not missing, "missing": missing, "model": settings.agent_model,
+                "public_url": settings.public_url, "max_concurrent_runs": settings.max_concurrent_runs,
+                "run_timeout_seconds": settings.run_timeout_seconds, "max_agent_iterations": settings.max_agent_iterations,
+                "hermes_revision": settings.hermes_revision, "auth": "Workspace password" if settings.workspace_password else "Local access only"}
+
+    @app.get("/api/organization")
+    async def organization(request: Request):
+        security.require(request)
+        return {"name": store.rows("SELECT name FROM organization WHERE id=1")[0]["name"],
+                "role": security.role(request), "member_access_configured": bool(settings.workspace_member_password),
+                "slack_sessions": slack.status(),
+                "activity": store.rows("SELECT provider,action,actor,created_at FROM connection_audit ORDER BY id DESC LIMIT 15")}
+
+    @app.patch("/api/organization")
+    async def rename_organization(body: OrganizationName, request: Request):
+        security.require(request, mutation=True, admin=True)
+        store.execute("UPDATE organization SET name=? WHERE id=1", (body.name,))
+        connectors.audit("organization", "Updated organization name")
+        return {"name": body.name}
+
+    @app.get("/api/runs")
+    async def runs(request: Request):
+        security.require(request)
+        return [public_run(store.run(row["id"])) for row in store.rows("SELECT id FROM runs ORDER BY created_at DESC LIMIT 100")]
+
+    @app.post("/api/runs", status_code=201)
+    async def create(body: NewRun, request: Request):
+        security.require(request, mutation=True)
+        if body.mode == "modal":
+            if missing_cloud():
+                raise HTTPException(503, "Cloud setup is incomplete. See Runtime for the missing settings.")
+            connected = {item["id"] for item in connectors.list() if item["connected"] and item["enabled"]}
+            if not set(body.plugins) <= connected:
+                raise HTTPException(422, "Connect the selected apps before starting the task.")
+        pending = store.rows("SELECT COUNT(*) AS n FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')")[0]["n"]
+        if pending >= 20:
+            raise HTTPException(429, "The queue is full. Wait for a task to finish.")
+        run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled)
+        await checkpoints.flush()
+        manager.submit(run)
+        return public_run(run)
+
+    @app.get("/api/runs/{run_id}")
+    async def get_run(run_id: str, request: Request):
+        security.require(request)
+        run = store.run(run_id)
+        if not run:
+            raise HTTPException(404, "Task not found")
+        return {**public_run(run), "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": store.messages(run_id),
+                "active": run_id in manager.jobs, "has_artifact": artifact_path(run_id).exists(), "slack_source": store.slack_source(run_id)}
+
+    @app.post("/api/runs/{run_id}/messages", status_code=202)
+    async def send_message(run_id: str, body: ChatMessage, request: Request):
+        security.require(request, mutation=True)
+        run = store.run(run_id)
+        if not run:
+            raise HTTPException(404, "Session not found")
+        if run["mode"] == "modal" and missing_cloud():
+            raise HTTPException(503, "Cloud setup is incomplete. See Runtime.")
+        try:
+            message, created = store.enqueue_message(run_id, body.content, body.client_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        await checkpoints.flush()
+        # Resume even for a duplicate whose first acknowledgement was lost.
+        if store.has_queued_messages(run_id):
+            manager.submit(store.run(run_id))
+        return {"id": message["id"], "status": message["status"], "created": created}
+
+    @app.post("/api/runs/{run_id}/cancel")
+    async def cancel(run_id: str, request: Request):
+        security.require(request, mutation=True)
+        if not store.run(run_id):
+            raise HTTPException(404, "Task not found")
+        await manager.cancel(run_id)
+        return public_run(store.run(run_id))
+
+    @app.get("/api/runs/{run_id}/events")
+    async def events(run_id: str, request: Request, after: int = 0):
+        security.require(request)
+        if not store.run(run_id):
+            raise HTTPException(404, "Task not found")
+        try:
+            last_id = int(request.headers.get("last-event-id", "0"))
+        except ValueError:
+            last_id = 0
+
+        async def stream():
+            cursor = max(after, last_id, 0)
+            while not await request.is_disconnected():
+                batch = store.events(run_id, cursor)
+                for event in batch:
+                    cursor = event["id"]
+                    yield f"id: {cursor}\ndata: {json.dumps(event)}\n\n"
+                row = store.run(run_id)
+                if not row["chat_enabled"] and row["status"] in TERMINAL and run_id not in manager.jobs and len(batch) < 200:
+                    yield "event: settled\ndata: {}\n\n"
+                    break
+                yield f"event: run-status\ndata: {json.dumps({'status': row['status'], 'active': run_id in manager.jobs})}\n\n"
+                await asyncio.sleep(0.5)
+        return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    def artifact_path(run_id):
+        if not re.fullmatch(r"[0-9a-f]{32}", run_id):
+            raise HTTPException(404, "Task not found")
+        return settings.data_dir / "artifacts" / f"{run_id}.zip"
+
+    @app.get("/api/runs/{run_id}/artifact")
+    async def artifact(run_id: str, request: Request):
+        security.require(request)
+        path = artifact_path(run_id)
+        if not path.exists() or not store.run(run_id):
+            raise HTTPException(404, "No result archive is available.")
+        return FileResponse(path, media_type="application/zip", filename=f"moyai-devin-{run_id[:8]}.zip")
+
+    @app.get("/api/connections")
+    async def connections(request: Request):
+        security.require(request)
+        return connectors.list()
+
+    @app.post("/api/connections/{provider}")
+    async def connect(provider: Provider, body: TokenConnection, request: Request):
+        security.require(request, mutation=True, admin=True)
+        credentials = {"access_token": body.token.strip(), "kind": "personal"}
+        label = await connectors.verify(provider, credentials)
+        connectors.save(provider, credentials, label)
+        connectors.record_check(provider, "healthy")
+        connectors.audit(provider, "Connected for the organization")
+        return {"connected": True, "label": label}
+
+    @app.delete("/api/connections/{provider}")
+    async def disconnect(provider: Provider, request: Request):
+        security.require(request, mutation=True, admin=True)
+        async with connectors.locks[provider]:
+            store.execute("DELETE FROM connections WHERE provider=?", (provider,))
+        connectors.expire_approvals(provider)
+        connectors.audit(provider, "Disconnected from the organization")
+        return {"connected": False}
+
+    @app.patch("/api/connections/{provider}/policy")
+    async def connection_policy(provider: Provider, body: ConnectionPolicy, request: Request):
+        security.require(request, mutation=True, admin=True)
+        store.execute("INSERT INTO connection_policies(provider,enabled,read_only) VALUES(?,?,?) ON CONFLICT(provider) DO UPDATE SET enabled=excluded.enabled,read_only=excluded.read_only",
+                      (provider, body.enabled, body.read_only))
+        if not body.enabled or body.read_only:
+            connectors.expire_approvals(provider)
+        action = "Paused for all sessions" if not body.enabled else "Enabled: read only" if body.read_only else "Enabled: writes require admin approval"
+        connectors.audit(provider, action)
+        return connectors.policy(provider)
+
+    @app.post("/api/connections/{provider}/check")
+    async def check_connection(provider: Provider, request: Request):
+        security.require(request, mutation=True, admin=True)
+        try:
+            label = await connectors.verify(provider, await connectors.credentials(provider))
+        except ConnectorError:
+            connectors.record_check(provider, "needs_attention")
+            raise
+        connectors.record_check(provider, "healthy")
+        return {"healthy": True, "label": label}
+
+    @app.post("/api/connections/{provider}/oauth")
+    async def oauth_start(provider: Provider, request: Request):
+        sid = security.require(request, mutation=True, admin=True)
+        if not connectors.configured_oauth(provider):
+            raise HTTPException(409, "Configure this app's OAuth client ID and secret first, or connect using a token.")
+        state = secrets.token_urlsafe(32)
+        store.execute("DELETE FROM oauth_states WHERE expires<?", (time.time(),))
+        store.execute("INSERT INTO oauth_states VALUES(?,?,?,?)", (digest(state), provider, digest(sid), time.time() + 600))
+        return {"url": connectors.authorization_url(provider, state)}
+
+    @app.get("/oauth/{provider}/callback")
+    async def oauth_callback(provider: Provider, request: Request, state: str = "", code: str = "", error: str = ""):
+        sid = security.require(request, admin=True)
+        with store.connect() as conn:
+            rows = conn.execute("DELETE FROM oauth_states WHERE state_hash=? AND provider=? AND session_id=? AND expires>? RETURNING state_hash",
+                                (digest(state), provider, digest(sid), time.time())).fetchall()
+        if not rows:
+            raise HTTPException(400, "Expired or invalid connection request. Start again from Connections.")
+        if error or not code:
+            return RedirectResponse("/?connection=cancelled#connections", status_code=303)
+        credentials = await connectors.exchange(provider, code=code)
+        label = await connectors.verify(provider, credentials)
+        connectors.save(provider, credentials, label)
+        connectors.record_check(provider, "healthy")
+        connectors.audit(provider, "Authorized an organization connection")
+        return RedirectResponse("/?connection=success#connections", status_code=303)
+
+    @app.post("/api/approvals/{approval_id}")
+    async def approval(approval_id: str, body: Decision, request: Request):
+        security.require(request, mutation=True, admin=True)
+        status = "approved" if body.decision == "approve" else "denied"
+        count = store.execute("UPDATE approvals SET status=? WHERE id=? AND status='pending' AND EXISTS(SELECT 1 FROM runs WHERE runs.id=approvals.run_id AND runs.status IN ('running','awaiting_approval'))", (status, approval_id))
+        if not count:
+            raise HTTPException(409, "This approval was already resolved or the run has ended.")
+        row = store.rows("SELECT run_id,tool FROM approvals WHERE id=?", (approval_id,))[0]
+        store.event(row["run_id"], "approval", f"{row['tool']}: {status}")
+        return {"status": status}
+
+    def require_run(run_id, request):
+        run = store.run(run_id)
+        token = request.headers.get("authorization", "").removeprefix("Bearer ")
+        if (not run or run["mode"] != "modal" or run["status"] not in {"running", "awaiting_approval"}
+                or not run["token_hash"] or not hmac.compare_digest(run["token_hash"], digest(token))):
+            raise HTTPException(401, "Run capability expired or invalid.")
+        return run
+
+    @app.get("/broker/{run_id}/tools")
+    async def tool_list(run_id: str, request: Request):
+        run = require_run(run_id, request)
+        return [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
+                for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
+
+    @app.post("/broker/{run_id}/tools/call")
+    async def tool_call(run_id: str, body: ToolCall, request: Request):
+        run = require_run(run_id, request)
+        if body.name not in TOOLS or TOOLS[body.name][0] not in run["plugins"]:
+            raise HTTPException(403, "This tool is not enabled for this task.")
+        provider, write, schema, _ = TOOLS[body.name]
+        try:
+            arguments = schema.model_validate(body.arguments).model_dump()
+        except ValidationError:
+            raise HTTPException(422, "Invalid tool arguments.")
+        if not connectors.allowed(body.name):
+            raise HTTPException(403, "This operation is disabled by the organization's connection policy.")
+        approval_id = None
+        if write:
+            approval_id = uuid4().hex
+            store.execute("INSERT INTO approvals(id,run_id,tool,arguments,status,created_at) VALUES(?,?,?,?,?,?)",
+                          (approval_id, run_id, body.name, json.dumps(arguments), "pending", now()))
+            store.update_run(run_id, status="awaiting_approval")
+            store.event(run_id, "approval", f"Approval needed: {body.name}", {"approval_id": approval_id})
+            deadline = time.monotonic() + 900
+            while time.monotonic() < deadline:
+                if await request.is_disconnected():
+                    store.execute("UPDATE approvals SET status='expired' WHERE id=? AND status IN ('pending','approved')", (approval_id,))
+                    store.execute("UPDATE runs SET status='running' WHERE id=? AND status='awaiting_approval' AND NOT EXISTS(SELECT 1 FROM approvals WHERE run_id=? AND status='pending')", (run_id, run_id))
+                    return {"error": "Tool connection closed. Action was not sent."}
+                current = store.run(run_id)
+                row = store.rows("SELECT status FROM approvals WHERE id=?", (approval_id,))[0]
+                if current["status"] not in {"running", "awaiting_approval"}:
+                    return {"error": "Run stopped. Action was not sent."}
+                if row["status"] in {"approved", "denied", "expired"}:
+                    break
+                await asyncio.sleep(0.25)
+            else:
+                store.execute("UPDATE approvals SET status='expired' WHERE id=? AND status='pending'", (approval_id,))
+            claim = store.execute("UPDATE approvals SET status='executing' WHERE id=? AND status='approved' AND EXISTS(SELECT 1 FROM runs WHERE runs.id=approvals.run_id AND runs.status IN ('running','awaiting_approval'))", (approval_id,))
+            remaining = store.rows("SELECT COUNT(*) AS n FROM approvals WHERE run_id=? AND status='pending'", (run_id,))[0]["n"]
+            store.execute("UPDATE runs SET status='running' WHERE id=? AND status='awaiting_approval' AND ?=0", (run_id, remaining))
+            if not claim:
+                store.event(run_id, "tool", f"{body.name} was not approved; no action sent")
+                return {"error": "Action denied, expired, or cancelled."}
+        require_run(run_id, request)
+        if not connectors.allowed(body.name):
+            if approval_id:
+                store.execute("UPDATE approvals SET status='expired' WHERE id=?", (approval_id,))
+            return {"error": "The organization connection changed. No action was sent."}
+        # A durable executing record prevents an uncertain external write being
+        # mistaken for a pending approval after a container restart.
+        if approval_id:
+            await checkpoints.flush()
+        try:
+            result = await connectors.call(body.name, arguments)
+            if approval_id:
+                store.execute("UPDATE approvals SET status='completed',result=? WHERE id=?", (json.dumps(result)[:12000], approval_id))
+            store.event(run_id, "tool", f"{body.name} completed")
+            return result
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, ConnectorError) else f"App operation could not be confirmed ({type(exc).__name__})."
+            if approval_id:
+                store.execute("UPDATE approvals SET status='uncertain',result=? WHERE id=?", (message, approval_id))
+            store.event(run_id, "error", f"{body.name}: {message}")
+            return {"error": message, "outcome_uncertain": write, "instruction": "Verify the destination before retrying a write."}
+
+    @app.get("/broker/{run_id}/v1/models")
+    async def models(run_id: str, request: Request):
+        require_run(run_id, request)
+        return {"object": "list", "data": [{"id": settings.agent_model, "object": "model", "owned_by": "workspace"}]}
+
+    @app.post("/hooks/slack/events")
+    async def slack_events(request: Request):
+        return await slack.receive(request, missing_cloud())
+
+    @app.post("/broker/{run_id}/v1/chat/completions")
+    async def model_proxy(run_id: str, request: Request):
+        require_run(run_id, request)
+        raw = await request.body()
+        if len(raw) > 5 * 1024 * 1024:
+            raise HTTPException(413, "Model request too large")
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            raise HTTPException(422, "Invalid model request")
+        if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
+            raise HTTPException(422, "messages must be an array")
+        admitted = store.execute("UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 WHERE id=? AND (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<? AND status IN ('running','awaiting_approval')",
+                                 (run_id, settings.max_agent_iterations * 3))
+        if not admitted:
+            raise HTTPException(429, "This run reached its model request limit.")
+        allowed = {"messages", "tools", "tool_choice", "parallel_tool_calls", "temperature", "top_p", "stop", "stream", "stream_options", "response_format", "reasoning_effort", "max_tokens", "max_completion_tokens", "seed"}
+        payload = {key: value for key, value in body.items() if key in allowed}
+        payload["model"] = settings.agent_model
+        for field in ("max_tokens", "max_completion_tokens"):
+            if field in payload:
+                if not isinstance(payload[field], int) or payload[field] < 1:
+                    raise HTTPException(422, "Invalid output limit")
+                payload[field] = min(payload[field], 16000)
+        if not ({"max_tokens", "max_completion_tokens"} & payload.keys()):
+            payload["max_tokens"] = 8192
+        client = httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30))
+        try:
+            upstream = await client.send(client.build_request("POST", settings.litellm_api_base.rstrip("/") + "/chat/completions",
+                                                           json=payload, headers={"Authorization": f"Bearer {settings.litellm_api_key}"}), stream=True)
+            if upstream.status_code >= 400:
+                await upstream.aclose()
+                await client.aclose()
+                raise HTTPException(502, f"Model gateway rejected the request ({upstream.status_code}). Check model access and gateway configuration.")
+        except httpx.HTTPError:
+            await client.aclose()
+            raise HTTPException(502, "Model gateway could not be reached.")
+
+        async def relay():
+            try:
+                async for chunk in upstream.aiter_bytes():
+                    if store.run(run_id)["status"] not in {"running", "awaiting_approval"}:
+                        break
+                    yield chunk
+            finally:
+                await upstream.aclose()
+                await client.aclose()
+        return StreamingResponse(relay(), media_type="text/event-stream" if payload.get("stream") else "application/json")
+
+    @app.get("/")
+    async def index():
+        return FileResponse(STATIC / "index.html")
+
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+    return app
+
+
+def public_run(run):
+    return {key: value for key, value in run.items() if key != "token_hash"}
+
+
+app = create_app()
