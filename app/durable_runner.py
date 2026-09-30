@@ -1,0 +1,305 @@
+"""Idempotent session steps. SQLite owns data; Temporal owns scheduling/retries.
+
+Supported topology is one Render instance/one worker on the same disk. Moving
+workers to another service requires shared storage first, not a second SQLite.
+"""
+import asyncio
+import hashlib
+import hmac
+import json
+import time
+
+import modal
+
+from .runner import RunManager, SANDBOX_FILES, SAVE_WARNING, TERMINAL, safe_error_detail
+from .security import digest
+
+
+class LostExecution(Exception):
+    pass
+
+
+class DurableRunner(RunManager):
+    def __init__(self, store, settings):
+        super().__init__(store, settings)
+        self.locks = {}
+        store.execute("""CREATE TABLE IF NOT EXISTS durable_sessions (
+            run_id TEXT PRIMARY KEY REFERENCES runs(id), state TEXT NOT NULL DEFAULT '{}',
+            revision INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0)""")
+
+    def state(self, run_id):
+        rows = self.store.rows('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,))
+        return json.loads(rows[0]['state']) if rows else {}
+
+    def save(self, run_id, state):
+        self.store.execute('UPDATE durable_sessions SET state=? WHERE run_id=?', (json.dumps(state), run_id))
+
+    def running_status(self, run_id, status, token_hash=None):
+        # Never overwrite a stop that arrived during an awaited provider call.
+        if self.store.run(run_id)['status'] == 'stopping':
+            return False
+        fields = {'status': status}
+        if token_hash is not None:
+            fields['token_hash'] = token_hash
+        self.store.update_run(run_id, **fields)
+        return True
+
+    def is_active(self, run_id):
+        row = self.store.run(run_id)
+        return bool(row and row['status'] not in TERMINAL)
+
+    def token(self, run_id, message_id):
+        # Reconstruct the same capability after a crash without putting it in
+        # Temporal history or writing plaintext credentials to the database.
+        secret = self.settings.encryption_key or self.settings.session_secret
+        if not secret:
+            raise ValueError('Durable execution requires a stable encryption/session key')
+        return hmac.new(secret.encode(), f'moyai-turn-v1:{run_id}:{message_id}'.encode(), hashlib.sha256).hexdigest()
+
+    async def advance(self, run_id):
+        async with self.locks.setdefault(run_id, asyncio.Lock()):
+            row = self.store.run(run_id)
+            if not row:
+                return False
+            state = self.state(run_id)
+            if not state or state.get('phase') == 'idle':
+                if row['status'] in {'cancelled', 'interrupted', 'stopping'}:
+                    if row['status'] == 'stopping':
+                        self.store.update_run(run_id, status='cancelled')
+                    return False
+                active = sum(json.loads(r['state']).get('phase', 'idle') != 'idle'
+                             for r in self.store.rows('SELECT state FROM durable_sessions'))
+                if active >= self.settings.max_concurrent_runs:
+                    await asyncio.sleep(2)
+                    return True
+                messages = self.store.rows("SELECT * FROM messages WHERE run_id=? AND status='running'", (run_id,))
+                message = messages[0] if messages else self.store.claim_message(run_id)
+                if not message:
+                    return False
+                state = {'version': 1, 'phase': 'prepare', 'message_id': message['id'], 'segment': 0,
+                         'snapshot_id': row['snapshot_id'], 'sandbox_id': '', 'cursor': 0, 'turn_started': time.time()}
+                self.save(run_id, state)
+            # Cancellation is persistent, including across worker restarts.
+            if row['status'] == 'stopping' and state['phase'] not in {'cleanup', 'finish'}:
+                self.fail(run_id, state, 'The response was stopped. The last saved workspace is preserved.', 'cancelled')
+            try:
+                return await self.step(run_id, state)
+            except LostExecution:
+                self.fail(run_id, state,
+                          'The cloud process stopped before its work could be confirmed. The last checkpoint is preserved. '
+                          'No unfinished actions were replayed; send a new message to inspect and continue.', 'interrupted')
+                return True
+            except ValueError:
+                self.fail(run_id, state, 'This response cannot run with the current workspace configuration. '
+                          'An administrator must check the selected model and runtime settings.')
+                return True
+
+    def fail(self, run_id, state, explanation, status='failed'):
+        preserved = self.preserve_answer(run_id)
+        state.update(phase='cleanup', outcome='save_failed' if preserved else status,
+                     response=self.store.run(run_id)['summary'] if preserved else explanation)
+        self.store.update_run(run_id, token_hash='', error=explanation)
+        self.save(run_id, state)
+        self.store.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status='queued'", (run_id,))
+
+    async def sandbox(self, state):
+        try:
+            sandbox = await modal.Sandbox.from_id.aio(state['sandbox_id'], client=await self.client())
+        except modal.exception.NotFoundError:
+            raise LostExecution() from None
+        if await sandbox.poll.aio() is not None:
+            raise LostExecution()
+        return sandbox
+
+    async def provision(self, run_id, state):
+        client = await self.client()
+        name = f"moyai-{run_id}-{state['message_id']}-{state['segment']}"
+        try:
+            sandbox = await modal.Sandbox.from_name.aio(self.settings.modal_app_name, name, client=client)
+        except modal.exception.NotFoundError:
+            app = await modal.App.lookup.aio(self.settings.modal_app_name, create_if_missing=True, client=client)
+            image = modal.Image.from_id(state['snapshot_id'], client=client) if state['snapshot_id'] else self.image()
+            try:
+                sandbox = await modal.Sandbox.create.aio(
+                    app=app, client=client, name=name, image=image,
+                    secrets=[modal.Secret.from_dict({'WORKSPACE_RUN_TOKEN': self.token(run_id, state['message_id'])})],
+                    env={'PYTHONUNBUFFERED': '1', 'PYTHONPATH': '/opt/hermes', 'HERMES_HOME': '/tmp/hermes-home',
+                         'HERMES_RUNTIME_DIR': '/opt/hermes-tools', 'HERMES_PYTHON': '/opt/hermes-env/bin/python',
+                         'GIT_TERMINAL_PROMPT': '0'},
+                    timeout=86400, cpu=2, memory=4096,
+                    experimental_options={'vm_runtime': True} if self.settings.modal_vm_runtime else {},
+                )
+            except modal.exception.AlreadyExistsError:
+                sandbox = await modal.Sandbox.from_name.aio(self.settings.modal_app_name, name, client=client)
+        state.update(sandbox_id=sandbox.object_id, machine_started=time.time(), phase='install')
+        self.save(run_id, state)
+        self.store.update_run(run_id, sandbox_id=sandbox.object_id)
+        return sandbox
+
+    def directory(self, state):
+        return f"/session/executions/{state['message_id']}-{state['segment']}"
+
+    async def command(self, sandbox, *args):
+        process = await sandbox.exec.aio('/usr/local/bin/python', '/opt/workspace-runner/durable_process.py', *args, timeout=30)
+        output, _ = await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
+        if await process.wait.aio() != 0:
+            raise RuntimeError('Sandbox supervisor command failed')
+        return output
+
+    async def step(self, run_id, state):
+        phase = state['phase']
+        run = self.store.run(run_id)
+        if phase == 'prepare':
+            if self.prepare_context:
+                await self.prepare_context(run_id)
+            if self.store.run(run_id)['status'] == 'stopping':
+                return True
+            if run['mode'] == 'demo':
+                await self.demo(run)
+                if self.store.run(run_id)['status'] == 'stopping':
+                    self.fail(run_id, state, 'The response was stopped.', 'cancelled')
+                    return True
+                state.update(phase='finish', outcome='completed', response=self.store.run(run_id)['summary'])
+            else:
+                state['phase'] = 'provision'
+                self.running_status(run_id, 'provisioning')
+            self.save(run_id, state)
+        elif phase == 'provision':
+            await self.provision(run_id, state)
+        elif phase == 'install':
+            sandbox = await self.sandbox(state)
+            # Refresh protocol adapters on snapshots from older releases.
+            for path in SANDBOX_FILES.glob('*.py'):
+                await sandbox.filesystem.write_text.aio(path.read_text(), '/opt/workspace-runner/' + path.name)
+            message = self.store.rows('SELECT content FROM messages WHERE id=?', (state['message_id'],))[0]
+            spec = self.spec({**run, 'prompt': message['content'], 'message_id': state['message_id'],
+                              'continuation': state['segment'] > 0})
+            spec['rotation_seconds'] = self.settings.temporal_checkpoint_seconds
+            spec['chat_enabled'] = True
+            if self.settings.run_timeout_seconds:
+                remaining = self.settings.run_timeout_seconds - (time.time() - state['turn_started'])
+                if remaining <= 0:
+                    self.fail(run_id, state, 'This response reached its configured time limit.')
+                    return True
+                spec['timeout'] = remaining
+            # Each piece gets its own immutable input and launch marker.
+            spec_path = f"/tmp/moyai-{state['message_id']}-{state['segment']}.json"
+            await sandbox.filesystem.write_text.aio(json.dumps(spec), spec_path)
+            state['phase'] = 'launch'
+            self.save(run_id, state)
+        elif phase == 'launch':
+            sandbox = await self.sandbox(state)
+            if not self.running_status(run_id, 'running', digest(self.token(run_id, state['message_id']))):
+                return True
+            spec_path = f"/tmp/moyai-{state['message_id']}-{state['segment']}.json"
+            await self.command(sandbox, 'start', self.directory(state), spec_path)
+            state['phase'] = 'monitor'
+            self.save(run_id, state)
+        elif phase == 'monitor':
+            sandbox = await self.sandbox(state)
+            # One Activity may poll multiple times, keeping workflow history
+            # small. Heartbeats are delivered independently by the worker.
+            for _ in range(10):
+                if self.store.run(run_id)['status'] == 'stopping':
+                    return True
+                output = await self.command(sandbox, 'read', self.directory(state), str(state['cursor']))
+                for value in (self.token(run_id, state['message_id']), self.settings.litellm_api_key, self.settings.modal_token_secret):
+                    if value:
+                        output = output.replace(value, '[redacted]')
+                report = json.loads(output)
+                for event in report['events']:
+                    if event.get('kind') in {'tool', 'status', 'error', 'message'}:
+                        self.store.event(run_id, event['kind'], str(event.get('message', '')), event.get('data', {}))
+                state['cursor'] = report['cursor']
+                if report.get('final'):
+                    state['result'] = {**report['final'], 'message_id': state['message_id']}
+                    self.store.update_run(run_id, summary=str(report['final'].get('message', '')),
+                                          pending_result=json.dumps(state['result']))
+                self.save(run_id, state)
+                if report['state'] == 'uncertain':
+                    raise LostExecution()
+                if report['state'] == 'new':
+                    # A launch RPC may have succeeded without its process
+                    # starting yet. The supervisor safely arbitrates retries.
+                    state['phase'] = 'launch'
+                    self.save(run_id, state)
+                    return True
+                if report['state'] == 'done' and len(report['events']) < 30:
+                    state['exit_code'] = report['exit_code']
+                    state['phase'] = 'save'
+                    self.save(run_id, state)
+                    return True
+                await asyncio.sleep(2)
+        elif phase == 'save':
+            sandbox = await self.sandbox(state)
+            result = state.get('result', {})
+            # Answer persisted above before archive/snapshot work.
+            await self.save_artifact(sandbox, run_id)
+            if not self.running_status(run_id, 'saving', ''):
+                return True
+            try:
+                snapshot = await sandbox.snapshot_filesystem.aio(timeout=self.settings.snapshot_timeout_seconds, ttl=None)
+            except Exception as exc:
+                state['save_attempts'] = state.get('save_attempts', 0) + 1
+                self.save(run_id, state)
+                self.store.event(run_id, 'error', 'Workspace checkpoint could not be confirmed.',
+                                 {'stage': 'snapshot_filesystem', 'attempt': state['save_attempts'],
+                                  'reason': safe_error_detail(exc, [self.settings.modal_token_secret])})
+                if state['save_attempts'] >= 3:
+                    self.fail(run_id, state, SAVE_WARNING if result else 'Workspace saving failed. No unfinished work was replayed.')
+                    return True
+                raise
+            result.update(checkpoint_saved=True, exit_code=state['exit_code'])
+            state.update(snapshot_id=snapshot.object_id, phase='checkpointed', result=result)
+            # Commit checkpoint and protocol phase together so a crash cannot
+            # roll a turn forward without the matching conversation snapshot.
+            with self.store.connect() as conn:
+                conn.execute('UPDATE durable_sessions SET state=? WHERE run_id=?', (json.dumps(state), run_id))
+                conn.execute("UPDATE runs SET snapshot_id=?,checkpoint_error='',pending_result=? WHERE id=?",
+                             (snapshot.object_id, json.dumps(result), run_id))
+        elif phase == 'checkpointed':
+            result = state['result']
+            continuing = result.get('continuation') and state['exit_code'] == 0
+            if continuing:
+                if time.time() - state['machine_started'] >= self.settings.sandbox_rotation_seconds:
+                    await self.cleanup(state)
+                    state.update(sandbox_id='', phase='provision')
+                else:
+                    state['phase'] = 'install'
+                state.update(segment=state['segment'] + 1, cursor=0)
+                state.pop('result', None)
+                state.pop('save_attempts', None)
+                self.running_status(run_id, 'running')
+                self.store.update_run(run_id, pending_result='', summary='')
+                self.store.event(run_id, 'status', 'Workspace checkpoint saved. Continuing the same request.')
+                self.save(run_id, state)
+            else:
+                state.update(phase='cleanup', outcome='completed' if result.get('completed') and state['exit_code'] == 0 else 'failed',
+                             response=result.get('message') or 'Hermes stopped without a final answer.')
+                self.save(run_id, state)
+        elif phase == 'cleanup':
+            await self.cleanup(state)
+            state['phase'] = 'finish'
+            self.save(run_id, state)
+        elif phase == 'finish':
+            self.store.finish_message(run_id, state['message_id'], state['response'], state['outcome'])
+            status = 'idle' if state['outcome'] == 'completed' else ('failed' if state['outcome'] == 'save_failed' else state['outcome'])
+            if status != 'idle':
+                self.store.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status='queued'", (run_id,))
+            self.store.update_run(run_id, status='queued' if status == 'idle' and self.store.has_queued_messages(run_id) else status,
+                                  token_hash='', summary=state['response'])
+            self.store.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (run_id,))
+            state['phase'] = 'idle'
+            self.save(run_id, state)
+            return self.store.has_queued_messages(run_id)
+        return True
+
+    async def cleanup(self, state):
+        if not state.get('sandbox_id'):
+            return
+        try:
+            sandbox = await modal.Sandbox.from_id.aio(state['sandbox_id'], client=await self.client())
+            if await sandbox.poll.aio() is None:
+                await self.terminate(sandbox)
+        except modal.exception.NotFoundError:
+            pass  # A confirmed missing machine cannot still execute a tool.

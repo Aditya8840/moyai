@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     snapshot_timeout_seconds: int = Field(default=180, ge=10, le=600)
     max_agent_iterations: int = Field(default=0, ge=0)
     sandbox_rotation_seconds: int = Field(default=82800, ge=60, le=82800)
+    temporal_enabled: bool = False
+    temporal_address: str = "localhost:7233"
+    temporal_namespace: str = "default"
+    temporal_api_key: str = ""
+    temporal_tls: bool = True
+    temporal_task_queue: str = "moyai-sessions-v1"
+    temporal_checkpoint_seconds: int = Field(default=600, ge=30, le=3600)
     demo_step_seconds: float = Field(default=0.8, ge=0, le=10)
     linear_client_id: str = ""
     linear_client_secret: str = ""

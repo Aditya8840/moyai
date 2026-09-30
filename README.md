@@ -254,7 +254,7 @@ Final answers are stored on the control-plane disk as soon as Hermes returns the
 
 `RUN_TIMEOUT_SECONDS=0` and `MAX_AGENT_ITERATIONS=0` remove the app’s response-duration, tool-iteration, and model-request-count caps. Explicit nonzero values still enforce optional limits. `SNAPSHOT_TIMEOUT_SECONDS=180` separately allows three minutes for filesystem saving. Save failures now record the stage, exception type, elapsed time, configured timeout, and a redacted diagnostic reason. The original failure in session `43e5ab156ec94f31b1e8b61852be84f8` occurred after approximately 54 seconds of the old 55-second save window; Modal showed a terminated sandbox with a 15m32s lifetime and a 30m limit. The original exception details were discarded, so the exact cause is unconfirmed; the 30-minute execution limit was not reached.
 
-Modal [limits each sandbox to 24 hours](https://modal.com/docs/guide/sandbox#timeouts). With no app time limit, `SANDBOX_ROTATION_SECONDS=82800` requests renewal after 23 hours at Hermes’s next step callback, between tool rounds. The remaining hour allows in-flight work and saving to finish. The conversation and filesystem must both be saved, all tool calls must have results, and the old machine must terminate before another machine continues the same user turn. Intermediate handoffs stay in session activity; Slack receives the final answer once. Stop, snapshot failure, incomplete tool history, and provider errors halt renewal. A server restart still interrupts unfinished work without automatic replay. Snapshots preserve files, not live processes or browser tabs; an individual operation that cannot reach a safe boundary before Modal’s hard limit can still be interrupted.
+Modal [limits each sandbox to 24 hours](https://modal.com/docs/guide/sandbox#timeouts). With no app time limit, `SANDBOX_ROTATION_SECONDS=82800` requests renewal after 23 hours at Hermes’s next step callback, between tool rounds. The remaining hour allows in-flight work and saving to finish. The conversation and filesystem must both be saved, all tool calls must have results, and the old machine must terminate before another machine continues the same user turn. Intermediate handoffs stay in session activity; Slack receives the final answer once. Stop, snapshot failure, incomplete tool history, and provider errors halt renewal. With the local execution engine, a server restart interrupts unfinished work without automatic replay. The optional Temporal engine below reconnects to its journaled executions. Snapshots preserve files, not live processes or browser tabs; an individual operation that cannot reach a safe boundary before Modal’s hard limit can still be interrupted.
 
 **Live saving verification (September 30, 2026):** commit `eaf9ec5` deployed successfully to Render. A [#bot-spam mention and ordinary follow-up](https://berriaillm.slack.com/archives/C0B302ZJU05/p1790790095028019) used the same [session](https://moyai-devin.onrender.com/#run=6cda2f2a3e4e4523a4d973376e4b5b5f). The first turn created a nested local git repository, left `note.txt` changed from `before` to `after`, and added untracked `extra.txt` containing `granite-save-62`. The downloaded archive contains the correct nested patch, new file, answer, and recovery manifest with no omissions. The second turn recalled the marker and re-read both files with their unchanged git status from a restored snapshot. Both answers appeared once in Slack with reaction acknowledgments. Existing sessions and all three organization connections remained present; health returned 200, unauthenticated session access returned 401, and Modal's API confirmed zero active sandboxes under `hermes-workspace`. See [live screenshot](../moyai-save-continuity-live.jpg). Snapshot-failure, restart, queued-follow-up cancellation, and preserved-answer Slack delivery paths passed automated fault-injection tests; no failure was deliberately injected into production.
 
@@ -305,3 +305,106 @@ An encrypted database alone does not protect credentials from an attacker who al
 - [Notion integrations](https://developers.notion.com/docs/authorization)
 
 Hermes is an independent MIT-licensed project from Nous Research. This MVP builds on it and is not affiliated with Devin.
+
+
+## Temporal session execution (opt-in)
+
+`TEMPORAL_ENABLED=true` wraps each chat in one long-lived `SessionWorkflow`.
+Messages continue to be committed to Render's SQLite inbox before acknowledgment.
+A durable wake outbox sends Signal-with-Start to `moyai-session-<session-id>`;
+missed acknowledgments can safely be resent. The workflow drives bounded,
+retryable Activities and waits for the next message when idle. It rolls its
+history forward with Continue-As-New every 150 Activities, independently of
+Modal machine renewal. Temporal history contains session IDs and small status
+flags, not prompts, connection credentials, model responses, or workspace files.
+
+```mermaid
+flowchart LR
+  U[Browser / Slack] --> R[Render web app + Temporal worker]
+  R --> D[(Render disk: sessions, inbox, execution phases)]
+  R <--> T[Temporal Cloud: one workflow per session]
+  R <--> M[Modal: detached Hermes supervisor]
+  M --> S[Modal filesystem snapshots]
+  M --> R
+  R --> G[Existing LiteLLM gateway key]
+```
+
+The first deployment intentionally runs the Python Temporal worker **inside the
+existing Render service**. Render services cannot share a persistent disk. Keep
+one instance and one Uvicorn worker. Do not create a separate worker pointing at
+a new SQLite database. Separating/scaling workers requires a shared database and
+artifact storage migration. The Temporal service itself remains in Temporal Cloud.
+
+Activities persist their phase before launching work. A stable Modal sandbox
+name reconciles ambiguous creation; a detached supervisor uses an exclusive lock
+and a durable started marker to prevent duplicate Hermes launches. On Render
+restart the worker reconnects to the same machine and reads its result journal.
+Worker shutdown leaves the sandbox alive and preserves its capability. A user
+Stop instead immediately revokes that capability and durably requests cleanup.
+Per-turn capabilities are derived from the unchanged encryption/session key and
+are never sent to Temporal.
+
+Every 10 minutes by default, Hermes pauses at the next safe tool-round boundary.
+Its conversation and filesystem are snapshotted together before continuing on the
+same machine. After 23 hours the old machine must be confirmed stopped before a
+replacement restores the checkpoint and continues the same turn. Idle chats
+terminate their machine; later messages restore the saved snapshot. Each final
+answer is persisted before archive/snapshot operations. Three failed snapshot
+attempts retain that answer with a warning, retain the prior snapshot, and stop
+queued messages. Intermediate checkpoints are not posted as Slack answers.
+
+**Durability limits:** Activities are at-least-once, not an exactly-once guarantee
+for external effects. A missing machine or an abandoned launch marker with no
+confirmed result stops with an explicit interruption rather than automatically
+replaying potentially completed writes. The last safe checkpoint is retained for
+an explicit follow-up. Snapshots do not contain RAM, running processes, or browser
+tabs. A tool that cannot reach a safe boundary before Modal's hard limit can still
+be interrupted. In-flight HTTP model/tool requests to the Render broker can fail
+during a Render restart; Temporal does not transparently replay those requests.
+Existing write approvals, uncertain-write records, Slack outbox deduplication,
+and per-user inference accounting remain in force. Modal snapshots are retained
+indefinitely as before; periodic snapshots add storage usage and need an explicit
+retention policy before large-scale use. Losing the Render disk still loses the
+application data; Temporal history is not a database backup.
+
+### Configure and roll out
+
+1. Create a Temporal Cloud namespace in a nearby region. Create a service account
+   limited to worker/client access for that namespace, not organization admin.
+2. Privately set `TEMPORAL_ADDRESS` to the namespace's displayed endpoint,
+   `TEMPORAL_NAMESPACE`, and `TEMPORAL_API_KEY` in Render. Keep
+   `TEMPORAL_TLS=true`, `TEMPORAL_TASK_QUEUE=moyai-sessions-v1`, and
+   `TEMPORAL_CHECKPOINT_SECONDS=600`. Never change `ENCRYPTION_KEY` or
+   `SESSION_SECRET` during the migration.
+3. Wait for existing legacy runs to finish or explicitly stop them. Back up the
+   Render database. Then enable `TEMPORAL_ENABLED=true` and deploy. Startup
+   refuses to adopt a legacy in-flight process without a recovery journal.
+4. Runtime shows the selected engine and connection status. If Temporal is
+   unreachable, new messages remain saved and queued. The worker retries the
+   connection; it does not fall back to a second execution engine.
+5. Verify a small session in `#bot-spam`, restart the Render worker while an
+   operation is running, queue a follow-up, and confirm both responses and
+   restored files. Confirm the workflow in Temporal and no idle Modal machines.
+
+To roll back, drain Temporal work first; disabling it while execution phases are
+active is rejected to protect unfinished work. Keep workflow and Activity names,
+phase schema, and task queue compatible across code deployments. A breaking
+change needs a versioned workflow/queue migration, not an in-place rename.
+
+Local testing uses the official Temporal dev server through the Python SDK:
+`uv run pytest tests/test_temporal_integration.py -q`. The first run downloads the
+official CLI. That test stops a real Temporal worker during a simulated Modal
+operation, queues a message while offline, starts a new worker on the same disk,
+and verifies one execution per message and deterministic workflow replay.
+`tests/test_durable.py` separately covers lost launch acknowledgments, checkpoint
+renewal, cancellation, missing machines, save failure, and wake outbox races.
+
+
+**Pre-deployment verification (September 30, 2026):** 154 tests pass. A real
+Temporal dev server plus real Modal sandboxes and the pinned Hermes agent
+survived a worker restart, processed a follow-up queued while offline, and
+restored conversation/files across four sandboxes under shortened checkpoint and
+renewal clocks. A deterministic local model fixture produced the file contents
+`x`, `x`, `xy`, `xy`, confirming each terminal write happened once. Both answers
+were recorded once; all test machines were terminated. This verifies the adapter
+and recovery mechanics, not a 23-hour endurance run or the production cutover.

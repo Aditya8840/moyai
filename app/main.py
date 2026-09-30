@@ -100,7 +100,11 @@ def create_app(settings: Settings | None = None):
     store = Store(settings.data_dir, default_model=settings.resolve_model())
     security = Security(settings)
     connectors = Connectors(store, security, settings)
-    manager = RunManager(store, settings)
+    if settings.temporal_enabled:
+        from .temporal_runtime import TemporalRunManager
+        manager = TemporalRunManager(store, settings)
+    else:
+        manager = RunManager(store, settings)
     checkpoints = Checkpoints(store, settings)
     spend = Spend(store, settings, security, checkpoints)
     manager.persist = checkpoints.flush
@@ -232,6 +236,9 @@ def create_app(settings: Settings | None = None):
                 "public_url": settings.public_url, "max_concurrent_runs": settings.max_concurrent_runs,
                 "run_timeout_seconds": settings.run_timeout_seconds, "max_agent_iterations": settings.max_agent_iterations,
                 "sandbox_rotation_seconds": settings.sandbox_rotation_seconds,
+                "execution_engine": "Temporal" if settings.temporal_enabled else "Local worker",
+                "execution_connected": manager.ready.is_set() if settings.temporal_enabled else True,
+                "checkpoint_interval_seconds": settings.temporal_checkpoint_seconds if settings.temporal_enabled else None,
                 "hermes_revision": settings.hermes_revision, "auth": "Google Workspace" if settings.google_enabled() else "Workspace password" if settings.workspace_password else "Local access only"}
 
     @app.get("/api/organization")
@@ -272,7 +279,7 @@ def create_app(settings: Settings | None = None):
         if pending >= 20:
             raise HTTPException(429, "The queue is full. Wait for a task to finish.")
         user_id = store.identity(security.session_info(request))
-        run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled, model=model, user_id=user_id)
+        run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id)
         await checkpoints.flush()
         manager.submit(run)
         return public_run(run)
@@ -287,7 +294,7 @@ def create_app(settings: Settings | None = None):
         return {**public_run(run), "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": store.messages(run_id),
                 "owner": owners[0] if owners else None,
                 "slack_mirroring": slack.chat.mirroring(run_id),
-                "active": run_id in manager.jobs, "has_artifact": artifact_path(run_id).exists(), "slack_source": store.slack_source(run_id)}
+                "active": manager.is_active(run_id), "has_artifact": artifact_path(run_id).exists(), "slack_source": store.slack_source(run_id)}
 
     @app.post("/api/runs/{run_id}/messages", status_code=202)
     async def send_message(run_id: str, body: ChatMessage, request: Request):
@@ -342,10 +349,10 @@ def create_app(settings: Settings | None = None):
                     cursor = event["id"]
                     yield f"id: {cursor}\ndata: {json.dumps(event)}\n\n"
                 row = store.run(run_id)
-                if not row["chat_enabled"] and row["status"] in TERMINAL and run_id not in manager.jobs and len(batch) < 200:
+                if not row["chat_enabled"] and row["status"] in TERMINAL and not manager.is_active(run_id) and len(batch) < 200:
                     yield "event: settled\ndata: {}\n\n"
                     break
-                yield f"event: run-status\ndata: {json.dumps({'status': row['status'], 'active': run_id in manager.jobs, 'model': row['model'], 'active_model': row['active_model'], 'checkpoint_error': row['checkpoint_error'], 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
+                yield f"event: run-status\ndata: {json.dumps({'status': row['status'], 'active': manager.is_active(run_id), 'model': row['model'], 'active_model': row['active_model'], 'checkpoint_error': row['checkpoint_error'], 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
                 await asyncio.sleep(0.5)
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

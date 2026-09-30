@@ -35,3 +35,16 @@ def test_disabled_rotation_and_explicit_duration_limit():
     assert Settings(_env_file=None, run_timeout_seconds=0).sandbox_lifetime_seconds() == 86400
     with pytest.raises(ValueError):
         Settings(_env_file=None, run_timeout_seconds=10)
+
+
+def test_slow_agent_initialization_cannot_loop_without_doing_work():
+    clock = [0]
+    stops = []
+    deadline = RotationDeadline(10, clock=lambda: clock[0])
+    clock[0] = 1000  # Startup took longer than the checkpoint interval.
+    agent = SimpleNamespace(interrupt=lambda: stops.append(True))
+    deadline.step(agent)
+    assert not stops
+    clock[0] += 11
+    deadline.step(agent)
+    assert stops == [True]

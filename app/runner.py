@@ -59,6 +59,10 @@ class RunManager:
             await sandbox.wait.aio(raise_on_termination=False)
 
     async def recover(self):
+        if self.store.rows("SELECT 1 FROM sqlite_master WHERE type='table' AND name='durable_sessions'"):
+            if any(json.loads(row['state']).get('phase', 'idle') != 'idle'
+                   for row in self.store.rows('SELECT state FROM durable_sessions')):
+                raise RuntimeError('Drain Temporal sessions before disabling Temporal; unfinished work was preserved')
         rows = self.store.rows("SELECT * FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle') OR EXISTS(SELECT 1 FROM messages WHERE messages.run_id=runs.id AND messages.status IN ('running','queued'))")
         for row in rows:
             pending = json.loads(row.get("pending_result") or "null")
@@ -250,6 +254,25 @@ class RunManager:
                 .add_local_dir(SANDBOX_FILES, remote_path="/opt/workspace-runner", copy=True)
                 .env({"PYTHONUNBUFFERED": "1", "PYTHONPATH": "/opt/hermes", "HERMES_PYTHON": "/opt/hermes-env/bin/python", "HERMES_HOME": "/tmp/hermes-home", "GIT_TERMINAL_PROMPT": "0"}))
 
+    def is_active(self, run_id):
+        return run_id in self.jobs
+
+    def spec(self, run):
+        run_id = run["id"]
+        spec = {"run_id": run_id, "prompt": run["prompt"], "repo_url": run["repo_url"],
+                "broker_url": f"{self.settings.public_url.rstrip('/')}/broker/{run_id}",
+                "model": self.settings.resolve_model(fallback=run.get('active_model') or run.get('model') or ''), "max_iterations": self.settings.max_agent_iterations,
+                "timeout": self.settings.run_timeout_seconds - 90 if self.settings.run_timeout_seconds else None,
+                "rotation_seconds": self.settings.sandbox_rotation_seconds if not self.settings.run_timeout_seconds and run.get("chat_enabled") else 0,
+                "continuation": bool(run.get("continuation")),
+                "chat_enabled": bool(run.get("chat_enabled")),
+                "workspace_warning": run.get("checkpoint_error", ""),
+                "slack_source": self.store.slack_source(run_id),
+                "slack_thread_chat": bool(self.store.rows("SELECT 1 FROM slack_threads WHERE run_id=?", (run_id,))) if self.settings.slack_thread_chat_enabled else False,
+                "history_fallback": [{"role": m["role"], "content": (f"[Prior {m['status']} message; context only, do not replay] " if m["role"] == "user" and m["status"] != "completed" else "") + m["content"]} for m in self.store.messages(run_id)
+                                     if m["id"] < run.get("message_id", 0) and m["status"] not in {"queued", "running"}]}
+        return spec
+
     async def cloud(self, run):
         run_id = run["id"]
         self.store.update_run(run_id, status="provisioning")
@@ -282,18 +305,7 @@ class RunManager:
         await self.persist()
         if self.stopped(run_id):
             return
-        spec = {"run_id": run_id, "prompt": run["prompt"], "repo_url": run["repo_url"],
-                "broker_url": f"{self.settings.public_url.rstrip('/')}/broker/{run_id}",
-                "model": self.settings.resolve_model(fallback=run.get('active_model') or run.get('model') or ''), "max_iterations": self.settings.max_agent_iterations,
-                "timeout": self.settings.run_timeout_seconds - 90 if self.settings.run_timeout_seconds else None,
-                "rotation_seconds": self.settings.sandbox_rotation_seconds if not self.settings.run_timeout_seconds and run.get("chat_enabled") else 0,
-                "continuation": bool(run.get("continuation")),
-                "chat_enabled": bool(run.get("chat_enabled")),
-                "workspace_warning": run.get("checkpoint_error", ""),
-                "slack_source": self.store.slack_source(run_id),
-                "slack_thread_chat": bool(self.store.rows("SELECT 1 FROM slack_threads WHERE run_id=?", (run_id,))) if self.settings.slack_thread_chat_enabled else False,
-                "history_fallback": [{"role": m["role"], "content": (f"[Prior {m['status']} message; context only, do not replay] " if m["role"] == "user" and m["status"] != "completed" else "") + m["content"]} for m in self.store.messages(run_id)
-                                     if m["id"] < run.get("message_id", 0) and m["status"] not in {"queued", "running"}]}
+        spec = self.spec(run)
         # Restored snapshots can contain an older adapter; refresh only our own
         # runner files, preserving all user workspace files and agent history.
         if run.get("snapshot_id"):

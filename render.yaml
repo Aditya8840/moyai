@@ -30,5 +30,15 @@ services:
         value: "0"
       - key: SANDBOX_ROTATION_SECONDS
         value: "82800"
+      # Opt-in after namespace credentials are installed and legacy runs drain.
+      # The Temporal worker shares this service's disk; keep numInstances: 1.
+      - key: TEMPORAL_ENABLED
+        value: "false"
+      - key: TEMPORAL_TLS
+        value: "true"
+      - key: TEMPORAL_TASK_QUEUE
+        value: moyai-sessions-v1
+      - key: TEMPORAL_CHECKPOINT_SECONDS
+        value: "600"
       # Import existing secrets privately in the Render dashboard. Never regenerate
       # ENCRYPTION_KEY or saved organization connections cannot be decrypted.

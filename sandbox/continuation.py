@@ -5,10 +5,16 @@ import time
 class RotationDeadline:
     def __init__(self, seconds, clock=time.monotonic):
         self.clock = clock
-        self.deadline = clock() + seconds if seconds else None
+        self.seconds = seconds
+        self.deadline = None
         self.requested = False
 
     def step(self, agent):
+        # Image/agent startup is not work. Always allow the first round before
+        # considering a checkpoint, even when initialization was unusually slow.
+        if self.seconds and self.deadline is None:
+            self.deadline = self.clock() + self.seconds
+            return
         # Hermes invokes step_callback before the next request with no tools
         # in flight. Never interrupt a running tool to rotate the machine.
         if not self.requested and self.deadline is not None and self.clock() >= self.deadline:
