@@ -2,7 +2,7 @@
 
 A working MVP of an internal Devin-style workspace: assign tasks in a browser, run Nous Research's Hermes Agent in an isolated Modal sandbox, and connect Linear, Slack, and Notion.
 
-**Cloud workspace:** [Open Moyai Devin](https://moyai-devin.onrender.com), hosted on **Render**; Hermes sandboxes and filesystem snapshots run in the **litellm** Modal workspace. Sign in with your **@berri.ai Google Workspace account**. Shared-password login is disabled. Secrets remain private in Render and the ignored local `.env` file.
+**Cloud workspace:** [Open Moyai Devin](https://moyai-devin-litellm.onrender.com), hosted in **Organization for Litellm → Litellm** on Render; Hermes sandboxes and filesystem snapshots run under **hermes-workspace** in the **litellm** Modal workspace. Sign in with your **@berri.ai Google Workspace account**. Shared-password login is disabled. Secrets remain private in Render and ignored local environment files. Historical links below use the old origin; their session IDs are preserved on the new origin.
 
 **Initial Slack verification:** a real @Moyai Devin mention in [#bot-spam](https://berriaillm.slack.com/archives/C0B302ZJU05/p1790720764864289) created exactly one cloud run and returned a protected link on the original Modal deployment. The agent answered `Ready`, used no connected-app tools, and its sandbox was terminated. The new chat continuation path is described below.
 
@@ -22,7 +22,7 @@ A separate deterministic runtime check also passed: the real Hermes conversation
 
 **Live migration verified September 29, 2026:** all 12 existing sessions, 14 messages, three organization connections, saved filesystem snapshot IDs, Slack source context, and 10 byte-identical result archives moved to Render. All three provider health checks passed. The existing continuity chat resumed on a new Modal sandbox and recovered “blue lantern” and file value `12`. A real [#bot-spam thread mention](https://berriaillm.slack.com/archives/C0B302ZJU05/p1790733863830609?thread_ts=1790733854.157109&cid=C0B302ZJU05) created [a Render session](https://moyai-devin.onrender.com/#run=b371989dcc8842fdad936f5784beec7f), automatically read two source messages, and answered the marker `river-stone-73`. No external writes were requested. Both sandboxes terminated. The old Modal web deployment is stopped; its Volume remains a frozen migration backup. Existing workspace passwords are unchanged. A second Render deployment, with bootstrap disabled, preserved all 13 current sessions, 18 messages, 11 archive checksums, saved snapshots, and organization connections. Unauthenticated APIs still returned 401, and no Modal sandbox remained running.
 
-`render.yaml` defines one Render Starter Python web service in Oregon with a 1 GB persistent disk. Render hosts the browser UI, encrypted app connections, Slack webhook, SQLite history, and approval broker. Agent machines, filesystem snapshots, and Chromium still run in Modal. Service automatic deploys and Blueprint automatic synchronization are disabled because deployments interrupt active chat turns; check for active sessions before deploying. Manually sync the Blueprint after reviewing configuration changes, then deploy the intended commit. Keep one web instance. Render's disk forces stop-before-start deployments, preserving the single-writer database requirement.
+`render.yaml` defines the company Render Python service in Oregon with 1 CPU / 2 GB memory and a 1 GB persistent disk ($25.25/month base plus usage). Render hosts the browser UI, encrypted app connections, Slack webhook, SQLite history, and approval broker. Agent machines, filesystem snapshots, and Chromium still run in Modal. Service automatic deploys and Blueprint automatic synchronization are disabled because deployments interrupt active chat turns; check for active sessions before deploying. Manually sync the Blueprint after reviewing configuration changes, then deploy the intended commit. Keep one web instance. Render's disk forces stop-before-start deployments, preserving the single-writer database requirement.
 
 The deployed Blueprint sets `RENDER_MIGRATION_STAGE=false` and leaves `BOOTSTRAP_MODAL_VOLUME` empty now that the import is complete. For a fresh migration, `render_start.py` defaults to staging mode unless explicitly configured. The health endpoint is available, but sessions and Slack events are refused until cutover. Configure the existing environment secrets privately in Render; preserve `ENCRYPTION_KEY`, both workspace passwords, and `SESSION_SECRET`. `PUBLIC_URL` comes from Render's own `RENDER_EXTERNAL_URL`; Modal proxy rewriting and Modal Volume checkpoint writes are disabled on Render.
 
@@ -50,7 +50,7 @@ Use exactly **one server process**. The MVP owns its job queue and runner in tha
 
 **Live and verified September 29, 2026:** Google-only sign-in is enabled. A real `tin@berri.ai` login reached the existing workspace as an administrator; all 14 saved chats and three organization connections were retained. The previous password and previously issued password sessions were verified to return no access. The dedicated Internal OAuth app is in BerriAI’s `protean-chassis-510202-k5` project. The 74 automated tests pass.
 
-Moyai supports Google OpenID Connect login restricted to configured Google Workspace domains. Create an **Internal** OAuth app in BerriAI’s Google Cloud organization, then a **Web application** client with the exact redirect URI `https://moyai-devin.onrender.com/auth/google/callback`. Configure `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_ALLOWED_DOMAINS=berri.ai`, and `GOOGLE_ADMIN_EMAILS=tin@berri.ai` privately on Render. Additional administrator emails are comma-separated. Other verified BerriAI identities become members and use the existing shared connections without individual provider authorization.
+Moyai supports Google OpenID Connect login restricted to configured Google Workspace domains. Create an **Internal** OAuth app in BerriAI’s Google Cloud organization, then a **Web application** client with the exact redirect URI `https://moyai-devin-litellm.onrender.com/auth/google/callback`. Configure `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_ALLOWED_DOMAINS=berri.ai`, and `GOOGLE_ADMIN_EMAILS=tin@berri.ai` privately on Render. Additional administrator emails are comma-separated. Other verified BerriAI identities become members and use the existing shared connections without individual provider authorization.
 
 Keep `PASSWORD_LOGIN_ENABLED=true` for initial setup. After a real Google administrator login succeeds, set it to `false` and redeploy; this disables password login and invalidates existing password sessions. Preserve `SESSION_SECRET` and `ENCRYPTION_KEY` and existing data during the change. Domain, OAuth client, and administrator-policy changes are checked on subsequent requests. Google sessions last at most 12 hours; Google account suspension is checked on the next Google authentication, not through directory synchronization.
 
@@ -451,3 +451,83 @@ A second production restart with no active tasks verified that the updated web
 chat showed "Reconnecting", recovered without a page reload, and preserved an
 unsent draft. The Render Blueprint now also keeps `TEMPORAL_ENABLED=true`,
 matching the verified production configuration.
+
+## Parallel agents and demand-based capacity
+
+**Live acceptance (September 30, 2026):** [session ae775702](https://moyai-devin-litellm.onrender.com/#run=ae7757023de546dca13a68cc440fce37) split 100 deterministic cases across five real Hermes/Modal workers, 20 cases each. All workers inherited the parent's marker file. Modal confirmed the first parent sandbox terminated while children worked; the coordinator resumed in a new sandbox, collected the five JSON artifacts, and validated 100 unique correct results (sum of squares 338,350). All five workers succeeded; all seven sandboxes used by the initial coordinator, five workers, and resumed coordinator terminated. Independent archive validation passed. All 34 model requests were priced, totaling $0.9373235, attributed once to the initiating Google user. This verifies real fanout/fanin and filesystem continuity, not a 100-container load test.
+
+The same rollout moved 27 existing sessions, 13 user profiles, all three encrypted organization connections, and 25 result archives into **Organization for Litellm → Litellm** on Render. Google SSO and all three provider health checks passed on the new origin. Slack's verified event endpoint and Slack/Notion OAuth callback configuration use the new origin. The existing gateway key and spend ledger were preserved. A follow-up in the existing #bot-spam thread restored its prior marker and file value `24` and posted one answer with a link to the new origin.
+
+`MAX_CONCURRENT_RUNS=100` is a workspace-wide ceiling on executing sandboxes,
+including delegated workers. It does not pre-provision 100 machines. Ten
+executing agents need about ten sandboxes; idle conversations need none. Each
+completed response saves its filesystem and terminates its machine. A follow-up
+restores a new sandbox from the snapshot. Provisioning/cleanup and Modal quotas
+can temporarily change the observed count; capacity above the ceiling queues.
+`MAX_PENDING_RUNS=1000` bounds the combined active/queued inbox. Modal CPU,
+memory, concurrency and account quotas still apply; the app setting is not a
+reservation of provider capacity. Each sandbox currently requests 2 CPU/4 GiB.
+
+With Temporal enabled, a top-level chat can use `agents_fanout` to supply either
+explicit labeled assignments or common instructions plus an ordered list of
+items. The server divides items into balanced contiguous partitions and assigns
+each a stable one-based index. For example, 100 items with `workers=5` creates
+five workers with exactly 20 cases each. Repeated launch calls with the same
+`request_key` and original turn reuse the same group; changing its arguments
+requires a new key. Each child inherits the initiating message's user, selected
+model, repository and enabled app set, and receives an isolated snapshot of the
+parent's current files. Finish file writes before delegating. Child conversations
+start fresh; child changes are not automatically merged. Workers cannot launch
+further children. Connected-app write approvals remain mandatory.
+
+After the delegation tool completes, the coordinator checkpoints between tool
+rounds, terminates its sandbox and waits durably. Its original user message stays
+open. Once every child has settled (including failures), it reacquires capacity,
+restores its checkpoint and continues the same request with the worker reports.
+This works even with only one available sandbox slot. Each child is an ordinary
+Temporal `SessionWorkflow`; parent/group relationships and result data are stored
+in SQLite rather than as large Temporal history payloads. A waiting parent uses
+no Modal sandbox. It currently checks completion using a five-second Temporal
+timer; this is a workflow-history cost, not sandbox idle time.
+
+`agents_results` retrieves answers/statuses, and `agents_read_artifact` lists or
+reads a bounded UTF-8 file from a child's recovery archive (128 KiB per read).
+Workers should save structured case results under `/workspace`; the parent can
+read and merge them into its own final result. Failure is not success or a zero
+cost. `agents_retry` accepts explicit recovery instructions for failed workers;
+it does not blindly replay uncertain external actions. Stopping a parent stops
+its unfinished workers. The chat shows worker progress, links, downloads and,
+for admins, combined current-key model spend. Every request remains one ledger
+row tied to the initiating teammate, so parent rollups do not double count
+organization totals. Only the parent session mirrors its final answer to Slack.
+
+The Render process still hosts one shared Temporal worker and SQLite disk.
+`max_concurrent_activities` scales with the sandbox ceiling, but this does not
+horizontally autoscale Render workers. Running multiple control-plane replicas
+requires a shared database and artifact store first. Model response buffering is
+separately bounded by `MAX_CONCURRENT_MODEL_REQUESTS=32` on the deployed 1 CPU /
+2 GB Render instance (the local default remains 8); other agents can continue running sandbox commands while model calls
+queue. The worker pool size and Modal sandbox count are separate concepts.
+Queued model calls retry in the sandbox only after an explicit unbilled
+admission response; each attempt refreshes its short-lived transport envelope.
+Gateway errors and uncertain network failures are not retried by this queue.
+Worker chats are inspectable, but instructions and retries go through the parent
+so manual follow-ups cannot replace a worker's result while it is being gathered.
+
+### Framework choice
+
+Hermes remains the agent runtime. Its native delegation uses an in-process
+thread pool; Moyai's added coordination handles independent Modal sessions,
+durable waiting, capacity, identity and artifact collection. OpenAI's Agents SDK
+supports manager-style agents-as-tools and beta Modal sandbox clients; CrewAI
+supports hierarchical managers and checkpointing. Either is an alternative
+runtime, but adopting one still requires the Moyai-specific persistence,
+authorization and accounting contract. This feature does not stack these
+frameworks or replace the existing Hermes conversation format.
+
+Validation includes 100-slot admission (101st queues), disjoint 100/5 partitioning,
+idempotent launch/retry, parent suspension with a one-slot limit, user attribution,
+artifact access boundaries, cancellation, and a real Temporal dev-server worker
+restart with five concurrently active simulated Modal workers. This is not a
+100-sandbox production load test; verify provider quotas and control-plane memory
+before sustained use at that scale.
