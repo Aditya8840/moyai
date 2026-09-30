@@ -1,6 +1,6 @@
 const $ = (s) => document.querySelector(s);
 const esc = (s = '') => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state = {view:'tasks', runs:[], config:{missing:[]}, connections:[], organization:{}, role:'member', selected:null, source:null, csrf:'', drafts:{}, pendingMessages:{}};
+const state = {view:'tasks', runs:[], config:{missing:[]}, connections:[], organization:{}, role:'member', selected:null, source:null, csrf:'', drafts:{}, pendingMessages:{}, pageVersion:0, newDraft:{}, detailsOpen:false, sending:new Set()};
 const terminal = new Set(['completed','failed','cancelled','interrupted','idle']);
 const providerNames = {linear:'Linear', slack:'Slack', notion:'Notion'};
 async function api(path, options = {}) {
@@ -13,35 +13,63 @@ function toast(message) { $('#toast').textContent = message; $('#toast').hidden 
 function statusLabel(status) { return `<span class="status ${esc(status)}">${esc(status==='idle'?'Ready':status.replaceAll('_',' '))}</span>`; }
 function relative(date) { const min = Math.max(0, Math.floor((Date.now() - new Date(date)) / 60000)); return min < 1 ? 'Just now' : min < 60 ? `${min}m ago` : min < 1440 ? `${Math.floor(min/60)}h ago` : new Date(date).toLocaleDateString(); }
 function stopStream(){ state.source?.close(); state.source = null; }
-async function navigate(view) {
-  stopStream(); state.view=view; state.selected=null;
-  document.querySelectorAll('.nav-button').forEach(b => b.classList.toggle('active', b.dataset.view===view));
-  $('#page-title').textContent = {tasks:'Sessions',connections:'Organization / Connections',runtime:'Runtime'}[view];
-  history.replaceState(null,'',view==='tasks'?'#tasks':'#'+view);
-  if(view==='tasks') await renderHome(); else if(view==='connections') await renderConnections(); else await renderRuntime();
+function sessionTitle(run){return run.prompt.split('\n')[0].replace(/\s+/g,' ').trim();}
+function modelName(){return (state.config.model||'Hermes Agent').split('/').at(-1).replace(/^gpt-/,'GPT-').replace(/-astra$/,' Astra');}
+function setSidebar(open){document.body.classList.toggle('sidebar-open',open);$('#sidebar-scrim').hidden=!open;$('#open-sidebar').setAttribute('aria-expanded',String(open));$('#sidebar').inert=matchMedia('(max-width:850px)').matches&&!open;if(open)$('#session-search').focus();}
+function renderSidebar(){
+  const search=($('#session-search').value||'').toLowerCase();
+  const runs=state.runs.filter(r=>r.prompt.toLowerCase().includes(search));
+  $('#task-count').textContent=state.runs.length;
+  $('#workspace-name').textContent=state.organization.name||'Workspace';
+  $('.avatar').textContent=(state.organization.name||'W')[0];
+  $('#session-list').innerHTML=runs.length?runs.map(r=>`<button class="session-link ${state.selected===r.id?'selected':''}" data-run="${r.id}" ${state.selected===r.id?'aria-current="page"':''} title="${esc(sessionTitle(r))}"><span class="session-dot ${esc(r.status)}" aria-label="${esc(r.status==='idle'?'Ready':r.status)}"></span><span class="session-link-body"><span class="session-link-title">${esc(sessionTitle(r))}</span><small>${relative(r.updated_at||r.created_at)}${r.mode==='demo'?' · Demo':''}</small></span></button>`).join(''):`<p class="sidebar-empty">${search?'No matching sessions.':'Your conversations will appear here.'}</p>`;
 }
-async function refreshRuns(){ state.runs=await api('/api/runs'); $('#task-count').textContent=state.runs.length; }
+function setView(view,title){
+  document.body.classList.toggle('chat-view',view==='chat');
+  document.body.classList.toggle('home-view',view==='tasks');
+  document.querySelectorAll('.nav-button').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
+  $('#page-title').textContent=title;
+  $('#header-actions').innerHTML='<span class="environment">Your team’s agent</span>';
+  setSidebar(false);renderSidebar();
+}
+function autoSize(input){input.style.height='auto';input.style.height=Math.min(input.scrollHeight,200)+'px';}
+function bindComposer(input,form){
+  input.addEventListener('input',()=>autoSize(input));
+  input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();if(!form.querySelector('[type="submit"]').disabled)form.requestSubmit();}});
+  autoSize(input);
+}
+async function navigate(view) {
+  stopStream();state.pageVersion++;state.view=view;state.selected=null;
+  setView(view,{tasks:'New session',connections:'Connections',runtime:'Runtime'}[view]);
+  history.replaceState(null,'',view==='tasks'?'#tasks':'#'+view);
+  if(view==='tasks')await renderHome();else if(view==='connections')await renderConnections();else await renderRuntime();
+}
+async function refreshRuns(){state.runs=await api('/api/runs');renderSidebar();}
 async function renderHome(){
-  await refreshRuns(); state.connections=await api('/api/connections');
-  $('#content').innerHTML=`<div class="page-heading"><div><div class="eyebrow">YOUR AGENT WORKSPACE</div><h1>What should we work on?</h1><p class="subtext">Start a conversation with Moyai Devin. Follow the work and send the next step.</p></div></div>
-  <form id="task-form" class="composer"><textarea id="prompt" name="prompt" aria-label="Task instructions" placeholder="Describe a task, paste an issue, or ask a question…" required minlength="3" maxlength="16000"></textarea><div class="compose-options"><input class="repo-input" id="repo" type="url" aria-label="Public GitHub repository URL" placeholder="＋ Public GitHub repository (optional)"><select id="mode" aria-label="Execution mode"><option value="demo">Demo run</option><option value="modal" ${state.config.cloud_ready?'selected':'disabled'}>Cloud session</option></select><button class="primary" type="submit">Start session</button></div><div class="compose-disclosure"><span id="mode-note">${state.config.cloud_ready?'Cloud mode · a real isolated machine for this task':'Demo mode · simulated activity, no AI or sandbox usage'}</span><div id="plugin-options"></div></div></form>
-  <div class="suggestions"><button data-prompt="Find the cause of a failing test and propose a fix. Run the relevant tests and summarize what changed.">Investigate a failing test</button><button data-prompt="Read the repository and explain its architecture, entry points, and test setup. Make no changes.">Explore a repository</button><button data-prompt="Review recent issues and related team context. Summarize the evidence and propose next steps.">Research an issue</button></div>
-  <div class="section-header"><h2>Recent sessions</h2><small>${state.runs.length} ${state.runs.length===1?'session':'sessions'}</small></div><div class="task-table">${state.runs.length?state.runs.map(r=>`<button class="task-row" data-run="${r.id}"><span><span class="task-title">${esc(r.prompt.split('\n')[0])}</span><span class="task-meta">${r.repo_url?esc(r.repo_url.replace('https://github.com/','')):'Independent workspace'}</span></span>${statusLabel(r.status)}<small>${r.mode==='demo'?'Demo':'Modal'}</small><small>${relative(r.created_at)}</small></button>`).join(''):'<div class="empty"><div class="empty-icon">▤</div><h3>A workspace for your next task</h3><p>Start a demo above to try the full workflow.</p></div>'}</div>
-  <div class="home-footer"><span>Hermes Agent</span><span>Isolated Modal sandboxes</span><a href="#connections" id="connect-link">Connect your team’s apps</a></div>`;
-  $('#task-form').onsubmit=submitTask;
-  $('#plugin-options').innerHTML='<span title="Shared organization connections. Uncheck an app to exclude it from this task.">Connected apps for this task</span>'+state.connections.filter(c=>c.connected&&c.enabled).map(c=>`<label class="plugin-toggle"><input type="checkbox" name="plugin" value="${c.id}" checked>${providerNames[c.id]}</label>`).join('');
-  $('#mode').onchange=()=>{ $('#mode-note').textContent=$('#mode').value==='demo'?'Demo mode · simulated activity, no AI or sandbox usage':'Cloud mode · a real isolated machine for this task'; };
-  document.querySelectorAll('[data-prompt]').forEach(b=>b.onclick=()=>{$('#prompt').value=b.dataset.prompt;$('#prompt').focus();});
-  document.querySelectorAll('[data-run]').forEach(b=>b.onclick=()=>openRun(b.dataset.run));
-  $('#connect-link').onclick=e=>{e.preventDefault();navigate('connections').catch(showError);};
+  const version=state.pageVersion;
+  const [,connections]=await Promise.all([refreshRuns(),api('/api/connections')]);
+  if(version!==state.pageVersion)return;state.connections=connections;
+  const apps=connections.filter(c=>c.connected&&c.enabled),draft=state.newDraft;
+  $('#content').innerHTML=`<section class="new-conversation"><div class="welcome-mark"><img src="/static/favicon.svg" alt=""><span>Moyai Devin</span></div><h1>What are we working on?</h1><p class="welcome-note">A teammate for your code, questions, and next steps.</p>
+    <form id="task-form" class="composer"><textarea id="prompt" name="prompt" aria-label="Message Moyai Devin" placeholder="Ask Moyai to build, investigate, or pick up a thread…" required minlength="3" maxlength="16000" rows="3"></textarea><div class="composer-toolbar"><details class="task-options"><summary aria-label="Session options"><span aria-hidden="true">＋</span> Context & tools</summary><div class="task-settings"><div class="field"><label for="repo">Public GitHub repository</label><input id="repo" type="url" placeholder="https://github.com/owner/repo" value="${esc(draft.repo||'')}"></div><div class="field"><label for="mode">Execution</label><select id="mode"><option value="modal" ${state.config.cloud_ready?'':'disabled'}>Cloud session</option><option value="demo" ${state.config.cloud_ready?'':'selected'}>Demo · simulated</option></select></div><div id="plugin-options"><span>Organization connections</span>${apps.map(c=>`<label class="plugin-toggle"><input type="checkbox" name="plugin" value="${c.id}" ${!draft.plugins||draft.plugins.includes(c.id)?'checked':''}>${providerNames[c.id]}</label>`).join('')||'<small>Connect apps in organization settings.</small>'}</div></div></details><span class="composer-model">${esc(modelName())}</span><button class="send-button" type="submit" aria-label="Start session" title="Start session"><span aria-hidden="true">↑</span></button></div></form>
+    <div class="composer-caption"><span id="mode-note">${state.config.cloud_ready?'Your own cloud workspace':'Demo mode · no AI or cloud usage'}</span><span>Enter to send · Shift + Enter for a new line</span></div>
+    <div class="suggestions"><button type="button" data-prompt="Help me investigate a bug. "><span aria-hidden="true">⌘</span> Investigate a bug</button><button type="button" data-prompt="Read the repository and explain how it works. Make no changes. "><span aria-hidden="true">⌑</span> Explore a codebase</button><button type="button" data-prompt="Find the team context for "><span aria-hidden="true">⌕</span> Find team context</button></div><p class="connected-note">${apps.length?`<span class="connected-dot"></span>${apps.map(c=>providerNames[c.id]).join(', ')} connected`:'Add your team’s apps in Connections'}</p></section>`;
+  $('#prompt').value=draft.prompt||'';
+  if(draft.mode&&($('#mode option[value="'+draft.mode+'"]').disabled===false))$('#mode').value=draft.mode;
+  const saveDraft=()=>{state.newDraft={prompt:$('#prompt').value,repo:$('#repo').value,mode:$('#mode').value,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value)};};
+  $('#task-form').oninput=saveDraft;$('#task-form').onchange=saveDraft;$('#task-form').onsubmit=submitTask;
+  $('#mode').addEventListener('change',()=>{$('#mode-note').textContent=$('#mode').value==='demo'?'Demo mode · no AI or cloud usage':'Your own cloud workspace';});
+  $('#mode').dispatchEvent(new Event('change'));
+  bindComposer($('#prompt'),$('#task-form'));
+  document.querySelectorAll('[data-prompt]').forEach(b=>b.onclick=()=>{$('#prompt').value=b.dataset.prompt;saveDraft();autoSize($('#prompt'));$('#prompt').focus();});
 }
 async function submitTask(e){
   e.preventDefault();const button=$('#task-form button[type="submit"]'); button.disabled=true;
-  try{ const run=await api('/api/runs',{method:'POST',body:JSON.stringify({prompt:$('#prompt').value,repo_url:$('#repo').value,mode:$('#mode').value,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value)})});await refreshRuns();await openRun(run.id); }
+  try{ const run=await api('/api/runs',{method:'POST',body:JSON.stringify({prompt:$('#prompt').value,repo_url:$('#repo').value,mode:$('#mode').value,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value)})});state.newDraft={};await refreshRuns();await openRun(run.id); }
   catch(error){toast(error.message);button.disabled=false;}
 }
 async function openRun(id){
-  stopStream();const run=await api(`/api/runs/${id}`);state.selected=id;state.view='tasks';$('#page-title').textContent='Tasks / Activity';history.replaceState(null,'','#run='+id);
+  stopStream();const version=++state.pageVersion;state.selected=id;const run=await api(`/api/runs/${id}`);if(version!==state.pageVersion)return;state.view='tasks';setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));history.replaceState(null,'','#run='+id);
   if(run.chat_enabled){renderChat(run);return;}
   $('#content').innerHTML=`<button class="back-button" id="back">‹ All tasks</button><div class="page-heading"><div><div class="eyebrow">${run.mode==='demo'?'DEMO WORKSPACE':'CLOUD WORKSPACE'}</div><h1>Task activity</h1></div><div class="toolbar">${terminal.has(run.status) && !run.active?'<button id="retry" class="small">Run again</button>':'<button id="cancel" class="small danger">Stop task</button>'}</div></div>
   <div class="task-layout"><section class="task-main"><div class="task-intro"><span class="badge">${run.mode==='demo'?'Demo':'Hermes Agent'}</span><p class="prompt">${esc(run.prompt)}</p></div><div class="task-tabs"><span>Activity</span></div><div class="timeline" id="timeline">${run.events.map(eventHTML).join('')}</div><div id="approvals"></div><div id="artifact-area"></div></section><aside class="details"><div class="card"><h3>Run details</h3><div class="detail-row"><span>Status</span><span id="run-status">${statusLabel(run.status)}</span></div><div class="detail-row"><span>Execution</span><span>${run.mode==='demo'?'Simulated':'Modal sandbox'}</span></div><div class="detail-row"><span>Agent</span><span>${run.mode==='demo'?'Not started':'Hermes'}</span></div><div class="detail-row"><span>Repository</span><span>${run.repo_url?esc(run.repo_url.replace('https://github.com/','')):'None'}</span></div><div class="detail-row"><span>Connections</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None'}</span></div>${run.sandbox_id?`<div class="detail-row"><span>Sandbox</span><span>${esc(run.sandbox_id)}</span></div>`:''}</div><div class="note"><strong>${run.mode==='demo'?'A preview of the workflow':'An isolated workspace'}</strong>${run.mode==='demo'?'This run uses simulated events. No model, cloud machine, repository, or connected app is accessed.':'Moyai Devin works inside a dedicated Modal sandbox. Writes to connected apps require your approval.'}</div></aside></div>`;
@@ -58,60 +86,78 @@ async function openRun(id){
     source.onerror=()=>{if(source.readyState===EventSource.CLOSED)toast('Activity stream disconnected. Reopen this task to reconnect.');};
   }
 }
+function toggleDetails(open){
+  state.detailsOpen=open;
+  $('.chat-layout')?.classList.toggle('show-details',open);
+  if($('#session-details'))$('#session-details').hidden=!open;
+  $('#toggle-details')?.setAttribute('aria-expanded',String(open));
+}
 function renderChat(run){
   const id=run.id;
-  $('#page-title').textContent='Sessions / Chat';
-  $('#content').innerHTML=`<button class="back-button" id="back">‹ All sessions</button><div class="page-heading"><div><div class="eyebrow">${run.mode==='demo'?'DEMO SESSION':'CLOUD SESSION'}</div><h1 class="session-title">${esc(run.prompt.split('\n')[0])}</h1></div><button id="stop-response" class="small danger">Stop response</button></div>
-  <div class="chat-layout"><section class="chat-panel"><div class="conversation" id="conversation" role="log" aria-label="Conversation" aria-live="polite"></div><div id="approvals"></div><div class="chat-working" id="chat-working" role="status"></div><form id="message-form" class="reply-composer"><label for="followup">Message Moyai Devin</label><textarea id="followup" maxlength="16000" required placeholder="Ask a follow-up, add context, or give the next step…"></textarea><div class="reply-actions"><small id="queue-note">Your conversation and files stay with this session.</small><button type="submit" class="primary">Send message</button></div></form></section>
-  <aside class="session-side"><div class="card"><div class="section-header"><h3>Session</h3><span id="run-status"></span></div><div class="detail-row"><span>Apps</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None selected'}</span></div><div class="detail-row"><span>Workspace</span><span id="saved-workspace"></span></div><div id="artifact-area"></div><p class="session-help">Send a message any time. Follow-ups wait for the current response to finish. External writes need administrator approval.</p></div><div id="slack-context"></div><details class="card activity-panel" open><summary>Live progress</summary><div class="timeline" id="timeline">${run.events.filter(e=>!['chat','result'].includes(e.kind)).map(eventHTML).join('')}</div></details></aside></div>`;
-  $('#back').onclick=()=>navigate('tasks').catch(showError);
+  $('#header-actions').innerHTML=`<span id="run-status"></span><button id="toggle-details" class="quiet details-toggle" aria-expanded="false" aria-controls="session-details"><span aria-hidden="true">☷</span> Activity</button>`;
+  $('#content').innerHTML=`<div class="chat-layout"><section class="chat-panel"><div class="conversation" id="conversation" role="log" aria-label="Conversation" aria-live="polite"></div><button id="jump-latest" class="jump-latest" hidden>↓ Latest message</button><div class="chat-bottom"><div id="approvals"></div><div class="chat-working" id="chat-working" role="status"></div><form id="message-form" class="composer reply-composer"><label class="sr-only" for="followup">Message Moyai Devin</label><textarea id="followup" maxlength="16000" required rows="1" placeholder="Ask a follow-up or give the next step…"></textarea><div class="composer-toolbar"><span class="composer-model">${esc(run.mode==='demo'?'Demo session':modelName())}</span><span id="connection-state" class="connection-notice" hidden>Reconnecting…</span><button id="stop-response" class="stop-button" type="button" aria-label="Stop response" title="Stop response"><span aria-hidden="true">■</span></button><button type="submit" class="send-button" aria-label="Send message" title="Send message"><span aria-hidden="true">↑</span></button></div></form><div class="composer-caption"><span id="queue-note">Your conversation and files stay here.</span><span>Shift + Enter for a new line</span></div></div></section>
+  <aside class="session-side" id="session-details" aria-label="Session details" hidden><div class="details-heading"><h2>Session activity</h2><button id="close-details" class="icon-button" aria-label="Close session details">×</button></div><div class="session-facts"><div class="detail-row"><span>Connected apps</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None selected'}</span></div><div class="detail-row"><span>Workspace</span><span id="saved-workspace"></span></div><div id="artifact-area"></div></div><div id="slack-context"></div><section class="activity-panel"><h3>Progress</h3><div class="timeline" id="timeline">${run.events.filter(e=>!['chat','result'].includes(e.kind)).map(eventHTML).join('')}</div></section></aside></div>`;
+  $('#toggle-details').onclick=()=>toggleDetails(!state.detailsOpen);$('#close-details').onclick=()=>toggleDetails(false);toggleDetails(state.detailsOpen);
   $('#followup').value=state.drafts[id]||'';
   $('#followup').oninput=()=>{state.drafts[id]=$('#followup').value;};
-  $('#followup').onkeydown=e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){e.preventDefault();$('#message-form').requestSubmit();}};
+  bindComposer($('#followup'),$('#message-form'));
+  const bottom=()=>{const box=$('#conversation');box.scrollTop=box.scrollHeight;};
+  $('#jump-latest').onclick=bottom;
+  $('#conversation').onscroll=()=>{const box=$('#conversation');$('#jump-latest').hidden=box.scrollHeight-box.scrollTop-box.clientHeight<120;};
   $('#stop-response').onclick=async()=>{try{await api(`/api/runs/${id}/cancel`,{method:'POST'});await refreshChat(id);}catch(e){toast(e.message);}};
   $('#message-form').onsubmit=async e=>{
-    e.preventDefault();const content=$('#followup').value.trim();if(!content)return;
-    const button=$('#message-form button');button.disabled=true;
+    e.preventDefault();const content=$('#followup').value.trim();if(!content||state.sending.has(id))return;
+    const button=$('#message-form [type="submit"]');button.disabled=true;state.sending.add(id);
     let pending=state.pendingMessages[id];if(!pending||pending.content!==content)pending=state.pendingMessages[id]={content,client_id:crypto.randomUUID()};
-    try{await api(`/api/runs/${id}/messages`,{method:'POST',body:JSON.stringify(pending)});delete state.pendingMessages[id];if(state.selected===id&&$('#followup').value.trim()===content){$('#followup').value='';state.drafts[id]='';}await refreshChat(id);}
-    catch(error){toast(error.message);}finally{if(state.selected===id)button.disabled=false;}
+    try{await api(`/api/runs/${id}/messages`,{method:'POST',body:JSON.stringify(pending)});delete state.pendingMessages[id];if(state.drafts[id]?.trim()===content)state.drafts[id]='';if(state.selected===id&&$('#followup')?.value.trim()===content){$('#followup').value='';autoSize($('#followup'));}await refreshChat(id);if(state.selected===id)bottom();}
+    catch(error){toast(error.message);}finally{state.sending.delete(id);if(state.selected===id&&$('#message-form'))$('#message-form [type="submit"]').disabled=false;}
   };
   updateChat(run,true);
   const source=new EventSource(`/api/runs/${id}/events?after=${run.events.at(-1)?.id||0}`);state.source=source;
+  source.onopen=()=>{if(state.selected===id){$('#connection-state').hidden=true;refreshChat(id).catch(showError);}};
   source.onmessage=e=>{if(state.selected!==id)return;const event=JSON.parse(e.data);if(!['chat','result'].includes(event.kind))$('#timeline').insertAdjacentHTML('beforeend',eventHTML(event));if(['chat','approval','artifact','context'].includes(event.kind))refreshChat(id).catch(showError);};
-  source.addEventListener('run-status',e=>{if(state.selected===id)updateChatStatus(JSON.parse(e.data));});
-  source.onerror=()=>{if(state.selected===id)$('#chat-working').textContent='Reconnecting to live progress…';};
+  source.addEventListener('run-status',e=>{if(state.selected===id){$('#connection-state').hidden=true;updateChatStatus(JSON.parse(e.data));}});
+  source.onerror=()=>{if(state.selected===id&&$('#connection-state'))$('#connection-state').hidden=false;};
 }
 function updateChatStatus(run){
   $('#run-status').innerHTML=statusLabel(run.status);
   const busy=!terminal.has(run.status)||run.active;
-  $('#stop-response').hidden=!busy;
-  $('#stop-response').disabled=run.status==='stopping';
-  $('#queue-note').textContent=busy?'Follow-ups will run after the current response.':'Your conversation and files stay with this session.';
-  $('#chat-working').textContent=({idle:'Ready for your next message',queued:'Waiting to start…',provisioning:'Opening your cloud workspace…',running:'Moyai Devin is working…',saving:'Saving your conversation and workspace…',awaiting_approval:'Waiting for administrator approval',stopping:'Stopping the current response…',failed:'Response failed. You can send a follow-up.',cancelled:'Response stopped. You can continue from the last saved workspace.',interrupted:'Response interrupted. Send a new message to continue.'})[run.status]||'Finishing response…';
+  $('#stop-response').hidden=!busy;$('#stop-response').disabled=run.status==='stopping';
+  $('#queue-note').textContent=busy?'Follow-ups queue after this response.':'Your conversation and files stay here.';
+  $('#chat-working').classList.toggle('busy',busy);
+  $('#chat-working').textContent=({idle:'',queued:'Waiting to start…',provisioning:'Opening your workspace…',running:'Moyai is working…',saving:'Saving your work…',awaiting_approval:'Waiting for administrator approval',stopping:'Stopping…',failed:'Response failed. Send a follow-up to continue.',cancelled:'Response stopped. You can continue from here.',interrupted:'Response interrupted. Send a message to continue.'})[run.status]||'';
+  const item=state.runs.find(r=>r.id===state.selected);if(item&&item.status!==run.status){item.status=run.status;renderSidebar();}
 }
 function updateChat(run,initial=false){
-  const box=$('#conversation');const atBottom=initial||box.scrollHeight-box.scrollTop-box.clientHeight<80;
-  box.innerHTML=run.messages.map(m=>`<article class="chat-message ${m.role}"><div class="message-label">${m.role==='user'?'You':'Moyai Devin'}<small>${m.role==='user'&&m.status!=='completed'?esc(m.status):''}</small></div><div class="message-content">${esc(m.content)}</div></article>`).join('');
-  if(atBottom)box.scrollTop=box.scrollHeight;
-  updateChatStatus(run);renderApprovals(run.approvals||[]);
-  renderSlackContext(run.slack_source);
-  $('#saved-workspace').textContent=run.mode==='demo'?'Simulated':run.snapshot_id?'Saved for follow-ups':'Not saved yet';
-  $('#artifact-area').innerHTML=run.has_artifact?`<a class="session-download" href="/api/runs/${run.id}/artifact">Download latest files</a>`:'';
+  const box=$('#conversation');const atBottom=initial||box.scrollHeight-box.scrollTop-box.clientHeight<100;
+  const signature=JSON.stringify(run.messages);
+  if(box.dataset.messages!==signature){
+    box.dataset.messages=signature;
+    box.innerHTML=`<div class="conversation-inner">${run.messages.map(m=>`<article class="chat-message ${m.role==='user'?'user':'assistant'}"><div class="message-label">${m.role==='user'?'You':'<img src="/static/favicon.svg" alt="">Moyai Devin'}<small>${m.role==='user'&&m.status!=='completed'?esc(m.status):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.content):renderMarkdown(m.content)}</div>${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">⧉</button>`:''}</article>`).join('')}</div>`;
+    box.querySelectorAll('.copy-message').forEach(b=>b.onclick=()=>copyText(run.messages.find(m=>String(m.id)===b.dataset.message).content,b));
+    box.querySelectorAll('.copy-code').forEach(b=>b.onclick=()=>copyText(b.closest('.code-block').querySelector('code').textContent,b));
+    if(atBottom)box.scrollTop=box.scrollHeight;
+  }
+  $('#jump-latest').hidden=box.scrollHeight-box.scrollTop-box.clientHeight<120;
+  updateChatStatus(run);renderApprovals(run.approvals||[]);renderSlackContext(run.slack_source);
+  $('#saved-workspace').textContent=run.mode==='demo'?'Simulated':run.snapshot_id?'Saved for follow-ups':'Preparing';
+  $('#artifact-area').innerHTML=run.has_artifact?`<a class="session-download" href="/api/runs/${run.id}/artifact">↓ Download latest files</a>`:'';
+  $('#message-form [type="submit"]').disabled=state.sending.has(run.id);
 }
+async function copyText(text,button){try{await navigator.clipboard.writeText(text);const label=button.textContent;button.textContent='Copied';setTimeout(()=>button.textContent=label,1800);}catch{toast('Could not copy. You can select and copy the text.');}}
 function renderSlackContext(source){
-  const target=$('#slack-context');if(!target)return;
+  const target=$('#slack-context');if(!target)return;const signature=JSON.stringify(source);if(target.dataset.source===signature)return;target.dataset.source=signature;
   if(!source){target.innerHTML='';return;}
   const ready=source.context_status==='ready', messages=source.messages||[];
   const status=ready?`${messages.length} messages from the ${source.kind}`:({pending:'Waiting to read the conversation…',fetching:'Reading the conversation…',unavailable:'Conversation could not be read',legacy:'This session started before automatic Slack context'})[source.context_status]||'Context unavailable';
   target.innerHTML=`<section class="card source-context"><h3>Slack context</h3><p>${esc(status)}</p>${source.permalink?`<a href="${esc(source.permalink)}" target="_blank" rel="noopener noreferrer">Open source conversation ↗</a>`:''}${source.warning?`<p class="source-warning">${esc(source.warning)}</p>`:''}${ready?`<details><summary>View included messages</summary><div class="source-messages">${messages.map(m=>`<article><small>${esc(m.user)} · ${new Date(Number(m.ts)*1000).toLocaleString()}</small><p>${esc(m.text)}${m.text_truncated?'…':''}</p></article>`).join('')}</div></details>`:''}</section>`;
 }
-async function refreshChat(id){const run=await api(`/api/runs/${id}`);if(state.selected===id&&$('#conversation'))updateChat(run);}
+async function refreshChat(id){const version=state.chatRefresh=(state.chatRefresh||0)+1;const run=await api(`/api/runs/${id}`);if(version===state.chatRefresh&&state.selected===id&&$('#conversation'))updateChat(run);}
 function eventHTML(event){const stamp=new Date(event.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});const detail=event.data?.command||event.data?.detail;return `<div class="event event-${esc(event.kind)}"><span class="event-marker">${event.kind==='result'?'✓':event.kind==='tool'?'⌘':'·'}</span><div class="event-heading"><strong>${esc(event.message)}</strong><time>${stamp}</time></div>${detail?`<details class="event-detail"><summary>Details</summary><pre>${esc(typeof detail==='string'?detail:JSON.stringify(detail,null,2))}</pre></details>`:''}</div>`;}
 function renderApprovals(approvals){ if(!$('#approvals'))return;$('#approvals').innerHTML=approvals.filter(a=>a.status==='pending').map(a=>`<div class="approval"><h3>Approval needed: ${esc(a.tool)}</h3><pre>${esc(JSON.stringify(a.arguments,null,2))}</pre>${state.role==='admin'?`<div class="approval-actions"><button data-approval="${a.id}" data-decision="approve" class="primary small">Approve once</button><button data-approval="${a.id}" data-decision="deny" class="small">Deny</button></div>`:'<p>An organization administrator must approve this action.</p>'}</div>`).join('');document.querySelectorAll('[data-approval]').forEach(b=>b.onclick=async()=>{try{await api(`/api/approvals/${b.dataset.approval}`,{method:'POST',body:JSON.stringify({decision:b.dataset.decision})});await refreshApproval(state.selected);}catch(e){toast(e.message);}});}
 async function refreshApproval(id){if(state.selected!==id)return;const run=await api(`/api/runs/${id}`);if(state.selected===id){renderApprovals(run.approvals);$('#run-status').innerHTML=statusLabel(run.status);}}
 async function renderConnections(){
-  [state.connections,state.organization]=await Promise.all([api('/api/connections'),api('/api/organization')]);
+  const version=state.pageVersion;const [connections,organization]=await Promise.all([api('/api/connections'),api('/api/organization')]);if(version!==state.pageVersion)return;state.connections=connections;state.organization=organization;renderSidebar();
   const admin=state.role==='admin', org=state.organization, slack=org.slack_sessions;
   $('#content').innerHTML=`<div class="page-heading"><div><div class="eyebrow">${esc(org.name)} / ORGANIZATION SETTINGS</div><h1>Organization connections</h1><p class="subtext">Connect once. Share approved tools across your team's sessions.</p></div><span class="badge">${admin?'Administrator':'Member'}</span></div>
     <div class="org-summary"><div><strong>Shared with your organization</strong><p>Each session chooses which apps it uses. Credentials stay on the server.</p></div><span>${state.connections.filter(c=>c.connected).length} of 3 connected</span></div>
@@ -146,10 +192,14 @@ function connectionDialog(provider){
   if($('#oauth-connect'))$('#oauth-connect').onclick=async()=>{try{const result=await api('/api/connections/'+provider+'/oauth',{method:'POST'});window.location.assign(result.url);}catch(e){$('#connection-error').textContent=e.message;}};
   $('#connection-dialog').showModal();
 }
-async function renderRuntime(){state.config=await api('/api/config');const fields=['MODAL_TOKEN_ID','MODAL_TOKEN_SECRET','LITELLM_API_BASE','LITELLM_API_KEY','AGENT_MODEL',...state.config.missing.filter(x=>x.startsWith('PUBLIC_URL'))];$('#content').innerHTML=`<div class="page-heading"><div><div class="eyebrow">EXECUTION</div><h1>Runtime</h1><p class="subtext">One isolated workspace for every cloud task.</p></div><span class="badge">${state.config.cloud_ready?'Cloud ready':'Setup needed'}</span></div><div class="setup-grid"><div class="card"><h2>Modal + Hermes</h2><p class="subtext">Modal provides the machine. Hermes plans the work, uses tools, and returns the result.</p><ul class="config-list">${fields.map(key=>`<li><code>${key}</code><span class="${state.config.missing.includes(key)?'missing':'configured'}">${state.config.missing.includes(key)?'Not configured':'Configured'}</span></li>`).join('')}</ul></div><div class="card"><h2>Workspace settings</h2><div class="detail-row"><span>Concurrent tasks</span><span>${state.config.max_concurrent_runs}</span></div><div class="detail-row"><span>Time limit per run</span><span>${Math.round(state.config.run_timeout_seconds/60)} minutes</span></div><div class="detail-row"><span>Model</span><span>${esc(state.config.model||'Choose in .env')}</span></div><p class="subtext" style="margin-top:25px">Configure the missing values in the workspace’s .env file and restart the server. Cloud runs need a reachable HTTPS workspace address. Use a budget-limited LiteLLM key. See README.md for deployment and app setup.</p></div></div>`;}
+async function renderRuntime(){const version=state.pageVersion;const config=await api('/api/config');if(version!==state.pageVersion)return;state.config=config;const fields=['MODAL_TOKEN_ID','MODAL_TOKEN_SECRET','LITELLM_API_BASE','LITELLM_API_KEY','AGENT_MODEL',...state.config.missing.filter(x=>x.startsWith('PUBLIC_URL'))];$('#content').innerHTML=`<div class="page-heading"><div><div class="eyebrow">EXECUTION</div><h1>Runtime</h1><p class="subtext">One isolated workspace for every cloud task.</p></div><span class="badge">${state.config.cloud_ready?'Cloud ready':'Setup needed'}</span></div><div class="setup-grid"><div class="card"><h2>Modal + Hermes</h2><p class="subtext">Modal provides the machine. Hermes plans the work, uses tools, and returns the result.</p><ul class="config-list">${fields.map(key=>`<li><code>${key}</code><span class="${state.config.missing.includes(key)?'missing':'configured'}">${state.config.missing.includes(key)?'Not configured':'Configured'}</span></li>`).join('')}</ul></div><div class="card"><h2>Workspace settings</h2><div class="detail-row"><span>Concurrent tasks</span><span>${state.config.max_concurrent_runs}</span></div><div class="detail-row"><span>Time limit per run</span><span>${Math.round(state.config.run_timeout_seconds/60)} minutes</span></div><div class="detail-row"><span>Model</span><span>${esc(state.config.model||'Choose in .env')}</span></div><p class="subtext" style="margin-top:25px">Your administrator manages the cloud connection. Each response runs in an isolated workspace and saves its files for the next message.</p></div></div>`;}
 function showError(error){toast(error.message);}
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>navigate(b.dataset.view).catch(showError));
-$('#new-task').onclick=()=>navigate('tasks').then(()=>$('#prompt').focus()).catch(showError);
+$('#new-task').onclick=()=>navigate('tasks').then(()=>$('#prompt')?.focus()).catch(showError);
+$('#session-list').onclick=e=>{const button=e.target.closest('[data-run]');if(button)openRun(button.dataset.run).catch(showError);};
+$('#session-search').oninput=renderSidebar;
+$('#open-sidebar').onclick=()=>setSidebar(true);$('#close-sidebar').onclick=()=>setSidebar(false);$('#sidebar-scrim').onclick=()=>setSidebar(false);
+window.addEventListener('keydown',e=>{if(e.key==='Escape'){setSidebar(false);if(state.selected&&$('.chat-layout'))toggleDetails(false);}if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'&&state.csrf){e.preventDefault();$('#new-task').click();}});
 $('.dialog-close').onclick=()=>$('#connection-dialog').close();
 window.addEventListener('hashchange',()=>{
   if(!state.csrf)return;
@@ -158,7 +208,7 @@ window.addEventListener('hashchange',()=>{
 });
 async function boot(){
   try{
-    const session=await api('/api/session');state.csrf=session.csrf;state.role=session.role||'member';
+    const session=await api('/api/session');state.authenticated=session.authenticated;state.csrf=session.csrf;state.role=session.role||'member';
     $('.rail-foot small').textContent=session.local?'Private · local preview':'Shared internal workspace';
     if(!session.authenticated){
       $('#content').innerHTML='<div class="login"><div class="card"><h1>Welcome back</h1><p class="subtext">Sign in to Moyai Devin.</p><form id="login-form"><div class="field"><label for="password">Workspace password</label><input id="password" type="password" autocomplete="current-password" required></div><button class="primary full">Sign in</button></form></div></div>';
@@ -167,8 +217,8 @@ async function boot(){
       return;
     }
     document.querySelectorAll('.rail button').forEach(b=>b.disabled=false);
-    state.config=await api('/api/config');
-    if(!session.local){$('.rail-foot small').textContent=state.role==='admin'?'Organization admin':'Organization member';$('.rail-foot').insertAdjacentHTML('beforeend','<button id="logout" class="quiet" aria-label="Sign out">⏻</button>');$('#logout').onclick=async()=>{await api('/api/logout',{method:'POST'});location.reload();};}
+    [state.config,state.organization]=await Promise.all([api('/api/config'),api('/api/organization')]);await refreshRuns();
+    if(!session.local){$('.rail-foot small').textContent=state.role==='admin'?'Organization admin':'Organization member';$('#logout')?.remove();$('.rail-foot').insertAdjacentHTML('beforeend','<button id="logout" class="quiet" aria-label="Sign out">⏻</button>');$('#logout').onclick=async()=>{await api('/api/logout',{method:'POST'});location.reload();};}
     const linkedRun=location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]; if(linkedRun)await openRun(linkedRun);else await navigate(location.hash==='#connections'?'connections':location.hash==='#runtime'?'runtime':'tasks');
     if(new URLSearchParams(location.search).get('connection')){toast(location.search.includes('success')?'App connected.':'Connection cancelled.');history.replaceState(null,'','/#connections');}
     registerWebMCP();
@@ -183,4 +233,6 @@ function registerWebMCP(){
   ];
   tools.forEach(tool=>{try{Promise.resolve(document.modelContext.registerTool(tool,{signal:abort.signal})).catch(()=>{});}catch{}});
 }
+matchMedia('(max-width:850px)').addEventListener('change',()=>setSidebar(false));
+setInterval(()=>{if(state.authenticated&&!document.hidden)refreshRuns().catch(()=>{});},15000);
 boot();

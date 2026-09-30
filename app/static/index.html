@@ -2,19 +2,24 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Moyai Devin works on tasks in the cloud, with your team's Linear, Slack, and Notion connected.">
-  <title>Moyai Devin</title><link rel="icon" href="/static/favicon.svg"><link rel="stylesheet" href="/static/style.css">
-  <script src="/static/app.js" defer></script>
+  <meta name="description" content="Chat with Moyai Devin. Work with your team's context in a cloud workspace.">
+  <title>Moyai Devin</title><link rel="icon" href="/static/favicon.svg"><link rel="stylesheet" href="/static/style.css?v=chat-2">
+  <script src="/static/vendor/marked.js" defer></script><script src="/static/vendor/purify.js" defer></script>
+  <script src="/static/markdown.js" defer></script><script src="/static/app.js?v=chat-2" defer></script>
 </head>
 <body>
-  <aside class="rail">
-    <a class="brand" href="/" aria-label="Moyai Devin home"><img src="/static/favicon.svg" alt=""><span>moyai<span class="brand-sub">DEVIN</span></span></a>
-    <button class="new-task primary" id="new-task"><span>＋</span> New session</button>
-    <nav aria-label="Workspace"><button class="nav-button active" data-view="tasks"><span>▤</span> Sessions <span class="count" id="task-count">0</span></button><button class="nav-button" data-view="connections"><span>◇</span> Organization</button><button class="nav-button" data-view="runtime"><span>▧</span> Runtime</button></nav>
-    <div class="rail-foot"><span class="avatar">T</span><div>Internal workspace<small>Private · local preview</small></div></div>
+  <button id="sidebar-scrim" class="sidebar-scrim" aria-label="Close sidebar" hidden></button>
+  <aside class="rail" id="sidebar" aria-label="Workspace sidebar">
+    <div class="rail-brand"><a class="brand" href="#tasks" aria-label="Moyai Devin home"><img src="/static/favicon.svg" alt=""><span>moyai <small>devin</small></span></a><button id="close-sidebar" class="icon-button" aria-label="Close sidebar">×</button></div>
+    <button class="new-task" id="new-task"><span aria-hidden="true">＋</span> New session <kbd>⌘ K</kbd></button>
+    <label class="session-search"><span aria-hidden="true">⌕</span><input id="session-search" type="search" placeholder="Search sessions" aria-label="Search sessions" autocomplete="off"></label>
+    <div class="sessions-label">Sessions <span id="task-count">0</span></div>
+    <nav id="session-list" class="session-list" aria-label="Recent sessions"></nav>
+    <nav class="workspace-nav" aria-label="Workspace settings"><button class="nav-button" data-view="connections"><span aria-hidden="true">◇</span> Connections</button><button class="nav-button" data-view="runtime"><span aria-hidden="true">▧</span> Runtime</button></nav>
+    <div class="rail-foot"><span class="avatar">L</span><div><span id="workspace-name">Workspace</span><small>Private workspace</small></div></div>
   </aside>
   <div class="workspace">
-    <header class="topbar"><span id="page-title">Sessions</span><div class="header-right"><span class="environment">Cloud agent</span><span class="key-hint">INTERNAL</span></div></header>
+    <header class="topbar"><button id="open-sidebar" class="icon-button" aria-label="Open sidebar" aria-expanded="false" aria-controls="sidebar">☰</button><span id="page-title">New session</span><div id="header-actions" class="header-right"><span class="environment">Your team's agent</span></div></header>
     <main id="content"></main>
   </div>
   <div id="toast" role="status" hidden></div>
