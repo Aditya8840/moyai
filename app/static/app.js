@@ -48,9 +48,9 @@ function bindComposer(input,form){
 }
 async function navigate(view) {
   stopStream();state.pageVersion++;state.view=view;state.selected=null;
-  setView(view,{tasks:'New session',connections:'Connections',runtime:'Runtime'}[view]);
+  setView(view,{tasks:'New session',connections:'Connections',runtime:'Runtime',spend:'Spend'}[view]);
   history.replaceState(null,'',view==='tasks'?'#tasks':'#'+view);
-  if(view==='tasks')await renderHome();else if(view==='connections')await renderConnections();else await renderRuntime();
+  if(view==='tasks')await renderHome();else if(view==='connections')await renderConnections();else if(view==='spend')await renderSpend();else await renderRuntime();
 }
 async function refreshRuns(){state.runs=await api('/api/runs');renderSidebar();}
 async function renderHome(){
@@ -104,7 +104,7 @@ function renderChat(run){
   const id=run.id;
   $('#header-actions').innerHTML=`<span id="run-status"></span><button id="toggle-details" class="quiet details-toggle" aria-expanded="false" aria-controls="session-details"><span aria-hidden="true">☷</span> Activity</button>`;
   $('#content').innerHTML=`<div class="chat-layout"><section class="chat-panel"><div class="conversation" id="conversation" role="log" aria-label="Conversation" aria-live="polite"></div><button id="jump-latest" class="jump-latest" hidden>↓ Latest message</button><div class="chat-bottom"><div id="approvals"></div><div class="chat-working" id="chat-working" role="status"></div><form id="message-form" class="composer reply-composer"><label class="sr-only" for="followup">Message Moyai Devin</label><textarea id="followup" maxlength="16000" required rows="1" placeholder="Ask a follow-up or give the next step…"></textarea><div class="composer-toolbar">${run.mode==='demo'?'<span class="composer-model">Demo session</span>':modelPicker('chat-model',state.modelDrafts[id]||run.model||state.config.model)}<span id="connection-state" class="connection-notice" hidden>Reconnecting…</span><button id="stop-response" class="stop-button" type="button" aria-label="Stop response" title="Stop response"><span aria-hidden="true">■</span></button><button type="submit" class="send-button" aria-label="Send message" title="Send message"><span aria-hidden="true">↑</span></button></div></form><div class="composer-caption"><span id="queue-note">Your conversation and files stay here.</span><span>Shift + Enter for a new line</span></div></div></section>
-  <aside class="session-side" id="session-details" aria-label="Session details" hidden><div class="details-heading"><h2>Session activity</h2><button id="close-details" class="icon-button" aria-label="Close session details">×</button></div><div class="session-facts"><div class="detail-row"><span>Connected apps</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None selected'}</span></div><div class="detail-row"><span>Workspace</span><span id="saved-workspace"></span></div><div id="artifact-area"></div></div><div id="slack-context"></div><section class="activity-panel"><h3>Progress</h3><div class="timeline" id="timeline">${run.events.filter(e=>!['chat','result'].includes(e.kind)).map(eventHTML).join('')}</div></section></aside></div>`;
+  <aside class="session-side" id="session-details" aria-label="Session details" hidden><div class="details-heading"><h2>Session activity</h2><button id="close-details" class="icon-button" aria-label="Close session details">×</button></div><div class="session-facts">${run.owner?`<div class="detail-row"><span>Started by</span><span>${esc(run.owner.email||run.owner.name)}</span></div>`:''}<div class="detail-row"><span>Connected apps</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None selected'}</span></div><div class="detail-row"><span>Workspace</span><span id="saved-workspace"></span></div><div id="artifact-area"></div></div><div id="slack-context"></div><section class="activity-panel"><h3>Progress</h3><div class="timeline" id="timeline">${run.events.filter(e=>!['chat','result'].includes(e.kind)).map(eventHTML).join('')}</div></section></aside></div>`;
   $('#toggle-details').onclick=()=>toggleDetails(!state.detailsOpen);$('#close-details').onclick=()=>toggleDetails(false);toggleDetails(state.detailsOpen);
   $('#followup').value=state.drafts[id]||'';
   if($('#chat-model'))$('#chat-model').onchange=()=>{state.modelDrafts[id]=$('#chat-model').value;};
@@ -145,7 +145,7 @@ function updateChat(run,initial=false){
   const signature=JSON.stringify(run.messages);
   if(box.dataset.messages!==signature){
     box.dataset.messages=signature;
-    box.innerHTML=`<div class="conversation-inner">${run.messages.map(m=>`<article class="chat-message ${m.role==='user'?'user':'assistant'}"><div class="message-label">${m.role==='user'?'You':'<img src="/static/favicon.svg" alt="">Moyai Devin'}<small>${m.role==='user'?(m.status!=='completed'?esc(m.status):''):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.content):renderMarkdown(m.content)}</div>${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">⧉</button>`:''}</article>`).join('')}</div>`;
+    box.innerHTML=`<div class="conversation-inner">${run.messages.map(m=>`<article class="chat-message ${m.role==='user'?'user':'assistant'}"><div class="message-label">${m.role==='user'?(m.user_id&&m.user_id===state.userId?'You':esc(m.user_name||'Earlier message')):'<img src="/static/favicon.svg" alt="">Moyai Devin'}<small>${m.role==='user'?(m.status!=='completed'?esc(m.status):''):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.content):renderMarkdown(m.content)}</div>${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">⧉</button>`:''}</article>`).join('')}</div>`;
     box.querySelectorAll('.copy-message').forEach(b=>b.onclick=()=>copyText(run.messages.find(m=>String(m.id)===b.dataset.message).content,b));
     box.querySelectorAll('.copy-code').forEach(b=>b.onclick=()=>copyText(b.closest('.code-block').querySelector('code').textContent,b));
     if(atBottom)box.scrollTop=box.scrollHeight;
@@ -216,11 +216,12 @@ $('.dialog-close').onclick=()=>$('#connection-dialog').close();
 window.addEventListener('hashchange',()=>{
   if(!state.csrf)return;
   const linkedRun=location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1];
-  (linkedRun?openRun(linkedRun):navigate(location.hash==='#connections'?'connections':location.hash==='#runtime'?'runtime':'tasks')).catch(showError);
+  (linkedRun?openRun(linkedRun):navigate(['#connections','#runtime','#spend'].includes(location.hash)?location.hash.slice(1):'tasks')).catch(showError);
 });
 async function boot(){
   try{
-    const session=await api('/api/session');state.authenticated=session.authenticated;state.csrf=session.csrf;state.role=session.role||'member';
+    const session=await api('/api/session');state.authenticated=session.authenticated;state.csrf=session.csrf;state.role=session.role||'member';state.userId=session.user_id;
+    $('#spend-nav').hidden=!session.authenticated||state.role!=='admin';
     $('.rail-foot small').textContent=session.local?'Private · local preview':'Shared internal workspace';
     if(!session.authenticated){
       const passwordForm='<form id="login-form"><div class="field"><label for="password">Workspace password</label><input id="password" type="password" autocomplete="current-password" required></div><button class="primary full">Sign in</button></form>';
@@ -235,7 +236,7 @@ async function boot(){
     document.querySelectorAll('.rail button').forEach(b=>b.disabled=false);
     [state.config,state.organization]=await Promise.all([api('/api/config'),api('/api/organization')]);await refreshRuns();
     if(!session.local){$('.rail-foot small').textContent=session.identity?session.identity.email:state.role==='admin'?'Organization admin':'Organization member';$('.rail-foot small').title=state.role==='admin'?'Organization admin':'Organization member';$('#logout')?.remove();$('.rail-foot').insertAdjacentHTML('beforeend','<button id="logout" class="quiet" aria-label="Sign out">⏻</button>');$('#logout').onclick=async()=>{await api('/api/logout',{method:'POST'});location.reload();};}
-    const linkedRun=location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]; if(linkedRun)await openRun(linkedRun);else await navigate(location.hash==='#connections'?'connections':location.hash==='#runtime'?'runtime':'tasks');
+    const linkedRun=location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]; if(linkedRun)await openRun(linkedRun);else await navigate(['#connections','#runtime','#spend'].includes(location.hash)?location.hash.slice(1):'tasks');
     if(new URLSearchParams(location.search).get('connection')){toast(location.search.includes('success')?'App connected.':'Connection cancelled.');history.replaceState(null,'','/#connections');}
     registerWebMCP();
   }catch(e){$('#content').innerHTML='<div class="error-banner">'+esc(e.message)+'</div>';}

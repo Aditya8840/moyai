@@ -92,6 +92,7 @@ class SlackChat:
             if conn.execute('SELECT 1 FROM slack_events WHERE event_id=? OR (channel=? AND mention_ts=?)',
                             (event_id, channel, ts)).fetchone():
                 return None
+            actor_id = self.store.slack_identity_in(conn, team, user)
             binding = conn.execute('SELECT * FROM slack_threads WHERE team_id=? AND channel=? AND thread_ts=?',
                                    (team, channel, root)).fetchone()
             fresh = False
@@ -117,8 +118,8 @@ class SlackChat:
                         raise ValueError('The session queue is full.')
                     run_id, stamp = uuid4().hex, now()
                     plugins = [x['id'] for x in self.owner.connectors.list() if x['connected'] and x['enabled']]
-                    conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model) VALUES(?,?,'','modal',?,?,?,?,1,?)",
-                                 (run_id, prompt or original_prompt, 'idle' if command else 'queued', json.dumps(plugins), stamp, stamp, selected_model or self.settings.resolve_model()))
+                    conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,owner_id) VALUES(?,?,'','modal',?,?,?,?,1,?,?)",
+                                 (run_id, prompt or original_prompt, 'idle' if command else 'queued', json.dumps(plugins), stamp, stamp, selected_model or self.settings.resolve_model(), actor_id))
                     conn.execute("INSERT INTO slack_events(event_id,run_id,channel,thread_ts,user_id,created_at,mention_ts,context_status) VALUES(?,?,?,?,?,?,?,'pending')",
                                  (event_id, run_id, channel, root, user, stamp, ts))
                     fresh = True
@@ -170,7 +171,7 @@ class SlackChat:
                     if selected_model is None:
                         current = conn.execute('SELECT model FROM runs WHERE id=?', (run_id,)).fetchone()[0]
                         self.settings.resolve_model(fallback=current)
-                    message, submit = self.store.enqueue_message_in(conn, run_id, content, 'slack:' + digest(team + channel + ts), selected_model)
+                    message, submit = self.store.enqueue_message_in(conn, run_id, content, 'slack:' + digest(team + channel + ts), selected_model, actor_id)
                     message_id = message['id']
                     conn.execute('UPDATE slack_threads SET paused=0,last_progress=? WHERE run_id=?', (time.time(), run_id))
                     followup_hint = ('You can keep chatting in this thread.' if self.owner.status()['thread_reply_ready'] else

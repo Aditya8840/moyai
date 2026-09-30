@@ -107,7 +107,7 @@ class SlackSessions:
             raise HTTPException(503, "Cloud sessions are not configured.")
         plugins = [x["id"] for x in self.connectors.list() if x["connected"] and x["enabled"]]
         try:
-            run = self.store.create_slack_run(event_id, prompt, plugins, channel, thread_ts, user, mention_ts)
+            run = self.store.create_slack_run(event_id, prompt, plugins, channel, thread_ts, user, mention_ts, bot['team_id'])
         except ValueError:
             raise HTTPException(503, "The session queue is full.")
         if run:

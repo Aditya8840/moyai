@@ -26,6 +26,7 @@ from .security import Security, digest
 from .google_sso import GoogleSignIn
 from .access_logging import configure_access_logging
 from .slack import SlackSessions
+from .spend import Spend, UsageCapture
 
 STATIC = Path(__file__).parent / "static"
 Provider = Literal["linear", "slack", "notion"]
@@ -100,6 +101,7 @@ def create_app(settings: Settings | None = None):
     connectors = Connectors(store, security, settings)
     manager = RunManager(store, settings)
     checkpoints = Checkpoints(store, settings)
+    spend = Spend(store, settings, security, checkpoints)
     manager.persist = checkpoints.flush
     store.execute("INSERT OR IGNORE INTO organization(id,name) VALUES(1,?)", (settings.organization_name,))
     slack = SlackSessions(store, connectors, manager, checkpoints, settings)
@@ -111,10 +113,14 @@ def create_app(settings: Settings | None = None):
         await manager.recover()
         await checkpoints.flush()
         slack.recover()
+        store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
+        spend_watcher = asyncio.create_task(spend.watch())
         watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
         try:
             yield
         finally:
+            spend_watcher.cancel()
+            await asyncio.gather(spend_watcher, return_exceptions=True)
             await slack.shutdown()
             await manager.shutdown()
             if watcher:
@@ -126,8 +132,9 @@ def create_app(settings: Settings | None = None):
     google = GoogleSignIn(settings, security, store)
     app.state.google_signin = google
     app.include_router(google.routes())
+    app.include_router(spend.routes())
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlparse(settings.public_url).hostname])
-    for key, value in {"store": store, "settings": settings, "security": security, "connectors": connectors, "manager": manager, "slack": slack}.items():
+    for key, value in {"store": store, "settings": settings, "security": security, "connectors": connectors, "manager": manager, "slack": slack, "spend": spend}.items():
         setattr(app.state, key, value)
 
     @app.middleware("http")
@@ -176,8 +183,11 @@ def create_app(settings: Settings | None = None):
             sid = security.new_session(response, local=True)
         role = security.role(request) or ("admin" if sid else None)
         info = security.session_info(request) or {}
+        user_id = None
+        if info:
+            user_id = store.identity(info)
         response.body = json.dumps({"authenticated": bool(sid), "csrf": security.csrf(sid) if sid else "", "local": security.local, "role": role,
-                                   "identity": info.get("identity"), "google_enabled": settings.google_enabled(),
+                                   "identity": info.get("identity"), "user_id": user_id, "google_enabled": settings.google_enabled(),
                                    "google_domains": sorted(settings.google_domains()) if settings.google_enabled() else [],
                                    "password_enabled": settings.password_login_enabled and bool(settings.workspace_password or settings.workspace_member_password)}).encode()
         response.headers["content-length"] = str(len(response.body))
@@ -261,7 +271,8 @@ def create_app(settings: Settings | None = None):
         pending = store.rows("SELECT COUNT(*) AS n FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')")[0]["n"]
         if pending >= 20:
             raise HTTPException(429, "The queue is full. Wait for a task to finish.")
-        run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled, model=model)
+        user_id = store.identity(security.session_info(request))
+        run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled, model=model, user_id=user_id)
         await checkpoints.flush()
         manager.submit(run)
         return public_run(run)
@@ -272,7 +283,9 @@ def create_app(settings: Settings | None = None):
         run = store.run(run_id)
         if not run:
             raise HTTPException(404, "Task not found")
+        owners = store.rows('SELECT id,email,name FROM users WHERE id=?', (run['owner_id'],))
         return {**public_run(run), "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": store.messages(run_id),
+                "owner": owners[0] if owners else None,
                 "slack_mirroring": slack.chat.mirroring(run_id),
                 "active": run_id in manager.jobs, "has_artifact": artifact_path(run_id).exists(), "slack_source": store.slack_source(run_id)}
 
@@ -293,7 +306,8 @@ def create_app(settings: Settings | None = None):
         except ValueError as exc:
             raise HTTPException(422, str(exc))
         try:
-            message, created = store.enqueue_message(run_id, body.content, body.client_id, selected_model)
+            user_id = store.identity(security.session_info(request))
+            message, created = store.enqueue_message(run_id, body.content, body.client_id, selected_model, user_id)
         except ValueError as exc:
             raise HTTPException(409, str(exc))
         await checkpoints.flush()
@@ -547,27 +561,49 @@ def create_app(settings: Settings | None = None):
                 payload[field] = min(payload[field], 16000)
         if not ({"max_tokens", "max_completion_tokens"} & payload.keys()):
             payload["max_tokens"] = 8192
+        request_id, end_user = spend.begin(run, selected_model)
+        payload['user'] = end_user
+        payload['metadata'] = {'moyai_request_id': request_id, 'session_id': run_id,
+                               'moyai_message_id': run['active_message_id'], 'tags': ['moyai-devin']}
+        if payload.get('stream'):
+            payload['stream_options'] = {'include_usage': True}
+        await checkpoints.flush()
         client = httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30))
         try:
             upstream = await client.send(client.build_request("POST", settings.litellm_api_base.rstrip("/") + "/chat/completions",
-                                                           json=payload, headers={"Authorization": f"Bearer {settings.litellm_api_key}"}), stream=True)
+                                                           json=payload, headers={"Authorization": f"Bearer {settings.litellm_api_key}", 'x-litellm-call-id': request_id}), stream=True)
+            spend.headers(request_id, upstream, bool(payload.get('stream')))
             if upstream.status_code >= 400:
+                spend.finish(request_id, None, 'failed')
                 await upstream.aclose()
                 await client.aclose()
                 raise HTTPException(502, f"Model gateway rejected the request ({upstream.status_code}). Check model access and gateway configuration.")
         except httpx.HTTPError:
+            spend.finish(request_id, None, 'unknown')
             await client.aclose()
             raise HTTPException(502, "Model gateway could not be reached.")
+        except asyncio.CancelledError:
+            spend.finish(request_id, None, 'interrupted')
+            await client.aclose()
+            raise
 
         async def relay():
+            capture = UsageCapture(bool(payload.get('stream')))
+            status = 'interrupted'
             try:
                 async for chunk in upstream.aiter_bytes():
+                    capture.feed(chunk)
                     if store.run(run_id)["status"] not in {"running", "awaiting_approval"}:
                         break
                     yield chunk
+                else:
+                    capture.finish()
+                    status = 'completed' if capture.done else 'unknown'
             finally:
+                spend.finish(request_id, capture, status)
                 await upstream.aclose()
                 await client.aclose()
+                await checkpoints.flush()
         return StreamingResponse(relay(), media_type="text/event-stream" if payload.get("stream") else "application/json")
 
     @app.get("/")
