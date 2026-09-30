@@ -84,6 +84,7 @@ def test_broker_records_exact_cost_and_blocks_sandbox_attribution_override(works
         assert 'session_id' not in data['metadata']
         assert data['stream'] is False
         assert data['metadata']['moyai_request_id'] == request.headers['x-litellm-call-id']
+        assert set(data['metadata']) == {'moyai_request_id'}
         return httpx.Response(200, headers={'x-litellm-response-cost':'0.0123456789', 'x-litellm-call-id':request.headers['x-litellm-call-id']}, json={'id':'response','choices':[], 'usage':{'prompt_tokens':100,'completion_tokens':10,'total_tokens':110}})
     real = httpx.AsyncClient
     monkeypatch.setattr('app.main.httpx.AsyncClient', lambda **kw: real(transport=httpx.MockTransport(gateway), **kw))

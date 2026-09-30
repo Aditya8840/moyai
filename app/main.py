@@ -561,7 +561,7 @@ def create_app(settings: Settings | None = None):
         request_id = spend.begin(run, selected_model)
         # Keep user/session accounting local. The existing virtual key remains
         # the sole billing credential; sandbox-supplied attribution is ignored.
-        payload['metadata'] = {'moyai_request_id': request_id, 'turn_off_message_logging': True}
+        payload['metadata'] = {'moyai_request_id': request_id}
         wants_stream = bool(payload.get('stream'))
         # Streaming headers precede generation and cannot contain its final
         # charge. Ask for a completed response, then adapt it to Hermes' SSE
