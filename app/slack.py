@@ -29,6 +29,7 @@ class SlackSessions:
         latest = self.store.rows("SELECT created_at,reply_status FROM slack_events ORDER BY created_at DESC LIMIT 1")
         return {"enabled": enabled, "bot_installed": bot.get("installed", False),
                 "thread_chat_enabled": self.settings.slack_thread_chat_enabled,
+                "thread_reply_ready": self.settings.slack_thread_chat_enabled and {"channels:history", "groups:history"} <= set(bot.get("scopes", [])),
                 "bot_user_id": bot.get("user_id"), "team_id": bot.get("team_id"),
                 "audience": "Workspace members" if self.settings.slack_session_users == "*" else "Selected Slack users",
                 "last_session": latest[0] if latest else None}

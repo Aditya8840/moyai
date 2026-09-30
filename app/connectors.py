@@ -145,7 +145,7 @@ class Connectors:
         credentials = json.loads(self.security.decrypt(rows[0]["encrypted"]))
         bot = credentials.get("bot", {})
         return {"installed": bool(bot.get("access_token")), "team_id": bot.get("team", {}).get("id"),
-                "user_id": bot.get("bot_user_id")}
+                "user_id": bot.get("bot_user_id"), "scopes": bot.get("scope", "").split(",")}
 
     async def slack_bot_token(self):
         async with self.locks["slack"]:
@@ -284,7 +284,7 @@ class Connectors:
             # by Slack search. User-token refresh must not erase the bot grant.
             user = result["authed_user"]
             if result.get("access_token"):
-                user["bot"] = {key: result[key] for key in ("access_token", "refresh_token", "expires_in", "bot_user_id", "team") if key in result}
+                user["bot"] = {key: result[key] for key in ("access_token", "refresh_token", "expires_in", "bot_user_id", "team", "scope") if key in result}
                 if user["bot"].get("expires_in"):
                     user["bot"]["expires_at"] = time.time() + user["bot"]["expires_in"]
             result = user

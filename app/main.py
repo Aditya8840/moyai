@@ -266,9 +266,8 @@ def create_app(settings: Settings | None = None):
         run = store.run(run_id)
         if not run:
             raise HTTPException(404, "Task not found")
-        thread = store.rows("SELECT paused FROM slack_threads WHERE run_id=?", (run_id,))
         return {**public_run(run), "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": store.messages(run_id),
-                "slack_mirroring": ("paused" if thread[0]["paused"] else "active") if thread and settings.slack_thread_chat_enabled and slack.status()["enabled"] else None,
+                "slack_mirroring": slack.chat.mirroring(run_id),
                 "active": run_id in manager.jobs, "has_artifact": artifact_path(run_id).exists(), "slack_source": store.slack_source(run_id)}
 
     @app.post("/api/runs/{run_id}/messages", status_code=202)
@@ -318,7 +317,7 @@ def create_app(settings: Settings | None = None):
                 if not row["chat_enabled"] and row["status"] in TERMINAL and run_id not in manager.jobs and len(batch) < 200:
                     yield "event: settled\ndata: {}\n\n"
                     break
-                yield f"event: run-status\ndata: {json.dumps({'status': row['status'], 'active': run_id in manager.jobs})}\n\n"
+                yield f"event: run-status\ndata: {json.dumps({'status': row['status'], 'active': run_id in manager.jobs, 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
                 await asyncio.sleep(0.5)
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

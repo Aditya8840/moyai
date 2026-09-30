@@ -58,6 +58,14 @@ class SlackChat:
     def link(self, run_id):
         return f"<{self.settings.public_url.rstrip('/')}/#run={run_id}|Open session>"
 
+    def mirroring(self, run_id):
+        rows = self.store.rows('SELECT paused,team_id FROM slack_threads WHERE run_id=?', (run_id,))
+        if not rows or not self.settings.slack_thread_chat_enabled or not self.owner.status()['enabled']:
+            return None
+        if rows[0]['team_id'] != self.owner.connectors.slack_installation().get('team_id'):
+            return None
+        return 'paused' if rows[0]['paused'] else 'active'
+
     def queue(self, conn, run_id, key, kind, text):
         conn.execute('INSERT OR IGNORE INTO slack_outbox(run_id,dedupe_key,kind,text,created_at) VALUES(?,?,?,?,?)',
                      (run_id, key, kind, text, now()))
@@ -147,7 +155,9 @@ class SlackChat:
                     message, submit = self.store.enqueue_message_in(conn, run_id, content, 'slack:' + digest(team + channel + ts))
                     message_id = message['id']
                     conn.execute('UPDATE slack_threads SET paused=0,last_progress=? WHERE run_id=?', (time.time(), run_id))
-                    response = ('On it — I’ll read the context and reply here. You can keep chatting in this thread.' if fresh else
+                    followup_hint = ('You can keep chatting in this thread.' if self.owner.status()['thread_reply_ready'] else
+                                     'Mention me again in this thread to continue until the bot’s thread access is enabled.')
+                    response = ('On it — I’ll read the context and reply here. ' + followup_hint if fresh else
                                 'Got it — I’ll continue in this session. Your message is queued if I’m still working.')
                     self.queue(conn, run_id, 'received:' + str(message_id), 'ack' if fresh else 'control', response + '\n' + self.link(run_id))
                     conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'chat','Message received from Slack',?,?)",

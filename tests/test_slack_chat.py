@@ -84,9 +84,11 @@ def test_ignores_unrelated_threads_bots_edits_wrong_team_and_shared_channels(sla
 
 def test_sleep_suppresses_replies_and_wake_resumes_same_saved_session(slack_app):
     app, client, run_id = start(slack_app)
+    assert app.state.slack.chat.mirroring(run_id) == 'active'
     finish(app, run_id, 'First answer')
     send(client, 1, 'sleep')
     assert app.state.store.rows('SELECT paused FROM slack_threads')[0]['paused'] == 1
+    assert app.state.slack.chat.mirroring(run_id) == 'paused'
     send(client, 2, 'This should be ignored while asleep')
     assert len(app.state.store.messages(run_id)) == 2
     # A late web answer must not be backfilled when the Slack thread wakes.
@@ -95,6 +97,7 @@ def test_sleep_suppresses_replies_and_wake_resumes_same_saved_session(slack_app)
     send(client, 3, 'wake')
     send(client, 4, 'Continue from where we left off')
     assert app.state.store.rows('SELECT paused FROM slack_threads')[0]['paused'] == 0
+    assert app.state.slack.chat.mirroring(run_id) == 'active'
     assert len(app.state.store.rows('SELECT * FROM runs')) == 1
     assert 'Continue from where we left off' in app.state.store.messages(run_id)[-1]['content']
     assert not app.state.store.rows("SELECT * FROM slack_outbox WHERE text LIKE '%late private answer%'")
@@ -205,6 +208,7 @@ def test_paused_connection_discards_pending_replies_and_cannot_send_to_new_team(
     app.state.store.execute("INSERT INTO connection_policies(provider,enabled) VALUES('slack',0)")
     app.state.slack.chat.collect()
     assert not app.state.store.rows("SELECT * FROM slack_outbox WHERE status='pending'")
+    assert app.state.slack.chat.mirroring(run_id) is None
     send(client, 1, 'No new work')
     assert len(app.state.store.messages(run_id)) == 2
 
