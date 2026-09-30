@@ -9,7 +9,7 @@ from app.config import Settings
 from app.db import Store
 from app.main import create_app
 from app.persistence import Checkpoints, restore_checkpoint
-from test_runner import FakeSandbox, aio, runner
+from test_runner import FakeSandbox, Lines, aio, runner
 from test_workspace import wait_for
 
 
@@ -77,6 +77,67 @@ async def test_queued_followup_runs_once_with_saved_workspace_and_fresh_capabili
     assert all(m['status'] == 'completed' for m in transcript)
     runner.store.enqueue_message(run['id'], 'Read the same file', 'request-0002')
     assert not runner.store.has_queued_messages(run['id'])
+
+
+def make_rotation(machine):
+    original = machine.exec.aio
+    async def execute(*args, **kwargs):
+        process = await original(*args, **kwargs)
+        process.stdout = Lines(['WORKSPACE_EVENT {"kind":"final","message":"Work checkpointed; not finished yet.","completed":false,"continuation":true}\n'])
+        return process
+    machine.exec = aio(execute)
+
+
+async def test_machine_renewal_continues_one_turn_without_publishing_a_partial_answer(runner, monkeypatch):
+    machines, images = [], []
+    async def create(**kwargs):
+        images.append(kwargs['image'])
+        assert kwargs['timeout'] == 86400
+        if machines:
+            assert machines[-1].terminated
+        machine = SessionSandbox(len(machines) + 1)
+        if not machines:
+            make_rotation(machine)
+        machines.append(machine)
+        return machine
+    monkeypatch.setattr('app.runner.modal.Sandbox.create', aio(create))
+    monkeypatch.setattr('app.runner.modal.Image.from_id', lambda image_id, **kwargs: image_id)
+    run = runner.store.create_run('Finish a long task', '', 'modal', [], chat_enabled=True)
+    runner.store.enqueue_message(run['id'], 'Then summarize it', 'next-turn')
+    runner.submit(run)
+    await wait_jobs(runner)
+    assert images == ['fake image', 'im-session-1', 'im-session-2']
+    assert machines[1].spec['continuation'] is True
+    assert machines[1].spec['prompt'] == 'Finish a long task'
+    assert machines[1].spec['timeout'] is None
+    assert machines[1].spec['rotation_seconds'] == 82800
+    assert not machines[2].spec['continuation']
+    answers = [m for m in runner.store.messages(run['id']) if m['role'] == 'assistant']
+    assert len(answers) == 2 and all(m['content'] == 'Tests passed' for m in answers)
+    assert runner.store.run(run['id'])['status'] == 'idle'
+    assert all(machine.terminated for machine in machines)
+
+
+@pytest.mark.parametrize('stop', [True, False])
+async def test_machine_renewal_never_restarts_after_stop_or_failed_snapshot(runner, monkeypatch, stop):
+    machine = SessionSandbox(1)
+    make_rotation(machine)
+    calls = []
+    async def create(**kwargs):
+        calls.append(1)
+        return machine
+    run = runner.store.create_run('Long task', '', 'modal', [], chat_enabled=True)
+    async def snapshot(**kwargs):
+        if stop:
+            await runner.cancel(run['id'])
+            return SimpleNamespace(object_id='im-saved')
+        raise RuntimeError('Snapshot unavailable')
+    machine.snapshot_filesystem = aio(snapshot)
+    monkeypatch.setattr('app.runner.modal.Sandbox.create', aio(create))
+    runner.submit(run)
+    await wait_jobs(runner)
+    assert calls == [1] and machine.terminated
+    assert runner.store.run(run['id'])['status'] in {'cancelled', 'failed'}
 
 
 async def test_snapshot_failure_does_not_claim_saved_success_or_replay_followups(runner, monkeypatch):

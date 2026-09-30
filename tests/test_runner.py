@@ -92,7 +92,7 @@ def runner(tmp_path, monkeypatch):
 async def test_cloud_lifecycle_collects_result_and_cleans_up(runner, monkeypatch, completed, expected_status):
     sandbox = FakeSandbox(completed=completed)
     async def create(**kwargs):
-        assert kwargs["timeout"] == 2040  # 30m agent budget plus save/cleanup reserve
+        assert kwargs["timeout"] == 86400  # Modal's machine lifetime; no overall turn cap
         assert kwargs["cpu"] == 2 and kwargs["memory"] == 4096
         return sandbox
     monkeypatch.setattr("app.runner.modal.Sandbox.create", aio(create))
@@ -104,6 +104,7 @@ async def test_cloud_lifecycle_collects_result_and_cleans_up(runner, monkeypatch
     assert result["token_hash"] == ""
     assert sandbox.terminated
     assert "model-secret" not in json.dumps(sandbox.spec)
+    assert sandbox.spec['timeout'] is None and sandbox.spec['max_iterations'] == 0
     assert (runner.settings.data_dir / "artifacts" / f"{run['id']}.zip").exists()
     assert any(row["kind"] == "artifact" for row in runner.store.events(run["id"]))
     assert any(row["message"] == "Ran test suite" for row in runner.store.events(run["id"]))

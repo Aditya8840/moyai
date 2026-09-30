@@ -9,9 +9,11 @@ import threading
 try:
     from .broker_relay import BrokerRelay
     from .artifacts import collect_archive
+    from .continuation import RotationDeadline
 except ImportError:
     from broker_relay import BrokerRelay
     from artifacts import collect_archive
+    from continuation import RotationDeadline
 LOCK = threading.Lock()
 
 
@@ -67,14 +69,16 @@ def run_agent(spec, relay):
     from tools.mcp_tool_discovery import discover_mcp_tools
     discovered = discover_mcp_tools(allowed_mcp_names=["workspace"])
     print("Discovered workspace tools:", discovered, file=sys.stderr, flush=True)
+    rotation = RotationDeadline(spec.get("rotation_seconds", 0))
     agent = AIAgent(
         model=spec["model"], provider="custom", api_mode="chat_completions",
         base_url=relay.url + "/v1", api_key=os.environ["WORKSPACE_RUN_TOKEN"],
         enabled_toolsets=["terminal", "file", "mcp-workspace"],
-        max_iterations=spec["max_iterations"], run_budget_seconds=spec["timeout"],
+        max_iterations=spec["max_iterations"] or sys.maxsize, run_budget_seconds=spec["timeout"],
         skip_memory=True, skip_background_review=True, quiet_mode=True, cwd=str(workspace),
         tool_start_callback=lambda call_id, name, args: emit("tool", f"Using {name}", {"detail": args}),
         tool_complete_callback=lambda call_id, name, args, result: emit("tool", f"Finished {name}", {"detail": str(result)[:12000]}),
+        step_callback=lambda *args: rotation.step(agent),
         clarify_callback=lambda *args, **kwargs: "Ask the user for the missing information in your final response, then wait for their next chat message.",
     )
     result = {}
@@ -87,6 +91,13 @@ def run_agent(spec, relay):
             print("Available agent tools:", sorted(agent.valid_tool_names), file=sys.stderr, flush=True)
             raise RuntimeError("Workspace MCP tools were not loaded")
         prompt = conversation_prompt(spec, has_history=bool(history))
+        if spec.get("continuation"):
+            if not history_path.exists() or not history:
+                raise RuntimeError("Machine renewal requires the saved conversation history")
+            prompt = ("MACHINE RENEWAL: Continue the unfinished user request from the saved conversation and files. "
+                      "The previous machine stopped between tool rounds for routine renewal. Completed tool results are "
+                      "already recorded; do not repeat completed work or external writes. This is not a new user request. "
+                      "Keep working until the task is done or you need the user's input.\n\nORIGINAL REQUEST:\n" + spec["prompt"])
         if spec.get("workspace_warning"):
             prompt = ("WORKSPACE RECOVERY NOTICE: The previous answer was saved, but the latest filesystem checkpoint failed. "
                       "The files may be from an older turn. Use the saved chat below for context, inspect files before claiming "
@@ -117,10 +128,12 @@ def run_agent(spec, relay):
             "For conversational questions, answer directly and naturally without status preambles or a routine work summary."
         ))
         completed = result.get("completed") is True and not result.get("interrupted") and not result.get("partial")
-        summary = str((relay.last_error if not completed else '') or result.get("final_response") or "Hermes ended without a final response.")
+        continuing = not relay.last_error and rotation.can_continue(result)
+        summary = ("Work is checkpointed for cloud machine renewal; the task is not finished yet." if continuing else
+                   str((relay.last_error if not completed else '') or result.get("final_response") or "Hermes ended without a final response."))
         # The control plane durably stores this before any filesystem saving or
         # archive work can fail. A nonzero exit still marks the turn incomplete.
-        emit("final", summary, completed=completed)
+        emit("final", summary, completed=completed, continuation=bool(continuing))
         (artifacts / "result.md").write_text(summary)
         if spec.get("chat_enabled"):
             if not isinstance(result.get("messages"), list):
@@ -133,7 +146,7 @@ def run_agent(spec, relay):
     finally:
         agent.close()
     collect_archive(workspace, artifacts, os.environ["WORKSPACE_RUN_TOKEN"].encode())
-    return 0 if completed else 1
+    return 0 if completed or continuing else 1
 
 
 if __name__ == "__main__":

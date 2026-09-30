@@ -231,6 +231,7 @@ def create_app(settings: Settings | None = None):
         return {"cloud_ready": not missing, "missing": missing, "model": settings.resolve_model(), "models": settings.model_choices(),
                 "public_url": settings.public_url, "max_concurrent_runs": settings.max_concurrent_runs,
                 "run_timeout_seconds": settings.run_timeout_seconds, "max_agent_iterations": settings.max_agent_iterations,
+                "sandbox_rotation_seconds": settings.sandbox_rotation_seconds,
                 "hermes_revision": settings.hermes_revision, "auth": "Google Workspace" if settings.google_enabled() else "Workspace password" if settings.workspace_password else "Local access only"}
 
     @app.get("/api/organization")
@@ -560,8 +561,8 @@ def create_app(settings: Settings | None = None):
         body = await broker_body(request, '/v1/chat/completions')
         if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
             raise HTTPException(422, "messages must be an array")
-        admitted = store.execute("UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 WHERE id=? AND (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<? AND status IN ('running','awaiting_approval')",
-                                 (run_id, settings.max_agent_iterations * 3))
+        admitted = store.execute("UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) AND status IN ('running','awaiting_approval')",
+                                 (run_id, settings.max_agent_iterations, settings.max_agent_iterations * 3))
         if not admitted:
             raise HTTPException(429, "This run reached its model request limit.")
         allowed = {"messages", "tools", "tool_choice", "parallel_tool_calls", "temperature", "top_p", "stop", "stream", "stream_options", "response_format", "reasoning_effort", "max_tokens", "max_completion_tokens", "seed"}

@@ -264,6 +264,7 @@ def test_remote_workspace_requires_password(tmp_path):
 
 def test_model_proxy_pins_model_and_drops_gateway_overrides(workspace, monkeypatch):
     app, client = workspace
+    app.state.settings.max_agent_iterations = 30
     app.state.settings.litellm_api_base = "https://gateway.example/v1"
     app.state.settings.litellm_api_key = "server-secret"
     app.state.settings.agent_model = "approved-model"
@@ -285,6 +286,15 @@ def test_model_proxy_pins_model_and_drops_gateway_overrides(workspace, monkeypat
     limited = client.post(f"/broker/{run_id}/v1/chat/completions", headers=headers, json={"messages": []})
     assert limited.status_code == 429
     assert len(captured) == 1
+
+    # The unrestricted setting removes request-count limits but still accounts
+    # for every call and requires an active, authenticated run.
+    app.state.settings.max_agent_iterations = 0
+    app.state.store.execute("UPDATE runs SET model_calls=100000,turn_model_calls=100000 WHERE id=?", (run_id,))
+    assert client.post(f"/broker/{run_id}/v1/chat/completions", headers=headers, json={"messages": []}).status_code == 200
+    assert app.state.store.run(run_id)['model_calls'] == 100001
+    app.state.store.update_run(run_id, status='cancelled', token_hash='')
+    assert client.post(f"/broker/{run_id}/v1/chat/completions", headers=headers, json={"messages": []}).status_code == 401
 
 
 @pytest.mark.parametrize('decision,expected_calls', [('approve', 1), ('deny', 0)])

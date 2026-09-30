@@ -168,11 +168,25 @@ class RunManager:
             async with self.slots:
                 if self.stopped(run_id):
                     return
-                async with asyncio.timeout(self.settings.run_timeout_seconds + self.settings.snapshot_timeout_seconds + 180):
+                deadline = self.settings.run_timeout_seconds + self.settings.snapshot_timeout_seconds + 180 if self.settings.run_timeout_seconds else None
+                async with asyncio.timeout(deadline):
                     if run["mode"] == "demo":
                         await self.demo(run)
                     else:
-                        await self.cloud(run)
+                        turn = run
+                        while not self.stopped(run_id):
+                            rotate = await self.cloud(turn)
+                            if not rotate or self.stopped(run_id):
+                                break
+                            # Only a successful filesystem/history checkpoint may
+                            # move the same user turn to another machine.
+                            sandbox = self.sandboxes.get(run_id)
+                            if sandbox:
+                                await self.terminate(sandbox)
+                                self.sandboxes.pop(run_id, None)
+                            self.store.event(run_id, "status", "Workspace saved. Continuing on a fresh cloud machine.")
+                            turn = {**self.store.run(run_id), "prompt": run["prompt"],
+                                    "message_id": run.get("message_id"), "continuation": True}
         except asyncio.CancelledError:
             self.preserve_answer(run_id)
             self.store.update_run(run_id, status="interrupted", token_hash="", error="Workspace shut down while the task was active.")
@@ -253,7 +267,7 @@ class RunManager:
             app=app, client=client, image=image, secrets=[secret],
             env={"PYTHONUNBUFFERED": "1", "PYTHONPATH": "/opt/hermes", "HERMES_HOME": "/tmp/hermes-home",
                  "HERMES_RUNTIME_DIR": "/opt/hermes-tools", "HERMES_PYTHON": "/opt/hermes-env/bin/python", "GIT_TERMINAL_PROMPT": "0"},
-            timeout=self.settings.run_timeout_seconds + self.settings.snapshot_timeout_seconds + 60, cpu=2, memory=4096,
+            timeout=self.settings.sandbox_lifetime_seconds(), cpu=2, memory=4096,
             experimental_options={"vm_runtime": True} if self.settings.modal_vm_runtime else {},
         ))
         try:
@@ -271,7 +285,9 @@ class RunManager:
         spec = {"run_id": run_id, "prompt": run["prompt"], "repo_url": run["repo_url"],
                 "broker_url": f"{self.settings.public_url.rstrip('/')}/broker/{run_id}",
                 "model": self.settings.resolve_model(fallback=run.get('active_model') or run.get('model') or ''), "max_iterations": self.settings.max_agent_iterations,
-                "timeout": self.settings.run_timeout_seconds - 90,
+                "timeout": self.settings.run_timeout_seconds - 90 if self.settings.run_timeout_seconds else None,
+                "rotation_seconds": self.settings.sandbox_rotation_seconds if not self.settings.run_timeout_seconds and run.get("chat_enabled") else 0,
+                "continuation": bool(run.get("continuation")),
                 "chat_enabled": bool(run.get("chat_enabled")),
                 "workspace_warning": run.get("checkpoint_error", ""),
                 "slack_source": self.store.slack_source(run_id),
@@ -281,7 +297,7 @@ class RunManager:
         # Restored snapshots can contain an older adapter; refresh only our own
         # runner files, preserving all user workspace files and agent history.
         if run.get("snapshot_id"):
-            for name in ("agent.py", "artifacts.py", "mcp_bridge.py", "broker_relay.py", "broker_transport.py"):
+            for name in ("agent.py", "artifacts.py", "continuation.py", "mcp_bridge.py", "broker_relay.py", "broker_transport.py"):
                 await sandbox.filesystem.write_text.aio((SANDBOX_FILES / name).read_text(), f"/opt/workspace-runner/{name}")
         await sandbox.filesystem.write_text.aio(json.dumps(spec), "/tmp/task.json")
         self.store.update_run(run_id, status="running")
@@ -289,7 +305,7 @@ class RunManager:
         # Modal streams arbitrary chunks by default. Protocol events are JSON
         # lines and must be framed before decoding, including parallel tools.
         process = await sandbox.exec.aio("/opt/hermes-env/bin/python", "/opt/workspace-runner/agent.py", "/tmp/task.json",
-                                         timeout=self.settings.run_timeout_seconds, bufsize=1)
+                                         timeout=self.settings.run_timeout_seconds or None, bufsize=1)
         result = None
         secrets_to_hide = [token, self.settings.litellm_api_key, self.settings.modal_token_secret]
 
@@ -355,6 +371,8 @@ class RunManager:
                 await self.persist()
             if self.stopped(run_id):
                 return
+            if result and result.get("continuation") and result.get("checkpoint_saved") and code == 0:
+                return True
             if not result or code != 0 or not result.get("completed"):
                 self.store.update_run(run_id, status="failed", error="Hermes did not complete the task.", summary=str((result or {}).get("message", "")))
                 self.store.event(run_id, "error", str((result or {}).get("message") or "Hermes exited before completing. Review Modal logs for startup or provider errors."))

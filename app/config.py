@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,9 +37,11 @@ class Settings(BaseSettings):
     modal_vm_runtime: bool = False
     hermes_revision: str = "7968c72a3cb80beaae51948378944dd6e3423b96"
     max_concurrent_runs: int = Field(default=2, ge=1, le=10)
-    run_timeout_seconds: int = Field(default=1800, ge=120, le=7200)
+    # Zero means no overall response deadline or iteration cap.
+    run_timeout_seconds: int = Field(default=0, ge=0, le=82800)
     snapshot_timeout_seconds: int = Field(default=180, ge=10, le=600)
-    max_agent_iterations: int = Field(default=30, ge=1, le=100)
+    max_agent_iterations: int = Field(default=0, ge=0)
+    sandbox_rotation_seconds: int = Field(default=82800, ge=60, le=82800)
     demo_step_seconds: float = Field(default=0.8, ge=0, le=10)
     linear_client_id: str = ""
     linear_client_secret: str = ""
@@ -54,6 +56,20 @@ class Settings(BaseSettings):
     slack_session_users: str = ""
     notion_client_id: str = ""
     notion_client_secret: str = ""
+
+    @field_validator('run_timeout_seconds')
+    @classmethod
+    def validate_run_timeout(cls, value):
+        if 0 < value < 120:
+            raise ValueError('Use 0 for no response deadline, or at least 120 seconds.')
+        return value
+
+    def sandbox_lifetime_seconds(self) -> int:
+        if self.run_timeout_seconds:
+            return self.run_timeout_seconds + self.snapshot_timeout_seconds + 60
+        # Modal allows at most 24h. Leave a full hour after the cooperative
+        # handoff boundary for an in-flight operation, snapshot and cleanup.
+        return self.sandbox_rotation_seconds + 3600
 
     def google_enabled(self) -> bool:
         return bool(self.google_client_id and self.google_client_secret)
