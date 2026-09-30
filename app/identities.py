@@ -63,7 +63,8 @@ class SlackIdentities:
             rows = self.store.rows("""SELECT u.* FROM users u WHERE kind='slack'
                 AND id LIKE ? AND profile_next_check<=?
                 AND (EXISTS(SELECT 1 FROM messages WHERE user_id=u.id)
-                     OR EXISTS(SELECT 1 FROM runs WHERE owner_id=u.id))
+                     OR EXISTS(SELECT 1 FROM runs WHERE owner_id=u.id)
+                     OR EXISTS(SELECT 1 FROM model_requests WHERE user_id=u.id))
                 ORDER BY profile_next_check,id LIMIT 10""", (f'slack:{team}:%', int(time.time())))
             for row in rows:
                 await self.resolve(row, team)

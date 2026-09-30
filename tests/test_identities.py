@@ -323,3 +323,15 @@ def test_malformed_sender_does_not_starve_backfill(profiles):
     sync(app)
     assert not control['calls']
     assert account(app, actor)['profile_next_check'] > time.time()
+
+
+def test_spend_identities_exclude_unrelated_channel_participants(profiles):
+    app, _ = profiles
+    actual = sender(app.state.store)
+    stranger = sender(app.state.store, user='U87654321', referenced=False)
+    report = app.state.spend.report()
+    assert {row['id'] for row in report['identities']} == {actual}
+    # An existing manual link remains visible even without recorded sessions.
+    google(app.state.store)
+    app.state.store.execute('UPDATE users SET linked_user_id=? WHERE id=?', ('google:alice', stranger))
+    assert stranger in {row['id'] for row in app.state.spend.report()['identities']}

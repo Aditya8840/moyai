@@ -170,7 +170,11 @@ class Spend:
 
     def report(self, start=None, end=None):
         start, end, lower, upper = period(start, end)
-        users = {u['id']: u for u in self.store.rows('SELECT id,kind,email,name,linked_user_id,link_method,link_status,profile_checked_at FROM users')}
+        users = {u['id']: u for u in self.store.rows('''SELECT id,kind,email,name,linked_user_id,link_method,link_status,profile_checked_at
+            FROM users u WHERE kind!='slack' OR linked_user_id IS NOT NULL
+            OR EXISTS(SELECT 1 FROM messages WHERE user_id=u.id)
+            OR EXISTS(SELECT 1 FROM runs WHERE owner_id=u.id)
+            OR EXISTS(SELECT 1 FROM model_requests WHERE user_id=u.id)''')}
         requests = {r['id']: r for r in self.store.rows('SELECT * FROM model_requests WHERE key_hash=?', (self.key_hash,))}
         rows = [row for row in requests.values() if lower <= row['created_at'] < upper]
         def empty():
