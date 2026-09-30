@@ -220,3 +220,108 @@ def test_long_markdown_replies_have_bounded_balanced_code_blocks():
     assert all(len(part) <= 2610 for part in parts)
     assert all(part.count('```') % 2 == 0 for part in parts)
     assert '<https://example.com|Docs>' in parts[-1]
+
+
+def dm_event(index, text, channel='D12345678', user='U12345678'):
+    return event(f'EvDM{index}', type='message', channel_type='im', channel=channel,
+                 user=user, text=text, ts=f'17907290{index:02d}.123456')
+
+
+def test_agentchat_dm_followups_preserve_session_model_sender_and_top_level_replies(slack_app):
+    from agentchat import AgentChat
+    app, client, submitted, sent = slack_app
+    assert isinstance(app.state.slack.agentchat, AgentChat)
+    first = dm_event(1, 'Remember granite and read <@U87654321> as source text')
+    assert client.post('/hooks/slack/events', **signed(first)).status_code == 200
+    run_id = submitted[0]['id']
+    finish(app, run_id, 'Remembering granite.')
+    assert client.post('/hooks/slack/events', **signed(dm_event(2, 'model opus'))).status_code == 200
+    second = dm_event(3, 'What was the phrase?')
+    assert client.post('/hooks/slack/events', **signed(second)).status_code == 200
+    second['event_id'] = 'EvDMDuplicate'
+    assert client.post('/hooks/slack/events', **signed(second)).status_code == 200
+    assert len(app.state.store.rows('SELECT * FROM runs')) == 1
+    messages = app.state.store.messages(run_id)
+    assert len(messages) == 3
+    assert '<@U87654321>' in messages[0]['content']
+    assert messages[-1]['model'] == 'anthropic/claude-opus-5-5'
+    assert messages[-1]['user_id'] == 'slack:T12345678:U12345678'
+    assert app.state.store.run(run_id)['owner_id'] == messages[-1]['user_id']
+    wait_for(lambda: bool(sent))
+    assert all(msg['channel'] == 'D12345678' and msg['thread_ts'] is None for msg in sent)
+    assert 'signed-in BerriAI teammates can view it' in sent[0]['text']
+    history = asyncio.run(app.state.slack.agentchat.state.history('slack:T12345678:D12345678'))
+    assert [m.text for m in history] == [m['content'] for m in messages]
+    assert asyncio.run(app.state.slack.agentchat.state.history('slack:T12345678:D12345678',limit=0)) == ()
+
+
+def test_dm_users_and_channel_threads_cannot_share_a_session(slack_app):
+    app, client, submitted, _ = slack_app
+    first = dm_event(1, 'First user')
+    client.post('/hooks/slack/events', **signed(first))
+    client.post('/hooks/slack/events', **signed(dm_event(2, 'Second user',channel='D87654321',user='U87654321')))
+    client.post('/hooks/slack/events', **signed(dm_event(3, 'Different sender in original DM',user='U87654321')))
+    client.post('/hooks/slack/events', **signed(event()))
+    assert len(app.state.store.rows('SELECT * FROM runs')) == 3
+    assert len(app.state.store.messages(submitted[0]['id'])) == 1
+    assert {r['owner_id'] for r in submitted} == {'slack:T12345678:U12345678','slack:T12345678:U87654321'}
+
+
+def test_disabled_dm_mode_and_non_dm_events_cannot_start_a_direct_session(slack_app):
+    app, client, submitted, _ = slack_app
+    app.state.settings.slack_dm_enabled = False
+    client.post('/hooks/slack/events', **signed(dm_event(1,'Do something')))
+    app.state.settings.slack_dm_enabled = True
+    payload = dm_event(2,'<@U99999999> Do something');payload['event']['channel_type']='mpim'
+    client.post('/hooks/slack/events', **signed(payload))
+    app.state.settings.slack_thread_chat_enabled = False
+    client.post('/hooks/slack/events', **signed(dm_event(3,'Do something')))
+    assert not submitted
+
+
+def test_agentchat_temporary_handler_failure_does_not_consume_retry(slack_app):
+    app, client, submitted, _ = slack_app
+    payload = dm_event(1,'Retry after temporary cloud configuration failure')
+    saved = app.state.settings.litellm_api_key
+    app.state.settings.litellm_api_key = ''
+    assert client.post('/hooks/slack/events', **signed(payload)).status_code == 503
+    assert not app.state.store.rows('SELECT * FROM slack_receipts')
+    app.state.settings.litellm_api_key = saved
+    assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
+    assert len(submitted) == 1
+    assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
+    assert len(submitted) == 1
+
+
+def test_dm_context_starts_from_current_request_without_shared_account_history(slack_app, monkeypatch):
+    app, client, submitted, sent = slack_app
+    client.post('/hooks/slack/events', **signed(dm_event(1,'My direct request')))
+    wait_for(lambda: bool(sent))
+    async def unexpected(*args, **kwargs):
+        raise AssertionError('A DM must not import history with the shared search credential')
+    monkeypatch.setattr(app.state.connectors,'request',unexpected)
+    run_id = submitted[0]['id']
+    asyncio.run(app.state.slack.prepare(run_id))
+    source = app.state.store.slack_source(run_id)
+    assert source['context_status'] == 'ready'
+    assert source['kind'] == 'dm'
+    assert [m['text'] for m in source['messages']] == ['My direct request']
+
+
+def test_agentchat_history_and_receipts_survive_adapter_restart(slack_app):
+    from app.agentchat_slack import SessionState
+    app, client, run_id = start(slack_app)
+    finish(app, run_id, 'Persistent answer')
+    state = SessionState(Store(app.state.settings.data_dir))
+    assert asyncio.run(state.claim('slack:T12345678:EvTest1')) is False
+    history = asyncio.run(state.history('slack:T12345678:C12345678:'+ROOT))
+    assert history[-1].text == 'Persistent answer'
+    assert asyncio.run(state.history('slack:TOTHER:C12345678:'+ROOT)) == ()
+
+
+def test_slack_oauth_requests_bot_dm_and_thread_scopes(slack_app):
+    from urllib.parse import urlparse, parse_qs
+    app, _, _, _ = slack_app
+    app.state.settings.slack_client_id = 'test-client'
+    scope = parse_qs(urlparse(app.state.connectors.authorization_url('slack','state')).query)['scope'][0]
+    assert set(scope.split(',')) == {'app_mentions:read','chat:write','channels:history','groups:history','im:history'}

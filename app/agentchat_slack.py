@@ -1,0 +1,124 @@
+"""AgentChat channel for Moyai's signed HTTP events and durable session store.
+
+The upstream Slack transport uses Socket Mode. This public Channel/State adapter
+keeps our existing webhook and rotating OAuth credentials; no app-level token is
+needed. AgentChat owns normalized dispatch, conversation locks and reply routing.
+SQLite receipts, sessions and the outbox remain the authoritative durable state.
+"""
+import asyncio
+from types import MappingProxyType
+from weakref import WeakValueDictionary
+
+from agentchat import AgentChat
+from agentchat.models import Message, Sender
+
+
+class SessionState:
+    def __init__(self, store):
+        self.store = store
+        self._locks = WeakValueDictionary()
+
+    async def claim(self, message_id):
+        # Do not persist a claim before the handler's atomic receipt + enqueue.
+        # Otherwise a temporary failure could permanently swallow Slack's retry.
+        event_id = message_id.split(':', 2)[-1]
+        return not self.store.rows('SELECT 1 FROM slack_receipts WHERE event_id=?', (event_id,))
+
+    def lock(self, conversation_id):
+        lock = self._locks.get(conversation_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[conversation_id] = lock
+        return lock
+
+    async def append(self, message):
+        # Incoming turns are saved with their Slack receipt by SlackChat.accept;
+        # outgoing messages already exist in the durable outbox. Avoid a second
+        # transcript that could disagree after cancellation or a failed send.
+        pass
+
+    async def history(self, conversation_id, *, limit=None):
+        parts = conversation_id.split(':')
+        if len(parts) not in {3, 4} or parts[0] != 'slack':
+            return ()
+        _, team, channel, *thread = parts
+        bindings = self.store.rows('SELECT run_id FROM slack_threads WHERE team_id=? AND channel=?' +
+                                   (' AND thread_ts=?' if thread else '') + ' ORDER BY started_ts LIMIT 1',
+                                   (team, channel, *thread))
+        if not bindings:
+            return ()
+        rows = self.store.messages(bindings[0]['run_id'])
+        if limit is not None:
+            rows = rows[-max(0, limit):] if limit > 0 else []
+        return tuple(Message(id=f"moyai:{bindings[0]['run_id']}:{row['id']}", conversation_id=conversation_id,
+                             channel='slack', sender=Sender(id=row['user_id'] or 'moyai'),
+                             text=row['content'], role=row['role']) for row in rows)
+
+
+class SlackWebhookChannel:
+    name = 'slack'
+
+    def __init__(self, owner):
+        self.owner = owner
+        self._receiver = None
+        self._closed = asyncio.Event()
+
+    def bind(self, receiver):
+        self._receiver = receiver
+
+    async def run(self):
+        # FastAPI receives signed events; there is no socket listener to start.
+        await self._closed.wait()
+
+    async def close(self):
+        self._closed.set()
+
+    async def handle_validated_event(self, *, team, event_id, channel, ts, root, user,
+                                     prompt, mentioned, direct_message, missing_cloud):
+        conversation = f'slack:{team}:{channel}' + ('' if direct_message else ':' + root)
+        message = Message(id=f'slack:{team}:{event_id}', conversation_id=conversation, channel=self.name,
+                          sender=Sender(id=user), text=prompt, role='user',
+                          metadata=MappingProxyType({'team': team, 'event_id': event_id, 'channel': channel,
+                              'ts': ts, 'root': root, 'mentioned': mentioned, 'direct_message': direct_message,
+                              'missing_cloud': tuple(missing_cloud)}))
+        await self._receiver(self, message)
+
+    def source_for_run(self, run_id):
+        binding = self.owner.store.rows('SELECT * FROM slack_threads WHERE run_id=?', (run_id,))[0]
+        conversation = f"slack:{binding['team_id']}:{binding['channel']}"
+        if not binding['channel'].startswith('D'):
+            conversation += ':' + binding['thread_ts']
+        return Message(id='moyai:' + run_id, conversation_id=conversation, channel=self.name,
+                       sender=Sender(id='moyai'), text='', role='user', metadata=MappingProxyType({'run_id': run_id}))
+
+    async def reply(self, source, content):
+        # Resolve the destination from our saved binding, never model output.
+        binding = self.owner.store.rows('SELECT * FROM slack_threads WHERE run_id=?', (source.metadata['run_id'],))[0]
+        if not self.owner.status()['enabled'] or binding['team_id'] != self.owner.connectors.slack_installation().get('team_id'):
+            raise RuntimeError('Slack connection changed before delivery.')
+        token = await self.owner.connectors.slack_bot_token()
+        response = await self.owner.connectors.request('POST', 'https://slack.com/api/chat.postMessage',
+            headers={'Authorization': f'Bearer {token}'}, json={
+                'channel': binding['channel'],
+                'thread_ts': None if binding['channel'].startswith('D') else binding['thread_ts'],
+                'text': content,
+                'blocks': [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': content, 'verbatim': True}}] if len(content) <= 3000 else None,
+                'unfurl_links': False, 'unfurl_media': False, 'parse': 'none', 'link_names': False})
+        return Message(id=f"slack:{binding['channel']}:{response.get('ts', '')}",
+                       conversation_id=source.conversation_id, channel=self.name,
+                       sender=Sender(id='moyai'), text=content, role='assistant',
+                       metadata=MappingProxyType({'slack_ts': response.get('ts', '')}))
+
+
+def connect_agentchat(owner):
+    channel = SlackWebhookChannel(owner)
+    app = AgentChat(channels=[channel], state=SessionState(owner.store))
+
+    @app.on_message
+    async def respond(context):
+        data = dict(context.message.metadata)
+        await owner.accept_message(user=context.sender.id, prompt=context.message.text, **data)
+        # Responses are posted later via AgentChat by the durable outbox worker.
+        return None
+
+    return app, channel

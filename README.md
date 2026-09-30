@@ -74,7 +74,7 @@ Browser acceptance covered desktop and a 390px narrow viewport, session search, 
 | Model access | OpenAI Chat Completions through your LiteLLM-compatible gateway. The control plane pins the model, caps output and request count, and keeps the model key outside sandboxes. |
 | Native connections | First-class Linear, Slack, and Notion cards; OAuth when app clients are configured; validated personal/integration-token alternative; encrypted token storage and OAuth refresh. |
 | Organization controls | Shared connections, separate admin/member access, enabled/paused and read-only policies, health checks, and an audit history of connection changes. |
-| Slack sessions | Mention @Moyai Devin in a channel the bot has joined. Signed, deduplicated events start one saved session per thread. The bot posts progress and answers; normal thread replies continue the same conversation. |
+| Slack sessions | Mention @Moyai Devin in a channel the bot has joined. Signed, deduplicated events start one saved session per thread. AgentChat routes mentions, thread follow-ups, and direct messages into saved conversations. The bot posts progress and answers. |
 | External writes | Exact arguments appear for one-time admin approval. Denied/expired actions are not sent. Ambiguous write failures are recorded as uncertain and never retried automatically. |
 | Agent browser | Isolated headless Chromium with open/read/click/fill tools over MCP; latest screenshot returned in the result archive. |
 | Results | Summary, tracked changes as a patch, eligible new files, and latest browser screenshot. Up to 2 MB per artifact file / 15 MB collected content / 20 MB archive download. Hidden files and symlinks are skipped. |
@@ -162,7 +162,7 @@ In Slack, mention the bot with `model opus` or `model astra` to set the model fo
 Read this thread and suggest the next step.
 ```
 
-A model-only command starts or updates the saved session without launching a sandbox. Its confirmation does not change running or already queued turns. Until ordinary Slack thread events are installed, include the bot mention on commands and follow-ups.
+A model-only command starts or updates the saved session without launching a sandbox. Its confirmation does not change running or already queued turns. These commands also work in DMs. Include the bot mention on channel follow-ups if the installation has not yet enabled ordinary thread events.
 
 ## Per-user model spend
 
@@ -184,12 +184,18 @@ Slack messages capture the sender from verified Slack events. In **Spend**, an a
 
 ## Chat with Moyai in Slack
 
-**Live thread-chat verification (September 29):** [#bot-spam test thread](https://berriaillm.slack.com/archives/C0B302ZJU05/p1790740160956979) used one session, `35f33e443f214d159978842947ed69d8`, for two real Hermes responses posted automatically to Slack. The first read the parent marker `cobalt-otter-58` and saved a local file containing `7`; the next recalled the marker, restored the file, and changed it to `12`. Both requests used mentions. Ordinary follow-up replies await the bot message-event subscriptions and the additional bot history grant; those settings are staged for approval. No external connected-app writes were performed.
+Moyai uses [BerriAI AgentChat](https://github.com/BerriAI/agentchat), pinned to `8790fe927029cb115dab17c5e14e3a0b699b3bcc`, for normalized messages, conversation locks, handler dispatch, and replies. Its stock Slack adapter uses Socket Mode and does not route ordinary channel-thread replies. Our public Channel/State adapter preserves the existing signed HTTP webhook, rotating OAuth credentials, SQLite receipts, saved sessions, and durable reply outbox. No Socket Mode app token is required. AgentChat does not grant Slack permissions; an administrator still installs the scopes and event subscriptions below.
+
+**AgentChat rollout:** implementation and automated checks are complete; live permission installation and channel/DM acceptance remain pending.
+
+**Live thread-chat verification (September 29):** [#bot-spam test thread](https://berriaillm.slack.com/archives/C0B302ZJU05/p1790740160956979) used one session, `35f33e443f214d159978842947ed69d8`, for two real Hermes responses posted automatically to Slack. The first read the parent marker `cobalt-otter-58` and saved a local file containing `7`; the next recalled the marker, restored the file, and changed it to `12`. Both requests used mentions. This earlier verification used mentions; the AgentChat rollout below adds ordinary thread follow-ups and DMs. No external connected-app writes were performed.
 
 
-Install the dedicated **Moyai Devin** Slack app with bot scopes `app_mentions:read`, `chat:write`, `channels:history`, and `groups:history`, subscribe to the `app_mention`, `message.channels`, and `message.groups` events, and set its request URL to `PUBLIC_URL/hooks/slack/events`. Keep the user OAuth scopes above for conversation search; bot and user credentials are separate. Configure `SLACK_SIGNING_SECRET`, `SLACK_BOT_ENABLED=true`, and `SLACK_SESSION_USERS` as comma-separated Slack user IDs or `*` for all members of the installed workspace. Set `SLACK_THREAD_CHAT_ENABLED=true` (the default) for ongoing thread chat. Reinstall/reconnect Slack after adding the bot history scopes. The live BerriAI installation permits workspace members.
+Install the dedicated **Moyai Devin** Slack app with bot scopes `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`, and `im:history`, subscribe to the `app_mention`, `message.channels`, `message.groups`, and `message.im` events, and set its request URL to `PUBLIC_URL/hooks/slack/events`. Keep the user OAuth scopes above for conversation search; bot and user credentials are separate. Configure `SLACK_SIGNING_SECRET`, `SLACK_BOT_ENABLED=true`, and `SLACK_SESSION_USERS` as comma-separated Slack user IDs or `*` for all members of the installed workspace. Set `SLACK_THREAD_CHAT_ENABLED=true` and `SLACK_DM_ENABLED=true` (the defaults). Enable App Home’s Messages tab and allow users to send messages to the app. Reinstall/reconnect Slack after adding the bot history scopes. The live BerriAI installation permits workspace members.
 
 Invite the bot to a channel and mention **@Moyai Devin** followed by a task. Moyai posts an acknowledgment, periodic progress, and the actual answer in the originating thread, along with a link to the standalone web session. Reply in that thread without another mention to continue the same saved conversation and files. Bot messages, edits/deletes, unrelated threads, and externally shared channel events are ignored. Attachments are identified as unread; their contents are not ingested automatically.
+
+Direct-message **Moyai Devin** to start without a mention. Subsequent DMs reuse the same saved conversation and files; replies appear directly in the DM. A DM begins with the current request and saved session history, without importing older DMs through the shared search account. One-to-one DMs are supported; group DMs are ignored. Each DM is bound to its original Slack sender, and each turn keeps that sender’s spend attribution. **DM sessions are also visible to signed-in BerriAI teammates in the web app.** The first acknowledgment and Connections page explain this shared visibility.
 
 Tasks use enabled organization connections. Everyone with access to the Slack thread can see the answers, including future answers to messages sent from its linked web session. The web composer shows this sharing state. External app writes still need an administrator to approve the exact action in the signed-in web app; saying “yes” in Slack cannot approve a write.
 

@@ -12,6 +12,7 @@ dependencies = [
   "modal>=1.4,<2",
   "itsdangerous>=2.2,<3",
   "PyJWT[crypto]>=2.10,<3",
+  "agentchat",
 ]
 
 [dependency-groups]
@@ -21,3 +22,6 @@ dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.uv.sources]
+agentchat = { git = "https://github.com/BerriAI/agentchat.git", rev = "8790fe927029cb115dab17c5e14e3a0b699b3bcc" }

@@ -1,4 +1,4 @@
-"""Signed Slack events start and continue sessions in their original thread."""
+"""Signed Slack events start and continue channel-thread and DM sessions."""
 import asyncio
 import hashlib
 import hmac
@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation
 from fastapi import HTTPException
 
 from .connectors import ConnectorError
+from .agentchat_slack import connect_agentchat
 from .db import now
 from .slack_chat import SlackChat
 
@@ -20,6 +21,7 @@ class SlackSessions:
         self.checkpoints, self.settings = checkpoints, settings
         self.jobs = set()
         self.chat = SlackChat(self)
+        self.agentchat, self.channel = connect_agentchat(self)
 
     def status(self):
         bot = self.connectors.slack_installation()
@@ -29,6 +31,8 @@ class SlackSessions:
         latest = self.store.rows("SELECT created_at,reply_status FROM slack_events ORDER BY created_at DESC LIMIT 1")
         return {"enabled": enabled, "bot_installed": bot.get("installed", False),
                 "thread_chat_enabled": self.settings.slack_thread_chat_enabled,
+                "messaging_adapter": "agentchat",
+                "direct_message_ready": self.settings.slack_thread_chat_enabled and self.settings.slack_dm_enabled and "im:history" in set(bot.get("scopes", [])),
                 "thread_reply_ready": self.settings.slack_thread_chat_enabled and {"channels:history", "groups:history"} <= set(bot.get("scopes", [])),
                 "bot_user_id": bot.get("user_id"), "team_id": bot.get("team_id"),
                 "audience": "Workspace members" if self.settings.slack_session_users == "*" else "Selected Slack users",
@@ -90,31 +94,40 @@ class SlackSessions:
             return {"ok": True}
         if len(prompt) > 16000:
             raise HTTPException(400, "Slack task is too long.")
+        direct_message = event.get('type') == 'message' and event.get('channel_type') == 'im' and channel.startswith('D')
+        if channel.startswith('D') and (not direct_message or not self.settings.slack_dm_enabled or not self.settings.slack_thread_chat_enabled):
+            return {'ok': True}
+        await self.channel.handle_validated_event(team=bot['team_id'], event_id=event_id, channel=channel,
+            ts=mention_ts, root=thread_ts, user=user, prompt=prompt, mentioned=mention in text,
+            direct_message=direct_message, missing_cloud=missing_cloud)
+        return {'ok': True}
+
+    async def accept_message(self, *, team, event_id, channel, ts, root, user, prompt,
+                             mentioned, direct_message, missing_cloud):
         if self.settings.slack_thread_chat_enabled:
             try:
-                run = self.chat.accept(team=bot["team_id"], event_id=event_id, channel=channel, ts=mention_ts,
-                                       root=thread_ts, user=user, prompt=prompt, mentioned=mention in text,
-                                       missing_cloud=missing_cloud)
+                run = self.chat.accept(team=team, event_id=event_id, channel=channel, ts=ts,
+                                       root=root, user=user, prompt=prompt, mentioned=mentioned,
+                                       direct_message=direct_message, missing_cloud=missing_cloud)
             except ValueError as exc:
                 raise HTTPException(503, str(exc))
             await self.checkpoints.flush()
             if run:
                 self.manager.submit(run)
-            return {"ok": True}
-        if event.get("type") != "app_mention" or mention not in text or len(prompt) < 3:
-            return {"ok": True}
+            return
+        if not mentioned or len(prompt) < 3:
+            return
         if missing_cloud:
-            raise HTTPException(503, "Cloud sessions are not configured.")
-        plugins = [x["id"] for x in self.connectors.list() if x["connected"] and x["enabled"]]
+            raise HTTPException(503, 'Cloud sessions are not configured.')
+        plugins = [x['id'] for x in self.connectors.list() if x['connected'] and x['enabled']]
         try:
-            run = self.store.create_slack_run(event_id, prompt, plugins, channel, thread_ts, user, mention_ts, bot['team_id'])
+            run = self.store.create_slack_run(event_id, prompt, plugins, channel, root, user, ts, team)
         except ValueError:
-            raise HTTPException(503, "The session queue is full.")
+            raise HTTPException(503, 'The session queue is full.')
         if run:
             await self.checkpoints.flush()
             self.manager.submit(run)
-            self.submit_reply(run["id"])
-        return {"ok": True}
+            self.submit_reply(run['id'])
 
     async def prepare(self, run_id):
         """Runs in the session job, never on Slack's acknowledgement path.
@@ -129,6 +142,16 @@ class SlackSessions:
         self.store.event(run_id, "context", "Reading the Slack conversation behind your request")
         context = {"messages": [], "kind": "thread" if source["thread_ts"] != source["mention_ts"] else "channel",
                    "captured_at": now(), "truncated": False, "permalink": ""}
+        if source['channel'].startswith('D'):
+            # A DM begins with this explicitly addressed request. Subsequent
+            # turns use saved session history; do not import earlier DMs through
+            # the shared search account, which may belong to another teammate.
+            context.update(kind='dm', messages=[{'ts': source['mention_ts'], 'user': source['user_id'],
+                           'text': self.store.run(run_id)['prompt']}])
+            self.store.execute("UPDATE slack_events SET context_status='ready',context_json=? WHERE run_id=?", (json.dumps(context), run_id))
+            self.store.event(run_id, 'context', 'Using the direct message and saved conversation')
+            await self.checkpoints.flush()
+            return
         try:
             async with asyncio.timeout(25):
                 if not self.connectors.allowed("slack_thread"):
@@ -267,3 +290,4 @@ class SlackSessions:
         for job in jobs:
             job.cancel()
         await asyncio.gather(*jobs, return_exceptions=True)
+        await self.agentchat.close()

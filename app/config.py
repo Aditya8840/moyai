@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     slack_signing_secret: str = ""
     slack_bot_enabled: bool = False
     slack_thread_chat_enabled: bool = True
+    slack_dm_enabled: bool = True
     # Comma-separated Slack user IDs, or * for all users in the installed team.
     # Empty disables inbound sessions even when the bot is installed.
     slack_session_users: str = ""

@@ -257,6 +257,8 @@ class Connectors:
                 params["scope"] = "app_mentions:read,chat:write"
                 if self.settings.slack_thread_chat_enabled:
                     params["scope"] += ",channels:history,groups:history"
+                    if self.settings.slack_dm_enabled:
+                        params["scope"] += ",im:history"
             base = "https://slack.com/oauth/v2/authorize"
         else:
             params["owner"] = "user"

@@ -85,10 +85,10 @@ def run(spec):
             "If source context is unavailable or incomplete, state the limitation and ask only for details you actually need. "
             "For Linear ticket requests, look up the team and use the issue creation tool to prepare the exact ticket for approval, when available. "
             "Never copy credentials into artifacts or messages. Use browser tools for web pages. "
-            + ("This session is mirrored to a Slack thread. Your final answer will be posted there automatically. "
+            + ("This session is mirrored to a Slack conversation. Your final answer will be posted there automatically. "
                "Reply conversationally to the latest message, use readable Markdown/code blocks, and ask questions here when needed. "
                "Do not use slack_send to deliver your answer or progress; the application posts those automatically. "
-               "The Slack thread's participants can see your replies: never include credentials or unrelated private information. "
+               "The Slack conversation’s participants can see your replies: never include credentials or unrelated private information. "
                "For external write approvals, direct the user to the web session; a Slack reply is not admin approval. " if spec.get("slack_thread_chat") else "") +
             "Do not push, merge, deploy, or publish unless explicitly requested. "
             "After a stopped or failed response, do not assume prior actions completed or replay external writes without verification. "

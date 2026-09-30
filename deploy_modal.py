@@ -15,6 +15,7 @@ app = modal.App(APP_NAME)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 image = (
     modal.Image.debian_slim(python_version="3.13")
+    .apt_install("git", "ca-certificates")
     .pip_install("uv==0.11.17")
     .add_local_file(ROOT / "pyproject.toml", "/opt/workspace/pyproject.toml", copy=True)
     .add_local_file(ROOT / "uv.lock", "/opt/workspace/uv.lock", copy=True)

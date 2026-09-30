@@ -70,7 +70,7 @@ class SlackChat:
         conn.execute('INSERT OR IGNORE INTO slack_outbox(run_id,dedupe_key,kind,text,created_at) VALUES(?,?,?,?,?)',
                      (run_id, key, kind, text, now()))
 
-    def accept(self, *, team, event_id, channel, ts, root, user, prompt, mentioned, missing_cloud):
+    def accept(self, *, team, event_id, channel, ts, root, user, prompt, mentioned, missing_cloud, direct_message=False):
         """Reserve the physical Slack message and queue its turn atomically."""
         original_prompt, selected_model, model_error = prompt, None, ''
         command = prompt.strip().lower().lstrip('/')
@@ -93,11 +93,17 @@ class SlackChat:
                             (event_id, channel, ts)).fetchone():
                 return None
             actor_id = self.store.slack_identity_in(conn, team, user)
+            if direct_message:
+                existing = conn.execute('SELECT t.*,e.user_id FROM slack_threads t JOIN slack_events e ON e.run_id=t.run_id WHERE t.team_id=? AND t.channel=? ORDER BY t.started_ts LIMIT 1', (team, channel)).fetchone()
+                if existing:
+                    if existing['user_id'] != user:
+                        return None
+                    root = existing['thread_ts']
             binding = conn.execute('SELECT * FROM slack_threads WHERE team_id=? AND channel=? AND thread_ts=?',
                                    (team, channel, root)).fetchone()
             fresh = False
             if not binding:
-                if not mentioned:
+                if not mentioned and not direct_message:
                     return None
                 # Explicit mention may reconnect a pre-upgrade thread. Old
                 # messages are never backfilled into Slack on deployment.
@@ -162,6 +168,8 @@ class SlackChat:
                             'wake': 'I’m listening again. Send your next message here.',
                             'status': 'This thread is paused.' if binding['paused'] else self.status_text(status),
                             'model': model_error or f'New messages in this session will use *{model_name}*. Running and already queued replies keep their original model.'}[command]
+                if fresh and direct_message:
+                    response += '\nThis conversation also appears in Moyai, where signed-in BerriAI teammates can view it.'
                 self.queue(conn, run_id, 'command:' + event_id, 'control', response + '\n' + self.link(run_id))
             else:
                 if missing_cloud:
@@ -174,10 +182,12 @@ class SlackChat:
                     message, submit = self.store.enqueue_message_in(conn, run_id, content, 'slack:' + digest(team + channel + ts), selected_model, actor_id)
                     message_id = message['id']
                     conn.execute('UPDATE slack_threads SET paused=0,last_progress=? WHERE run_id=?', (time.time(), run_id))
-                    followup_hint = ('You can keep chatting in this thread.' if self.owner.status()['thread_reply_ready'] else
+                    followup_hint = ('You can keep chatting in this thread.' if (direct_message or self.owner.status()['thread_reply_ready']) else
                                      'Mention me again in this thread to continue until the bot’s thread access is enabled.')
                     response = ('On it — I’ll read the context and reply here. ' + followup_hint if fresh else
                                 'Got it — I’ll continue in this session. Your message is queued if I’m still working.')
+                    if fresh and direct_message:
+                        response = 'On it — I’ll reply here. This conversation also appears in Moyai, where signed-in BerriAI teammates can view it. You can keep chatting here; use `sleep` to pause.'
                     if selected_model:
                         response += '\nModel: ' + next(item['name'] for item in self.settings.model_choices() if item['id'] == selected_model)
                     self.queue(conn, run_id, 'received:' + str(message_id), 'ack' if fresh else 'control', response + '\n' + self.link(run_id))
@@ -255,13 +265,9 @@ class SlackChat:
                 # Persist before external side effects. Ambiguous sends are
                 # marked uncertain and never replayed automatically.
                 await self.owner.checkpoints.flush()
-                token = await self.owner.connectors.slack_bot_token()
-                response = await self.owner.connectors.request('POST', 'https://slack.com/api/chat.postMessage',
-                    headers={'Authorization': f'Bearer {token}'}, json={
-                        'channel': row['channel'], 'thread_ts': row['thread_ts'], 'text': row['text'],
-                        'blocks': [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': row['text'], 'verbatim': True}}] if len(row['text']) <= 3000 else None,
-                        'unfurl_links': False, 'unfurl_media': False, 'parse': 'none', 'link_names': False})
-                self.store.execute("UPDATE slack_outbox SET status='sent',slack_ts=? WHERE id=?", (response.get('ts', ''), row['id']))
+                response = await self.owner.agentchat.reply(self.owner.channel,
+                    self.owner.channel.source_for_run(row['run_id']), row['text'])
+                self.store.execute("UPDATE slack_outbox SET status='sent',slack_ts=? WHERE id=?", (response.metadata['slack_ts'], row['id']))
                 if row['kind'] == 'ack':
                     self.store.execute("UPDATE slack_events SET reply_status='sent' WHERE run_id=?", (row['run_id'],))
             except (Exception, asyncio.CancelledError) as exc:
