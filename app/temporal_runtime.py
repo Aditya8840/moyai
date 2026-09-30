@@ -87,8 +87,9 @@ class TemporalRunManager(DurableRunner):
                 # credentials or request data. The inbox remains durable.
                 log.warning('Temporal connection paused (%s); retrying', type(exc).__name__)
                 self.ready.clear()
-                if self.worker and self.worker_task and not self.worker_task.done():
-                    await self.worker.shutdown()
+                if self.worker and self.worker_task:
+                    if not self.worker_task.done():
+                        await self.worker.shutdown()
                     await asyncio.gather(self.worker_task, return_exceptions=True)
                 await asyncio.sleep(5)
 
@@ -128,6 +129,7 @@ class TemporalRunManager(DurableRunner):
         if self.dispatch_task:
             self.dispatch_task.cancel()
             await asyncio.gather(self.dispatch_task, return_exceptions=True)
-        if self.worker and self.worker_task and not self.worker_task.done():
-            await self.worker.shutdown()
+        if self.worker and self.worker_task:
+            if not self.worker_task.done():
+                await self.worker.shutdown()
             await asyncio.gather(self.worker_task, return_exceptions=True)
