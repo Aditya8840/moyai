@@ -1,11 +1,11 @@
 """Durable, server-attributed gateway usage; monetary values remain decimal strings."""
-import asyncio
+import hashlib
+import hmac
 import json
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
-import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -106,7 +106,6 @@ class IdentityLink(BaseModel):
 class Spend:
     def __init__(self, store, settings, security, checkpoints):
         self.store, self.settings, self.security, self.checkpoints = store, settings, security, checkpoints
-        self.lock = asyncio.Lock()
         with store.connect() as conn:
             conn.executescript('''
                 CREATE TABLE IF NOT EXISTS model_requests (
@@ -118,19 +117,17 @@ class Spend:
                 );
                 CREATE INDEX IF NOT EXISTS idx_model_requests_gateway ON model_requests(key_hash,gateway_id);
                 CREATE INDEX IF NOT EXISTS idx_model_requests_time ON model_requests(key_hash,created_at);
-                CREATE TABLE IF NOT EXISTS gateway_usage (
-                    key_hash TEXT NOT NULL, request_id TEXT NOT NULL, local_request_id TEXT,
-                    created_at TEXT NOT NULL, model TEXT NOT NULL, cost TEXT,
-                    prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER,
-                    PRIMARY KEY(key_hash,request_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_gateway_usage_time ON gateway_usage(key_hash,created_at);
-                CREATE TABLE IF NOT EXISTS spend_sync (
-                    key_hash TEXT NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL,
-                    checked_at TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
-                    PRIMARY KEY(key_hash,start_date,end_date)
+                CREATE TABLE IF NOT EXISTS cost_callbacks (
+                    request_id TEXT NOT NULL REFERENCES model_requests(id), event_id TEXT NOT NULL,
+                    cost TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER,
+                    received_at TEXT NOT NULL, PRIMARY KEY(request_id,event_id)
                 );
             ''')
+            columns = {row['name'] for row in conn.execute('PRAGMA table_info(model_requests)')}
+            if 'callback_at' not in columns:
+                conn.execute('ALTER TABLE model_requests ADD COLUMN callback_at TEXT')
+            if 'callback_pending' not in columns:
+                conn.execute('ALTER TABLE model_requests ADD COLUMN callback_pending INTEGER NOT NULL DEFAULT 0')
 
     @property
     def key_hash(self):
@@ -148,109 +145,85 @@ class Spend:
         # Only the final stream extension or reconciled logs can price a stream.
         cost = None if streaming else money(upstream.headers.get('x-litellm-response-cost'))
         gateway_id = upstream.headers.get('x-litellm-call-id', '')[:200]
-        self.store.execute('UPDATE model_requests SET gateway_id=?,cost=? WHERE id=?', (gateway_id, cost, request_id))
+        self.store.execute('UPDATE model_requests SET gateway_id=?,cost=CASE WHEN callback_at IS NULL THEN ? ELSE cost END WHERE id=?', (gateway_id, cost, request_id))
 
     def finish(self, request_id, capture, status):
         usage = capture.usage if capture else {}
         def tokens(field):
             value = usage.get(field)
             return value if type(value) is int and value >= 0 else None
-        self.store.execute('UPDATE model_requests SET status=?,finished_at=?,cost=COALESCE(?,cost),prompt_tokens=?,completion_tokens=?,total_tokens=? WHERE id=?',
+        self.store.execute('UPDATE model_requests SET status=?,finished_at=?,cost=CASE WHEN callback_at IS NULL THEN COALESCE(?,cost) ELSE cost END,prompt_tokens=COALESCE(prompt_tokens,?),completion_tokens=COALESCE(completion_tokens,?),total_tokens=COALESCE(total_tokens,?) WHERE id=?',
                            (status, now(), capture.cost if capture else None, tokens('prompt_tokens'), tokens('completion_tokens'), tokens('total_tokens'), request_id))
 
-    def sync_state(self, key, start, end, status, detail=''):
-        self.store.execute('INSERT INTO spend_sync VALUES(?,?,?,?,?,?) ON CONFLICT(key_hash,start_date,end_date) DO UPDATE SET checked_at=excluded.checked_at,status=excluded.status,detail=excluded.detail',
-                           (key, str(start), str(end), now(), status, detail))
+    def callback_token(self, request_id):
+        return hmac.new(self.security.secret.encode(), ('moyai-cost:' + request_id).encode(), hashlib.sha256).hexdigest()
 
-    async def sync(self, start=None, end=None):
-        start, end, lower, upper = period(start, end)
-        if not self.key_hash or not self.settings.litellm_api_base:
-            return {'status': 'unavailable', 'detail': 'The model gateway is not configured.'}
-        async with self.lock:
-            key = self.key_hash
-            base = self.settings.litellm_api_base.rstrip('/').removesuffix('/v1')
-            records = []
-            try:
-                async with httpx.AsyncClient(timeout=30) as client:
-                    for page in range(1, 101):
-                        response = await client.get(base + '/spend/logs/v2', headers={'Authorization': 'Bearer ' + self.settings.litellm_api_key}, params={
-                            'api_key': key, 'start_date': lower, 'end_date': upper, 'page': page, 'page_size': 1000,
-                            'sort_by': 'startTime', 'sort_order': 'asc'})
-                        if response.status_code in {401, 403}:
-                            raise ValueError('The gateway key needs read-only access to /spend/logs/v2 to reconcile costs. Model calls still work.')
-                        response.raise_for_status()
-                        result = response.json()
-                        rows = result.get('data')
-                        if not isinstance(rows, list) or not isinstance(result.get('total'), int):
-                            raise ValueError('The gateway returned an unsupported spend report. Costs have not been reconciled.')
-                        records.extend(rows)
-                        if len(records) >= result['total']:
-                            break
-                        if not rows:
-                            raise ValueError('The gateway spend report was incomplete. Try syncing again.')
-                    else:
-                        raise ValueError('This range has too many requests. Choose a shorter date range.')
-                normalized = []
-                for row in records:
-                    # A broader reporting response must never import another key.
-                    if row.get('api_key') != key:
-                        raise ValueError('The gateway returned a different key. No report was imported.')
-                    request_id = row.get('request_id')
-                    if not isinstance(request_id, str) or not request_id:
-                        raise ValueError('The gateway report is missing request IDs.')
-                    created = stamp(row.get('startTime'))
-                    if not lower <= created < upper:
-                        continue
-                    metadata = row.get('metadata', {})
-                    if isinstance(metadata, str):
-                        try:
-                            metadata = json.loads(metadata)
-                        except ValueError:
-                            metadata = {}
-                    metadata = metadata if isinstance(metadata, dict) else {}
-                    correlation = metadata.get('moyai_request_id', '')
-                    if not isinstance(correlation, str):
-                        correlation = ''
-                    local = self.store.rows('SELECT id FROM model_requests WHERE key_hash=? AND (id=? OR gateway_id=? OR id=?) LIMIT 1', (key, request_id, request_id, correlation))
-                    def token(field):
-                        value = row.get(field)
-                        return value if type(value) is int and value >= 0 else None
-                    normalized.append((key, request_id, local[0]['id'] if local else None, created, str(row.get('model') or ''), money(row.get('spend')),
-                                       token('prompt_tokens'), token('completion_tokens'), token('total_tokens')))
-                # All pages validate before committing; retries replace the same
-                # gateway request, never add its charge twice.
-                with self.store.connect() as conn:
-                    conn.executemany('INSERT INTO gateway_usage VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(key_hash,request_id) DO UPDATE SET local_request_id=excluded.local_request_id,created_at=excluded.created_at,model=excluded.model,cost=excluded.cost,prompt_tokens=excluded.prompt_tokens,completion_tokens=excluded.completion_tokens,total_tokens=excluded.total_tokens', normalized)
-                self.sync_state(key, start, end, 'synced')
-            except (httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
-                detail = str(exc) if isinstance(exc, ValueError) else 'The gateway spend report is temporarily unavailable. Previously recorded costs are preserved.'
-                self.sync_state(key, start, end, 'unavailable', detail)
-            await self.checkpoints.flush()
-            return self.store.rows('SELECT checked_at,status,detail FROM spend_sync WHERE key_hash=? AND start_date=? AND end_date=?', (key, str(start), str(end)))[0]
+    def callback(self, payload):
+        records = payload if isinstance(payload, list) else [payload]
+        if not records or len(records) > 1000:
+            raise HTTPException(422, 'Send one cost event or a batch of up to 1000.')
+        normalized = []
+        for record in records:
+            if not isinstance(record, dict):
+                raise HTTPException(422, 'Invalid cost event.')
+            metadata = record.get('metadata') or {}
+            if not isinstance(metadata, dict):
+                raise HTTPException(422, 'Invalid cost metadata.')
+            # StandardLoggingPayload preserves this caller-owned metadata slot.
+            source = metadata.get('spend_logs_metadata') or metadata.get('requester_metadata') or metadata
+            if not isinstance(source, dict):
+                raise HTTPException(401, 'Invalid cost event authentication.')
+            request_id, token = source.get('moyai_request_id'), source.get('moyai_cost_token')
+            if (not isinstance(request_id, str) or len(request_id) > 100 or not isinstance(token, str)
+                    or not hmac.compare_digest(token, self.callback_token(request_id))):
+                raise HTTPException(401, 'Invalid cost event authentication.')
+            rows = self.store.rows('SELECT * FROM model_requests WHERE id=?', (request_id,))
+            if not rows:
+                raise HTTPException(401, 'Invalid cost event authentication.')
+            local = rows[0]
+            # The token is valid only for one pre-existing broker request. The
+            # sender/owner/model remain those captured by the server, never the
+            # untrusted user/model strings in the callback payload.
+            supplied_key = metadata.get('user_api_key_hash')
+            if supplied_key and supplied_key != local['key_hash']:
+                raise HTTPException(401, 'Cost event belongs to another gateway key.')
+            event_id = record.get('id') or record.get('litellm_call_id')
+            if not isinstance(event_id, str) or not event_id or len(event_id) > 300:
+                raise HTTPException(422, 'Cost event requires a stable event ID.')
+            cost = money(record.get('response_cost'))
+            usage = record.get('usage') if isinstance(record.get('usage'), dict) else record
+            def tokens(field):
+                value = usage.get(field)
+                return value if type(value) is int and value >= 0 else None
+            normalized.append((request_id, event_id, cost, tokens('prompt_tokens'), tokens('completion_tokens'), tokens('total_tokens'), now()))
+        accepted = 0
+        with self.store.connect() as conn:
+            for row in normalized:
+                accepted += conn.execute('INSERT OR IGNORE INTO cost_callbacks VALUES(?,?,?,?,?,?,?)', row).rowcount
+            for request_id in {row[0] for row in normalized}:
+                events = conn.execute('SELECT * FROM cost_callbacks WHERE request_id=?', (request_id,)).fetchall()
+                total = sum((Decimal(event['cost'] or '0') for event in events), Decimal(0))
+                pending = any(event['cost'] is None for event in events)
+                def tokens(field):
+                    known = [event[field] for event in events if event[field] is not None]
+                    return sum(known) if known else None
+                conn.execute('UPDATE model_requests SET cost=?,callback_at=?,callback_pending=?,prompt_tokens=?,completion_tokens=?,total_tokens=? WHERE id=?',
+                             (str(total), now(), pending, tokens('prompt_tokens'), tokens('completion_tokens'), tokens('total_tokens'), request_id))
+        return {'accepted': accepted, 'duplicates': len(records) - accepted}
 
     def report(self, start=None, end=None):
         start, end, lower, upper = period(start, end)
         users = {u['id']: u for u in self.store.rows('SELECT id,kind,email,name,linked_user_id FROM users')}
         requests = {r['id']: r for r in self.store.rows('SELECT * FROM model_requests WHERE key_hash=?', (self.key_hash,))}
-        gateway = self.store.rows('SELECT * FROM gateway_usage WHERE key_hash=? AND created_at>=? AND created_at<?', (self.key_hash, lower, upper))
-        # Match against all imported logs to avoid a double count at a UTC date
-        # boundary where the gateway and broker timestamps straddle midnight.
-        imported = {r['local_request_id'] for r in self.store.rows('SELECT local_request_id FROM gateway_usage WHERE key_hash=? AND local_request_id IS NOT NULL', (self.key_hash,))}
-        rows = []
-        for item in gateway:
-            local = requests.get(item['local_request_id'], {})
-            rows.append({**item, 'user_id': local.get('user_id', ''), 'run_id': local.get('run_id', ''), 'reconciled': True})
-        for item in requests.values():
-            if item['id'] not in imported and lower <= item['created_at'] < upper:
-                rows.append({**item, 'reconciled': False})
+        rows = [row for row in requests.values() if lower <= row['created_at'] < upper]
         def empty():
             return {'spend': Decimal(0), 'requests': 0, 'pending_costs': 0, 'unreconciled_requests': 0, 'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0, 'sessions': set()}
         groups = {user['id']: empty() for user in users.values() if user['kind'] == 'google'}
         sessions, models = {}, {}
         def add(bucket, row):
             bucket['requests'] += 1
-            bucket['pending_costs'] += row['cost'] is None
-            bucket['unreconciled_requests'] += not row['reconciled']
+            bucket['pending_costs'] += row['cost'] is None or bool(row['callback_pending'])
+            bucket['unreconciled_requests'] += not bool(row['callback_at'])
             bucket['spend'] += Decimal(row['cost'] or '0')
             for key in ('prompt_tokens', 'completion_tokens', 'total_tokens'):
                 bucket[key] += row[key] or 0
@@ -271,26 +244,14 @@ class Spend:
         def identity(user_id):
             return users.get(user_id, {'id': 'unattributed', 'name': 'Unattributed / earlier usage', 'email': '', 'kind': 'unattributed'})
         titles = {r['id']: r['prompt'].split('\n')[0][:150] for r in self.store.rows('SELECT id,prompt FROM runs')}
-        syncs = self.store.rows('SELECT checked_at,status,detail FROM spend_sync WHERE key_hash=? AND start_date=? AND end_date=?', (self.key_hash, str(start), str(end)))
-        total_gateway = sum((Decimal(r['cost'] or '0') for r in gateway), Decimal(0))
+        callback_total = sum((Decimal(row['cost'] or '0') for row in rows if row['callback_at']), Decimal(0))
         return {'start': str(start), 'end': str(end), 'currency': 'USD', 'timezone': 'UTC', 'total': clean(total),
-                'gateway_spend': str(total_gateway), 'gateway_requests': len(gateway), 'gateway_pending_costs': sum(r['cost'] is None for r in gateway),
-                'sync': syncs[0] if syncs else {'status': 'not_synced', 'detail': 'Sync with the gateway to verify totals.'},
+                'callback_spend': str(callback_total), 'callback_requests': sum(bool(row['callback_at']) for row in rows),
+                'last_callback_at': max((row['callback_at'] for row in requests.values() if row['callback_at']), default=None),
                 'users': [{**identity(key), **clean(value)} for key, value in sorted(groups.items(), key=lambda x: x[1]['spend'], reverse=True)],
                 'sessions': [{'user_id': user, 'user_name': identity(user)['name'], 'run_id': run, 'title': titles.get(run, 'Session'), **clean(value)} for (user, run), value in sorted(sessions.items(), key=lambda x: x[1]['spend'], reverse=True)],
                 'models': [{'model': key, **clean(value)} for key, value in models.items()],
                 'identities': list(users.values()), 'tracked_since': min((r['created_at'] for r in requests.values()), default=None)}
-
-    async def watch(self):
-        while True:
-            await asyncio.sleep(60)
-            try:
-                await self.sync()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # Reporting outages do not interrupt agent sessions.
-                pass
 
     def routes(self):
         router = APIRouter()
@@ -300,11 +261,18 @@ class Spend:
             self.security.require(request, admin=True)
             return self.report(start, end)
 
-        @router.post('/api/admin/spend/sync')
-        async def sync(request: Request, start: date | None = None, end: date | None = None):
-            self.security.require(request, mutation=True, admin=True)
-            await self.sync(start, end)
-            return self.report(start, end)
+        @router.post('/hooks/litellm/cost')
+        async def callback(request: Request):
+            raw = await request.body()
+            if len(raw) > 5 * 1024 * 1024:
+                raise HTTPException(413, 'Cost callback is too large.')
+            try:
+                payload = json.loads(raw)
+            except (ValueError, UnicodeDecodeError):
+                raise HTTPException(422, 'Invalid cost event JSON.')
+            result = self.callback(payload)
+            await self.checkpoints.flush()
+            return result
 
         @router.post('/api/admin/spend/link-slack')
         async def link(body: IdentityLink, request: Request):

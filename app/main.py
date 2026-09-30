@@ -114,13 +114,10 @@ def create_app(settings: Settings | None = None):
         await checkpoints.flush()
         slack.recover()
         store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
-        spend_watcher = asyncio.create_task(spend.watch())
         watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
         try:
             yield
         finally:
-            spend_watcher.cancel()
-            await asyncio.gather(spend_watcher, return_exceptions=True)
             await slack.shutdown()
             await manager.shutdown()
             if watcher:
@@ -564,7 +561,9 @@ def create_app(settings: Settings | None = None):
         request_id, end_user = spend.begin(run, selected_model)
         payload['user'] = end_user
         payload['metadata'] = {'moyai_request_id': request_id, 'session_id': run_id,
-                               'moyai_message_id': run['active_message_id'], 'tags': ['moyai-devin']}
+                               'moyai_message_id': run['active_message_id'], 'tags': ['moyai-devin'],
+                               'turn_off_message_logging': True,
+                               'spend_logs_metadata': {'moyai_request_id': request_id, 'moyai_cost_token': spend.callback_token(request_id)}}
         if payload.get('stream'):
             payload['stream_options'] = {'include_usage': True}
         await checkpoints.flush()
