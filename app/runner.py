@@ -114,7 +114,10 @@ class RunManager:
         sandbox = self.sandboxes.get(run_id)
         if sandbox:
             await sandbox.terminate.aio()
-        elif run["status"] == "queued":
+        elif run["status"] == "queued" or (run.get("chat_enabled") and not self.store.rows(
+                "SELECT 1 FROM messages WHERE run_id=? AND status='running'", (run_id,))):
+            # Slack may already have atomically reserved the stop while the
+            # background job is still fetching context, before claiming a turn.
             self.store.update_run(run_id, status="cancelled")
 
     async def execute(self, run):
@@ -223,6 +226,7 @@ class RunManager:
                 "timeout": self.settings.run_timeout_seconds - 90,
                 "chat_enabled": bool(run.get("chat_enabled")),
                 "slack_source": self.store.slack_source(run_id),
+                "slack_thread_chat": bool(self.store.rows("SELECT 1 FROM slack_threads WHERE run_id=?", (run_id,))) if self.settings.slack_thread_chat_enabled else False,
                 "history_fallback": [{"role": m["role"], "content": (f"[Prior {m['status']} message; context only, do not replay] " if m["role"] == "user" and m["status"] != "completed" else "") + m["content"]} for m in self.store.messages(run_id)
                                      if m["id"] < run.get("message_id", 0) and m["status"] not in {"queued", "running"}]}
         # Restored snapshots can contain an older adapter; refresh only our own

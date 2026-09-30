@@ -1,4 +1,4 @@
-"""Signed Slack mentions create sessions; bot replies contain only a session link."""
+"""Signed Slack events start and continue sessions in their original thread."""
 import asyncio
 import hashlib
 import hmac
@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 from .connectors import ConnectorError
 from .db import now
+from .slack_chat import SlackChat
 
 
 class SlackSessions:
@@ -18,6 +19,7 @@ class SlackSessions:
         self.store, self.connectors, self.manager = store, connectors, manager
         self.checkpoints, self.settings = checkpoints, settings
         self.jobs = set()
+        self.chat = SlackChat(self)
 
     def status(self):
         bot = self.connectors.slack_installation()
@@ -26,6 +28,7 @@ class SlackSessions:
                        and self.connectors.policy("slack")["enabled"])
         latest = self.store.rows("SELECT created_at,reply_status FROM slack_events ORDER BY created_at DESC LIMIT 1")
         return {"enabled": enabled, "bot_installed": bot.get("installed", False),
+                "thread_chat_enabled": self.settings.slack_thread_chat_enabled,
                 "bot_user_id": bot.get("user_id"), "team_id": bot.get("team_id"),
                 "audience": "Workspace members" if self.settings.slack_session_users == "*" else "Selected Slack users",
                 "last_session": latest[0] if latest else None}
@@ -57,14 +60,16 @@ class SlackSessions:
         if payload.get("type") != "event_callback" or not self.status()["enabled"]:
             return {"ok": True}
         event = payload.get("event", {})
-        if not isinstance(event, dict) or event.get("type") != "app_mention" or event.get("bot_id") or event.get("subtype"):
+        if (not isinstance(event, dict) or event.get("type") not in {"app_mention", "message"}
+                or event.get("bot_id") or event.get("bot_profile") or event.get("subtype") not in {None, "file_share"}
+                or payload.get("is_ext_shared_channel") or event.get("is_ext_shared_channel")):
             return {"ok": True}
         bot = self.connectors.slack_installation()
         allowed_users = {x.strip() for x in self.settings.slack_session_users.split(",")}
         if payload.get("team_id") != bot.get("team_id") or ("*" not in allowed_users and event.get("user") not in allowed_users):
             return {"ok": True}
-        if missing_cloud:
-            raise HTTPException(503, "Cloud sessions are not configured.")
+        if event.get("user") == bot.get("user_id"):
+            return {"ok": True}
         event_id, channel, user = payload.get("event_id", ""), event.get("channel", ""), event.get("user", "")
         mention_ts = event.get("ts", "")
         thread_ts = event.get("thread_ts") or mention_ts
@@ -79,13 +84,26 @@ class SlackSessions:
                 and Decimal(thread_ts) <= Decimal(mention_ts)):
             raise HTTPException(400, "Invalid Slack event fields.")
         mention = f"<@{bot.get('user_id')}>"
-        if mention not in text:
-            return {"ok": True}
         prompt = text.replace(mention, "").strip()
-        if len(prompt) < 3:
+        if not prompt:
             return {"ok": True}
         if len(prompt) > 16000:
             raise HTTPException(400, "Slack task is too long.")
+        if self.settings.slack_thread_chat_enabled:
+            try:
+                run = self.chat.accept(team=bot["team_id"], event_id=event_id, channel=channel, ts=mention_ts,
+                                       root=thread_ts, user=user, prompt=prompt, mentioned=mention in text,
+                                       missing_cloud=missing_cloud)
+            except ValueError as exc:
+                raise HTTPException(503, str(exc))
+            await self.checkpoints.flush()
+            if run:
+                self.manager.submit(run)
+            return {"ok": True}
+        if event.get("type") != "app_mention" or mention not in text or len(prompt) < 3:
+            return {"ok": True}
+        if missing_cloud:
+            raise HTTPException(503, "Cloud sessions are not configured.")
         plugins = [x["id"] for x in self.connectors.list() if x["connected"] and x["enabled"]]
         try:
             run = self.store.create_slack_run(event_id, prompt, plugins, channel, thread_ts, user, mention_ts)
@@ -238,10 +256,12 @@ class SlackSessions:
 
     def recover(self):
         self.store.execute("UPDATE slack_events SET reply_status='uncertain' WHERE reply_status='sending'")
-        for row in self.store.rows("SELECT run_id FROM slack_events WHERE reply_status='pending'"):
+        for row in self.store.rows("SELECT run_id FROM slack_events WHERE reply_status='pending' AND run_id NOT IN (SELECT run_id FROM slack_threads)"):
             self.submit_reply(row["run_id"])
+        self.chat.recover()
 
     async def shutdown(self):
+        await self.chat.shutdown()
         jobs = list(self.jobs)
         for job in jobs:
             job.cancel()

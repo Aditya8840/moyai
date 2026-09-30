@@ -147,3 +147,24 @@ async def test_shutdown_during_provisioning_cleans_up_after_creation(runner, mon
     assert sandbox.terminated
     assert runner.store.run(run["id"])["status"] == "interrupted"
     assert runner.store.run(run["id"])["token_hash"] == ""
+
+
+async def test_slack_stop_during_context_fetch_settles_and_can_continue(runner):
+    started, release = asyncio.Event(), asyncio.Event()
+    async def prepare(run_id):
+        started.set()
+        await release.wait()
+    runner.prepare_context = prepare
+    run = runner.store.create_run("Stop before context returns", "", "modal", [], chat_enabled=True)
+    runner.submit(run)
+    await started.wait()
+    # Slack reserves cancellation in its receipt transaction before cleanup.
+    runner.store.update_run(run['id'], status='stopping', token_hash='')
+    runner.store.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status='queued'", (run['id'],))
+    await runner.cancel(run['id'])
+    job = runner.jobs[run['id']]
+    release.set()
+    await job
+    assert runner.store.run(run['id'])['status'] == 'cancelled'
+    message, submit = runner.store.enqueue_message(run['id'], 'Continue now', 'followup')
+    assert submit and message['status'] == 'queued'

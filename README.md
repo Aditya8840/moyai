@@ -74,7 +74,7 @@ Browser acceptance covered desktop and a 390px narrow viewport, session search, 
 | Model access | OpenAI Chat Completions through your LiteLLM-compatible gateway. The control plane pins the model, caps output and request count, and keeps the model key outside sandboxes. |
 | Native connections | First-class Linear, Slack, and Notion cards; OAuth when app clients are configured; validated personal/integration-token alternative; encrypted token storage and OAuth refresh. |
 | Organization controls | Shared connections, separate admin/member access, enabled/paused and read-only policies, health checks, and an audit history of connection changes. |
-| Slack sessions | Mention @Moyai Devin in a channel the bot has joined. Signed, deduplicated events start a cloud session; the bot replies with a protected browser link. |
+| Slack sessions | Mention @Moyai Devin in a channel the bot has joined. Signed, deduplicated events start one saved session per thread. The bot posts progress and answers; normal thread replies continue the same conversation. |
 | External writes | Exact arguments appear for one-time admin approval. Denied/expired actions are not sent. Ambiguous write failures are recorded as uncertain and never retried automatically. |
 | Agent browser | Isolated headless Chromium with open/read/click/fill tools over MCP; latest screenshot returned in the result archive. |
 | Results | Summary, tracked changes as a patch, eligible new files, and latest browser screenshot. Up to 2 MB per artifact file / 15 MB collected content / 20 MB archive download. Hidden files and symlinks are skipped. |
@@ -147,11 +147,17 @@ Set `LINEAR_CLIENT_ID` / `LINEAR_CLIENT_SECRET`, `SLACK_CLIENT_ID` / `SLACK_CLIE
 
 This application registers its own app integrations. It does not reuse or copy credentials from the Codex/ChatGPT connectors in this chat.
 
-## Start a session from Slack
+## Chat with Moyai in Slack
 
-Install the dedicated **Moyai Devin** Slack app with bot scopes `app_mentions:read` and `chat:write`, subscribe to the `app_mention` event, and set its request URL to `PUBLIC_URL/hooks/slack/events`. Keep the user OAuth scopes above for conversation search; bot and user credentials are separate. Configure `SLACK_SIGNING_SECRET`, `SLACK_BOT_ENABLED=true`, and `SLACK_SESSION_USERS` as comma-separated Slack user IDs or `*` for all members of the installed workspace. The live BerriAI installation permits workspace members.
+Install the dedicated **Moyai Devin** Slack app with bot scopes `app_mentions:read`, `chat:write`, `channels:history`, and `groups:history`, subscribe to the `app_mention`, `message.channels`, and `message.groups` events, and set its request URL to `PUBLIC_URL/hooks/slack/events`. Keep the user OAuth scopes above for conversation search; bot and user credentials are separate. Configure `SLACK_SIGNING_SECRET`, `SLACK_BOT_ENABLED=true`, and `SLACK_SESSION_USERS` as comma-separated Slack user IDs or `*` for all members of the installed workspace. Set `SLACK_THREAD_CHAT_ENABLED=true` (the default) for ongoing thread chat. Reinstall/reconnect Slack after adding the bot history scopes. The live BerriAI installation permits workspace members.
 
-Invite the bot to a channel and mention **@Moyai Devin** followed by a task. The thread reply opens the session in the standalone Moyai Devin web app. Tasks use enabled organization connections; results and write approvals remain behind web sign-in. Replies never include task results. An uncertain Slack reply is not automatically retried. Duplicate delivery of the same Slack event cannot create duplicate sessions.
+Invite the bot to a channel and mention **@Moyai Devin** followed by a task. Moyai posts an acknowledgment, periodic progress, and the actual answer in the originating thread, along with a link to the standalone web session. Reply in that thread without another mention to continue the same saved conversation and files. Bot messages, edits/deletes, unrelated threads, and externally shared channel events are ignored. Attachments are identified as unread; their contents are not ingested automatically.
+
+Tasks use enabled organization connections. Everyone with access to the Slack thread can see the answers, including future answers to messages sent from its linked web session. The web composer shows this sharing state. External app writes still need an administrator to approve the exact action in the signed-in web app; saying “yes” in Slack cannot approve a write.
+
+Send `stop` to stop the response and cancel queued follow-ups; `sleep` also pauses listening and automatic answers in that thread. Use `wake` or a new direct mention to resume. `status` reports the session state. These commands must be the entire message. Pausing the organization Slack connection disables thread intake and pending replies.
+
+Inbound receipts and the outbound reply queue are durable. Duplicate event IDs or paired mention/message events cannot create duplicate turns. Answers are bounded, formatted for Slack, and prevented from triggering user/channel mentions. An uncertain Slack delivery is not automatically retried; the answer remains in the web app. Rollout never posts historical answers: older threads are attached only after a new explicit mention. Answers completed while a thread is asleep are not backfilled on wake.
 
 Before agent execution, Moyai reads the Slack discussion through the **user OAuth** connection. A thread mention captures the root and replies through the mention timestamp (up to three pages, retaining at most 50 messages); a top-level mention captures the nearest 30 channel messages through that timestamp. Context is bounded to 24,000 text characters, with at most 3,000 per message. Truncation, missing context, and unread attachments are explicitly reported. Later messages and Moyai’s own replies are excluded. The session shows the source link and included messages. Imported Slack content is labeled as untrusted reference data, separate from the current request.
 
@@ -204,9 +210,9 @@ The completed cloud checks are described at the top of this document. For future
 
 ## Scope and next steps
 
-The current boundary is a single shared internal workspace with public GitHub repositories. No private-repository GitHub App, automatic PR creation, organization SSO, per-user app grants, live remote-desktop viewer, or distributed worker queue is included. Files and conversation resume between turns; running processes and live browser tabs do not.
+The current boundary is a single shared internal workspace with public GitHub repositories. No private-repository GitHub App, automatic PR creation, per-user app grants, live remote-desktop viewer, or distributed worker queue is included. Files and conversation resume between turns; running processes and live browser tabs do not.
 
-For a broader team rollout, add SSO and per-user authorization, move orchestration to a durable worker service with Postgres, add a narrowly scoped GitHub App, and verify live writes against explicitly authorized disposable destinations. Keep a budget-limited LiteLLM key: request-count and output limits do not substitute for a currency budget. Network egress from the sandbox is not restricted to an allowlist, and downloaded source/app content remains untrusted input to the agent.
+For a broader team rollout, extend the existing Google SSO with per-user session authorization, move orchestration to a durable worker service with Postgres, add a narrowly scoped GitHub App, and verify live writes against explicitly authorized disposable destinations. Keep a budget-limited LiteLLM key: request-count and output limits do not substitute for a currency budget. Network egress from the sandbox is not restricted to an allowlist, and downloaded source/app content remains untrusted input to the agent.
 
 An encrypted database alone does not protect credentials from an attacker who also obtains the adjacent encryption key or controls the host. Store the cloud encryption key separately, restrict access to the host and backups, and rotate provider grants as needed. Stopping a run revokes new broker calls but cannot retract an external write already in flight.
 

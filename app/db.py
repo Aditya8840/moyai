@@ -81,6 +81,26 @@ class Store:
                     nonce TEXT NOT NULL, verifier TEXT NOT NULL,
                     return_path TEXT NOT NULL, expires REAL NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS slack_threads (
+                    team_id TEXT NOT NULL, channel TEXT NOT NULL, thread_ts TEXT NOT NULL,
+                    run_id TEXT NOT NULL UNIQUE REFERENCES runs(id), started_ts TEXT NOT NULL,
+                    paused INTEGER NOT NULL DEFAULT 0, last_message_id INTEGER NOT NULL DEFAULT 0,
+                    last_progress REAL NOT NULL DEFAULT 0,
+                    PRIMARY KEY(team_id,channel,thread_ts)
+                );
+                CREATE TABLE IF NOT EXISTS slack_receipts (
+                    event_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, channel TEXT NOT NULL,
+                    message_ts TEXT NOT NULL, user_id TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(id),
+                    message_id INTEGER, command TEXT NOT NULL DEFAULT '', handled INTEGER NOT NULL DEFAULT 1,
+                    UNIQUE(team_id,channel,message_ts)
+                );
+                CREATE TABLE IF NOT EXISTS slack_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES runs(id),
+                    dedupe_key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, text TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending', slack_ts TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_slack_outbox_status ON slack_outbox(status,id);
                 PRAGMA optimize;
             """)
             if "model_calls" not in {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}:
@@ -169,28 +189,34 @@ class Store:
     def enqueue_message(self, run_id, content, client_id):
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
-            if not row or not row["chat_enabled"]:
-                raise ValueError("This older task has no saved chat workspace. Start a new session.")
-            existing = conn.execute("SELECT * FROM messages WHERE run_id=? AND client_id=?", (run_id, client_id)).fetchone()
-            if existing:
-                if existing["content"] != content:
-                    raise ValueError("That message ID was already used for different text.")
-                return dict(existing), False
-            if row["status"] == "stopping":
-                raise ValueError("Wait for the current response to stop before sending another message.")
-            pending = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND status='queued'", (run_id,)).fetchone()[0]
-            count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user'", (run_id,)).fetchone()[0]
-            if pending >= 5 or count >= 100:
-                raise ValueError("This session allows 5 queued messages and 100 turns. Wait, or start a new session.")
-            if conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0] >= 20 and row["status"] in {"idle", "completed", "failed", "cancelled", "interrupted"}:
-                raise ValueError("The session queue is full. Wait for a response to finish.")
-            stamp = now()
-            message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at) VALUES(?,'user',?,'queued',?,?)", (run_id, content, client_id, stamp)).lastrowid
-            running = conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='running'", (run_id,)).fetchone()
-            if not running:
-                conn.execute("UPDATE runs SET status='queued',error='',updated_at=? WHERE id=?", (stamp, run_id))
-        self.event(run_id, "chat", "Message queued", {"message_id": message_id})
+            result, created = self.enqueue_message_in(conn, run_id, content, client_id)
+        if created:
+            self.event(run_id, "chat", "Message queued", {"message_id": result["id"]})
+        return result, created
+
+    def enqueue_message_in(self, conn, run_id, content, client_id):
+        """Caller owns a write transaction, including any transport receipt."""
+        row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+        if not row or not row["chat_enabled"]:
+            raise ValueError("This older task has no saved chat workspace. Start a new session.")
+        existing = conn.execute("SELECT * FROM messages WHERE run_id=? AND client_id=?", (run_id, client_id)).fetchone()
+        if existing:
+            if existing["content"] != content:
+                raise ValueError("That message ID was already used for different text.")
+            return dict(existing), False
+        if row["status"] == "stopping":
+            raise ValueError("Wait for the current response to stop before sending another message.")
+        pending = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND status='queued'", (run_id,)).fetchone()[0]
+        count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user'", (run_id,)).fetchone()[0]
+        if pending >= 5 or count >= 100:
+            raise ValueError("This session allows 5 queued messages and 100 turns. Wait, or start a new session.")
+        if conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0] >= 20 and row["status"] in {"idle", "completed", "failed", "cancelled", "interrupted"}:
+            raise ValueError("The session queue is full. Wait for a response to finish.")
+        stamp = now()
+        message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at) VALUES(?,'user',?,'queued',?,?)", (run_id, content, client_id, stamp)).lastrowid
+        running = conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='running'", (run_id,)).fetchone()
+        if not running:
+            conn.execute("UPDATE runs SET status='queued',error='',updated_at=? WHERE id=?", (stamp, run_id))
         return {"id": message_id, "status": "queued"}, True
 
     def claim_message(self, run_id):
