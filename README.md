@@ -307,7 +307,17 @@ An encrypted database alone does not protect credentials from an attacker who al
 Hermes is an independent MIT-licensed project from Nous Research. This MVP builds on it and is not affiliated with Devin.
 
 
-## Temporal session execution (opt-in)
+## Temporal session execution
+
+**Enabled in production September 30, 2026.** Render uses the BerriAI Temporal
+Cloud namespace `moyai-devin.vpxx6` in AWS Oregon (`us-west-2`), with 30-day
+workflow-history retention and task queue `moyai-sessions-v1`. Its endpoint is
+`moyai-devin.vpxx6.tmprl.cloud:7233`. The `moyai-devin-worker` service account has
+account Read-Only and Write access to this namespace only. Its
+`moyai-render-worker` API key expires **December 29, 2026**; rotate it before then
+and update Render's private environment. Local `.env` keeps
+`TEMPORAL_ENABLED=false` so development does not accidentally consume production
+tasks. Use a distinct queue and isolated database for integration tests.
 
 `TEMPORAL_ENABLED=true` wraps each chat in one long-lived `SessionWorkflow`.
 Messages continue to be committed to Render's SQLite inbox before acknowledgment.
@@ -408,3 +418,30 @@ renewal clocks. A deterministic local model fixture produced the file contents
 `x`, `x`, `xy`, `xy`, confirming each terminal write happened once. Both answers
 were recorded once; all test machines were terminated. This verifies the adapter
 and recovery mechanics, not a 23-hour endurance run or the production cutover.
+
+**Production recovery verified September 30, 2026:** commit `a39f68f` deployed to
+Render with Temporal enabled after a private database backup and confirmation
+that no legacy execution was active. A real
+[#bot-spam conversation](https://berriaillm.slack.com/archives/C0B302ZJU05/p1790794436049919)
+created [this session](https://moyai-devin.onrender.com/#run=6c4bad3e5a9e4b2c88c223bed07f2e24).
+Render was restarted during a 180-second terminal operation, with an ordinary
+Slack follow-up already queued. The replacement worker reattached to the same
+running Modal sandbox, completed the first response, and restored its snapshot
+on another sandbox for the follow-up. Both answers and both reaction receipts
+were sent once. The final downloaded archive contains exactly `first\nsecond\n`
+in `new-files/temporal-restart-check.txt`, demonstrating neither append was
+duplicated. The actual Cloud workflow history replayed successfully, recorded
+the retried Activity, contains no test prompt or credentials, and is now waiting
+for more messages with zero pending Activities. No Modal sandbox remained active.
+All existing shared connections and BerriAI sign-in remained present;
+unauthenticated configuration/session APIs returned 401 and health returned 200.
+
+The restart also exposed a browser feed that could remain closed after a
+deployment HTTP error. Commit `bb6fd9a` explicitly reconnects from the last event
+cursor while preserving the composer; regression checks cover repeated failures,
+duplicate events, navigating away, and stale callbacks. Run these checks with
+`node --test tests/test_chat_stream.cjs`.
+A second production restart with no active tasks verified that the updated web
+chat showed "Reconnecting", recovered without a page reload, and preserved an
+unsent draft. The Render Blueprint now also keeps `TEMPORAL_ENABLED=true`,
+matching the verified production configuration.
