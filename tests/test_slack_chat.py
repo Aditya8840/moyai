@@ -168,7 +168,7 @@ def test_queue_limit_has_one_visible_reply_and_no_dropped_duplicate_execution(sl
 
 def test_results_are_only_sent_to_original_thread_and_never_ping_users(slack_app):
     app, client, run_id = start(slack_app)
-    wait_for(lambda: app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='ack'")[0]['status'] == 'sent')
+    wait_for(lambda: app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='reaction'")[0]['status'] == 'sent')
     finish(app, run_id, 'Hello <!channel> <@U12345678>. The key is model-test-key.\n```python\nprint("hello")\n```')
     app.state.slack.chat.last_post.clear()
     asyncio.run(app.state.slack.chat.deliver_one())
@@ -182,7 +182,7 @@ def test_results_are_only_sent_to_original_thread_and_never_ping_users(slack_app
 
 def test_uncertain_outbox_delivery_survives_restart_without_resending(slack_app, monkeypatch):
     app, client, run_id = start(slack_app)
-    wait_for(lambda: app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='ack'")[0]['status'] == 'sent')
+    wait_for(lambda: app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='reaction'")[0]['status'] == 'sent')
     finish(app, run_id, 'An important answer')
     attempts = []
     async def fail(*args, **kwargs):
@@ -247,9 +247,9 @@ def test_agentchat_dm_followups_preserve_session_model_sender_and_top_level_repl
     assert messages[-1]['model'] == 'anthropic/claude-opus-5-5'
     assert messages[-1]['user_id'] == 'slack:T12345678:U12345678'
     assert app.state.store.run(run_id)['owner_id'] == messages[-1]['user_id']
-    wait_for(lambda: bool(sent))
-    assert all(msg['channel'] == 'D12345678' and msg['thread_ts'] is None for msg in sent)
-    assert 'signed-in BerriAI teammates can view it' in sent[0]['text']
+    wait_for(lambda: any('text' in item for item in sent))
+    assert all(msg['channel'] == 'D12345678' and msg.get('thread_ts') is None for msg in sent)
+    assert 'signed-in BerriAI teammates can view it' in next(item['text'] for item in sent if 'text' in item)
     history = asyncio.run(app.state.slack.agentchat.state.history('slack:T12345678:D12345678'))
     assert [m.text for m in history] == [m['content'] for m in messages]
     assert asyncio.run(app.state.slack.agentchat.state.history('slack:T12345678:D12345678',limit=0)) == ()
@@ -324,4 +324,96 @@ def test_slack_oauth_requests_bot_dm_and_thread_scopes(slack_app):
     app, _, _, _ = slack_app
     app.state.settings.slack_client_id = 'test-client'
     scope = parse_qs(urlparse(app.state.connectors.authorization_url('slack','state')).query)['scope'][0]
-    assert set(scope.split(',')) == {'app_mentions:read','chat:write','channels:history','groups:history','im:history'}
+    assert set(scope.split(',')) == {'app_mentions:read','chat:write','channels:history','groups:history','im:history','reactions:write','assistant:write'}
+
+
+def test_acknowledgment_is_one_reaction_without_periodic_chatter(slack_app):
+    app, client, run_id = start(slack_app)
+    wait_for(lambda: app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='reaction'")[0]['status'] == 'sent')
+    client.post('/hooks/slack/events', **signed(event('EvDuplicateType', type='message')))
+    app.state.store.execute('UPDATE slack_threads SET last_progress=0')
+    app.state.slack.chat.collect()
+    assert len(slack_app[3]) == 1
+    assert slack_app[3][0]['name'] == 'eyes'
+    assert not app.state.store.rows("SELECT * FROM slack_outbox WHERE kind IN ('ack','progress','control')")
+    finish(app, run_id, 'Here is the answer.')
+    app.state.slack.chat.last_post.clear()
+    asyncio.run(app.state.slack.chat.deliver_one())
+    assert slack_app[3][-1]['text'].startswith('Here is the answer.')
+
+
+def test_reaction_failure_does_not_prevent_the_answer(slack_app, monkeypatch):
+    app, client, _, sent = slack_app
+    real = app.state.connectors.request
+    async def reject_reaction(method, url, **kwargs):
+        if url.endswith('reactions.add'):
+            raise RuntimeError('missing_scope')
+        return await real(method, url, **kwargs)
+    monkeypatch.setattr(app.state.connectors, 'request', reject_reaction)
+    _, _, run_id = start(slack_app)
+    wait_for(lambda: app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='reaction'")[0]['status'] == 'uncertain')
+    finish(app, run_id, 'Still answered.')
+    app.state.slack.chat.last_post.clear()
+    asyncio.run(app.state.slack.chat.deliver_one())
+    assert sent[-1]['text'].startswith('Still answered.')
+    assert app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='answer'")[0]['status'] == 'sent'
+
+
+def test_questions_addressed_to_someone_else_do_not_wake_moyai(slack_app):
+    app, client, run_id = start(slack_app)
+    for index, text in enumerate(['<@U88888888> what is <@U99999999>?', '<@U88888888> please continue'], 1):
+        send(client, index, text)
+    assert len(app.state.store.messages(run_id)) == 1
+    send(client, 3, '<@U99999999> tell me about <@U88888888>')
+    send(client, 4, '<@U88888888> <@U99999999> please both explain')
+    assert len(app.state.store.messages(run_id)) == 3
+    assert '<@U88888888>' in app.state.store.messages(run_id)[-2]['content']
+
+
+def test_reactions_cannot_target_a_different_message_or_workspace(slack_app):
+    import pytest
+    app, _, run_id = start(slack_app)
+    with pytest.raises(RuntimeError, match='destination'):
+        asyncio.run(app.state.slack.channel.acknowledge(run_id, '1790718000.654321'))
+    app.state.store.execute("UPDATE slack_threads SET team_id='TOTHER123'")
+    with pytest.raises(RuntimeError, match='destination'):
+        asyncio.run(app.state.slack.channel.acknowledge(run_id, ROOT))
+
+
+def test_dm_visibility_notice_moves_to_first_answer(slack_app):
+    app, client, runs, _ = slack_app
+    client.post('/hooks/slack/events', **signed(dm_event(1, 'Hello')))
+    run_id = runs[0]['id']
+    finish(app, run_id, 'Hello back.')
+    client.post('/hooks/slack/events', **signed(dm_event(2, 'Again')))
+    finish(app, run_id, 'Again back.')
+    answers = app.state.store.rows("SELECT text FROM slack_outbox WHERE kind='answer' ORDER BY id")
+    assert 'signed-in BerriAI teammates' in answers[0]['text']
+    assert 'signed-in BerriAI teammates' not in answers[1]['text']
+
+
+def test_agent_panel_threads_stay_separate_from_each_other_and_plain_dms(slack_app):
+    app, client, runs, sent = slack_app
+    client.post('/hooks/slack/events', **signed(dm_event(1, 'Plain DM')))
+    main_run = runs[-1]['id']
+    threads = ['1790728000.123456', '1790728100.123456']
+    thread_runs = []
+    for index, root in enumerate(threads, 2):
+        payload = dm_event(index, 'Thread '+str(index))
+        payload['event']['thread_ts'] = root
+        client.post('/hooks/slack/events', **signed(payload))
+        thread_runs.append(runs[-1]['id'])
+    assert len(set([main_run, *thread_runs])) == 3
+    followup = dm_event(4, 'Continue the first agent panel thread')
+    followup['event']['thread_ts'] = threads[0]
+    client.post('/hooks/slack/events', **signed(followup))
+    client.post('/hooks/slack/events', **signed(dm_event(5, 'Continue the plain DM')))
+    assert len(app.state.store.messages(main_run)) == 2
+    assert len(app.state.store.messages(thread_runs[0])) == 2
+    assert len(app.state.store.messages(thread_runs[1])) == 1
+    channel = app.state.slack.channel
+    for run_id, root in zip(thread_runs, threads):
+        source = channel.source_for_run(run_id)
+        assert source.conversation_id.endswith(':'+root)
+        asyncio.run(channel.reply(source, 'Panel answer'))
+        assert sent[-1]['thread_ts'] == root

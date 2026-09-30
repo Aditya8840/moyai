@@ -162,14 +162,14 @@ class Connectors:
                 self.save("slack", credentials, rows[0]["label"])
             return bot["access_token"]
 
-    async def request(self, method, url, **kwargs):
+    async def request(self, method, url, *, allowed_errors=(), **kwargs):
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.request(method, url, **kwargs)
                 if response.status_code >= 400:
                     raise ConnectorError(f"App request failed ({response.status_code}). Check access, scopes, or rate limits.")
                 data = response.json()
-                if data.get("ok") is False or data.get("errors"):
+                if (data.get("ok") is False and data.get("error") not in allowed_errors) or data.get("errors"):
                     raise ConnectorError("The app rejected this operation. Check the connection and its permissions.")
                 return data
         except (httpx.HTTPError, ValueError) as exc:
@@ -254,7 +254,7 @@ class Connectors:
         elif provider == "slack":
             params.update(user_scope="search:read,channels:history,groups:history,im:history,mpim:history,chat:write")
             if self.settings.slack_bot_enabled:
-                params["scope"] = "app_mentions:read,chat:write"
+                params["scope"] = "app_mentions:read,chat:write,reactions:write,assistant:write"
                 if self.settings.slack_thread_chat_enabled:
                     params["scope"] += ",channels:history,groups:history"
                     if self.settings.slack_dm_enabled:

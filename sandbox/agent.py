@@ -107,7 +107,8 @@ def run_agent(spec, relay):
                "For external write approvals, direct the user to the web session; a Slack reply is not admin approval. " if spec.get("slack_thread_chat") else "") +
             "Do not push, merge, deploy, or publish unless explicitly requested. "
             "After a stopped or failed response, do not assume prior actions completed or replay external writes without verification. "
-            "Do not claim a check passed unless you ran it. End with work done, verification, and limitations."
+            "Do not claim a check passed unless you ran it. For work tasks, summarize work done, verification, and limitations. "
+            "For conversational questions, answer directly and naturally without status preambles or a routine work summary."
         ))
         if spec.get("chat_enabled"):
             if not isinstance(result.get("messages"), list):

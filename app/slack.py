@@ -32,6 +32,7 @@ class SlackSessions:
         return {"enabled": enabled, "bot_installed": bot.get("installed", False),
                 "thread_chat_enabled": self.settings.slack_thread_chat_enabled,
                 "messaging_adapter": "agentchat",
+                "reaction_ready": "reactions:write" in set(bot.get("scopes", [])),
                 "direct_message_ready": self.settings.slack_thread_chat_enabled and self.settings.slack_dm_enabled and "im:history" in set(bot.get("scopes", [])),
                 "thread_reply_ready": self.settings.slack_thread_chat_enabled and {"channels:history", "groups:history"} <= set(bot.get("scopes", [])),
                 "bot_user_id": bot.get("user_id"), "team_id": bot.get("team_id"),
@@ -89,6 +90,11 @@ class SlackSessions:
                 and Decimal(thread_ts) <= Decimal(mention_ts)):
             raise HTTPException(400, "Invalid Slack event fields.")
         mention = f"<@{bot.get('user_id')}>"
+        # A mention can be the subject of a question to somebody else:
+        # "@OtherAgent what is @Moyai?" must not wake both agents.
+        addressed = re.match(r'^\s*((?:<@[UW][A-Z0-9]{7,30}>[,:]?\s*)+)', text)
+        if addressed and mention not in addressed[1]:
+            return {'ok': True}
         prompt = text.replace(mention, "").strip()
         if not prompt:
             return {"ok": True}

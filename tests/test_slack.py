@@ -36,7 +36,7 @@ def slack_app(tmp_path, monkeypatch):
     for provider in ("slack", "linear", "notion"):
         credentials = {"access_token": "provider-user-secret", "kind": "oauth"}
         if provider == "slack":
-            credentials["bot"] = {"access_token": "separate-bot-secret", "team": {"id": "T12345678"}, "bot_user_id": "U99999999"}
+            credentials["bot"] = {"access_token": "separate-bot-secret", "team": {"id": "T12345678"}, "bot_user_id": "U99999999", "scope": "reactions:write"}
         app.state.connectors.save(provider, credentials, "Test organization")
     runs, messages = [], []
     monkeypatch.setattr(app.state.manager, "submit", lambda run: runs.append(run))
@@ -58,7 +58,7 @@ def wait_for(predicate):
     raise AssertionError("Slack background work did not finish")
 
 
-def test_signed_mentions_create_one_session_and_reply_only_with_a_link(slack_app):
+def test_signed_mentions_create_one_session_and_react_to_the_request(slack_app):
     app, client, runs, messages = slack_app
     app.state.store.execute("INSERT INTO connection_policies(provider,enabled,read_only) VALUES('notion',0,0)")
     payload = event(thread_ts="1790718000.654321")
@@ -69,11 +69,7 @@ def test_signed_mentions_create_one_session_and_reply_only_with_a_link(slack_app
     assert runs[0]["mode"] == "modal"
     wait_for(lambda: len(messages) == 1)
     message = messages[0]
-    assert message["thread_ts"] == "1790718000.654321"
-    assert "https://workspace.example/#run=" + runs[0]["id"] in message["text"]
-    assert "Read the MCP issue" not in message["text"]
-    assert "secret" not in message["text"]
-    assert message["unfurl_links"] is False
+    assert message == {"channel": "C12345678", "timestamp": "1790719000.123456", "name": "eyes"}
     wait_for(lambda: app.state.store.rows("SELECT reply_status FROM slack_events")[0]["reply_status"] == "sent")
 
 

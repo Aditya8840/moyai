@@ -43,7 +43,7 @@ class SessionState:
             return ()
         _, team, channel, *thread = parts
         bindings = self.store.rows('SELECT run_id FROM slack_threads WHERE team_id=? AND channel=?' +
-                                   (' AND thread_ts=?' if thread else '') + ' ORDER BY started_ts LIMIT 1',
+                                   (' AND thread_ts=?' if thread else ' AND thread_ts=started_ts') + ' ORDER BY started_ts LIMIT 1',
                                    (team, channel, *thread))
         if not bindings:
             return ()
@@ -75,7 +75,7 @@ class SlackWebhookChannel:
 
     async def handle_validated_event(self, *, team, event_id, channel, ts, root, user,
                                      prompt, mentioned, direct_message, missing_cloud):
-        conversation = f'slack:{team}:{channel}' + ('' if direct_message else ':' + root)
+        conversation = f'slack:{team}:{channel}' + ('' if direct_message and root == ts else ':' + root)
         message = Message(id=f'slack:{team}:{event_id}', conversation_id=conversation, channel=self.name,
                           sender=Sender(id=user), text=prompt, role='user',
                           metadata=MappingProxyType({'team': team, 'event_id': event_id, 'channel': channel,
@@ -86,7 +86,7 @@ class SlackWebhookChannel:
     def source_for_run(self, run_id):
         binding = self.owner.store.rows('SELECT * FROM slack_threads WHERE run_id=?', (run_id,))[0]
         conversation = f"slack:{binding['team_id']}:{binding['channel']}"
-        if not binding['channel'].startswith('D'):
+        if not binding['channel'].startswith('D') or binding['thread_ts'] != binding['started_ts']:
             conversation += ':' + binding['thread_ts']
         return Message(id='moyai:' + run_id, conversation_id=conversation, channel=self.name,
                        sender=Sender(id='moyai'), text='', role='user', metadata=MappingProxyType({'run_id': run_id}))
@@ -100,7 +100,7 @@ class SlackWebhookChannel:
         response = await self.owner.connectors.request('POST', 'https://slack.com/api/chat.postMessage',
             headers={'Authorization': f'Bearer {token}'}, json={
                 'channel': binding['channel'],
-                'thread_ts': None if binding['channel'].startswith('D') else binding['thread_ts'],
+                'thread_ts': None if binding['channel'].startswith('D') and binding['thread_ts'] == binding['started_ts'] else binding['thread_ts'],
                 'text': content,
                 'blocks': [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': content, 'verbatim': True}}] if len(content) <= 3000 else None,
                 'unfurl_links': False, 'unfurl_media': False, 'parse': 'none', 'link_names': False})
@@ -108,6 +108,18 @@ class SlackWebhookChannel:
                        conversation_id=source.conversation_id, channel=self.name,
                        sender=Sender(id='moyai'), text=content, role='assistant',
                        metadata=MappingProxyType({'slack_ts': response.get('ts', '')}))
+
+    async def acknowledge(self, run_id, message_ts):
+        """React only to an accepted message in the immutable session binding."""
+        rows = self.owner.store.rows('SELECT t.team_id,t.channel FROM slack_threads t JOIN slack_receipts r '
+            'ON r.run_id=t.run_id AND r.team_id=t.team_id AND r.channel=t.channel '
+            'WHERE t.run_id=? AND r.message_ts=? AND r.message_id IS NOT NULL', (run_id, message_ts))
+        if not rows or not self.owner.status()['enabled'] or rows[0]['team_id'] != self.owner.connectors.slack_installation().get('team_id'):
+            raise RuntimeError('Slack destination changed before acknowledgment.')
+        token = await self.owner.connectors.slack_bot_token()
+        await self.owner.connectors.request('POST', 'https://slack.com/api/reactions.add',
+            headers={'Authorization': f'Bearer {token}'}, allowed_errors={'already_reacted'},
+            json={'channel': rows[0]['channel'], 'timestamp': message_ts, 'name': 'eyes'})
 
 
 def connect_agentchat(owner):

@@ -93,8 +93,8 @@ class SlackChat:
                             (event_id, channel, ts)).fetchone():
                 return None
             actor_id = self.store.slack_identity_in(conn, team, user)
-            if direct_message:
-                existing = conn.execute('SELECT t.*,e.user_id FROM slack_threads t JOIN slack_events e ON e.run_id=t.run_id WHERE t.team_id=? AND t.channel=? ORDER BY t.started_ts LIMIT 1', (team, channel)).fetchone()
+            if direct_message and root == ts:
+                existing = conn.execute('SELECT t.*,e.user_id FROM slack_threads t JOIN slack_events e ON e.run_id=t.run_id WHERE t.team_id=? AND t.channel=? AND t.thread_ts=t.started_ts ORDER BY t.started_ts LIMIT 1', (team, channel)).fetchone()
                 if existing:
                     if existing['user_id'] != user:
                         return None
@@ -182,15 +182,7 @@ class SlackChat:
                     message, submit = self.store.enqueue_message_in(conn, run_id, content, 'slack:' + digest(team + channel + ts), selected_model, actor_id)
                     message_id = message['id']
                     conn.execute('UPDATE slack_threads SET paused=0,last_progress=? WHERE run_id=?', (time.time(), run_id))
-                    followup_hint = ('You can keep chatting in this thread.' if (direct_message or self.owner.status()['thread_reply_ready']) else
-                                     'Mention me again in this thread to continue until the bot’s thread access is enabled.')
-                    response = ('On it — I’ll read the context and reply here. ' + followup_hint if fresh else
-                                'Got it — I’ll continue in this session. Your message is queued if I’m still working.')
-                    if fresh and direct_message:
-                        response = 'On it — I’ll reply here. This conversation also appears in Moyai, where signed-in BerriAI teammates can view it. You can keep chatting here; use `sleep` to pause.'
-                    if selected_model:
-                        response += '\nModel: ' + next(item['name'] for item in self.settings.model_choices() if item['id'] == selected_model)
-                    self.queue(conn, run_id, 'received:' + str(message_id), 'ack' if fresh else 'control', response + '\n' + self.link(run_id))
+                    self.queue(conn, run_id, 'received:' + str(message_id), 'reaction', ts)
                     conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'chat','Message received from Slack',?,?)",
                                  (run_id, json.dumps({'message_id': message_id, 'user_id': user}), now()))
                 except ValueError as exc:
@@ -236,6 +228,9 @@ class SlackChat:
                             value = 'Response ' + message['status'] + ':\n\n' + value
                         if len(value) > 32000:
                             value = value[:32000] + '\n\n[Long response shortened; the full answer is in the web session.]'
+                        if binding['channel'].startswith('D') and not conn.execute(
+                            "SELECT 1 FROM slack_outbox WHERE run_id=? AND kind='answer' LIMIT 1", (run_id,)).fetchone():
+                            value += '\n\nThis conversation also appears in Moyai, where signed-in BerriAI teammates can view it.'
                         chunks = split_reply(slack_text(value))
                         for index, chunk in enumerate(chunks):
                             suffix = '\n\n' + self.link(run_id) if index == len(chunks) - 1 else ''
@@ -246,9 +241,6 @@ class SlackChat:
                 for approval in conn.execute("SELECT id FROM approvals WHERE run_id=? AND status='pending'", (run_id,)).fetchall():
                     self.queue(conn, run_id, 'approval:' + approval['id'], 'approval',
                                'I need an administrator to review an external change. Approve or deny the exact action in the web session.\n' + self.link(run_id))
-                if binding['status'] not in TERMINAL and time.time() - binding['last_progress'] >= 45:
-                    self.queue(conn, run_id, f"progress:{run_id}:{int(time.time() // 45)}", 'progress', self.status_text(binding['status']))
-                    conn.execute('UPDATE slack_threads SET last_progress=? WHERE run_id=?', (time.time(), run_id))
                 if binding['status'] == 'interrupted':
                     self.queue(conn, run_id, f"interrupted:{run_id}:{binding['updated_at']}", 'control', self.status_text('interrupted') + '\n' + self.link(run_id))
 
@@ -258,7 +250,7 @@ class SlackChat:
                 continue
             if (not self.settings.slack_thread_chat_enabled or not self.owner.status()['enabled']
                     or row['team_id'] != self.owner.connectors.slack_installation().get('team_id')
-                    or (row['paused'] and row['kind'] in {'answer', 'progress', 'approval'})):
+                    or (row['paused'] and row['kind'] in {'answer', 'progress', 'approval', 'reaction'})):
                 self.store.execute("UPDATE slack_outbox SET status='skipped' WHERE id=?", (row['id'],))
                 continue
             if not self.store.execute("UPDATE slack_outbox SET status='sending' WHERE id=? AND status='pending'", (row['id'],)):
@@ -267,16 +259,24 @@ class SlackChat:
                 # Persist before external side effects. Ambiguous sends are
                 # marked uncertain and never replayed automatically.
                 await self.owner.checkpoints.flush()
-                response = await self.owner.agentchat.reply(self.owner.channel,
-                    self.owner.channel.source_for_run(row['run_id']), row['text'])
-                self.store.execute("UPDATE slack_outbox SET status='sent',slack_ts=? WHERE id=?", (response.metadata['slack_ts'], row['id']))
-                if row['kind'] == 'ack':
+                if row['kind'] == 'reaction':
+                    await self.owner.channel.acknowledge(row['run_id'], row['text'])
+                    sent_ts = row['text']
+                else:
+                    response = await self.owner.agentchat.reply(self.owner.channel,
+                        self.owner.channel.source_for_run(row['run_id']), row['text'])
+                    sent_ts = response.metadata['slack_ts']
+                self.store.execute("UPDATE slack_outbox SET status='sent',slack_ts=? WHERE id=?", (sent_ts, row['id']))
+                if row['kind'] in {'ack', 'reaction'}:
                     self.store.execute("UPDATE slack_events SET reply_status='sent' WHERE run_id=?", (row['run_id'],))
             except (Exception, asyncio.CancelledError) as exc:
                 self.store.execute("UPDATE slack_outbox SET status='uncertain' WHERE id=?", (row['id'],))
-                if row['kind'] == 'ack':
+                if row['kind'] in {'ack', 'reaction'}:
                     self.store.execute("UPDATE slack_events SET reply_status='uncertain' WHERE run_id=?", (row['run_id'],))
-                self.store.event(row['run_id'], 'status', 'Slack reply delivery could not be confirmed. The reply remains in the web session and will not be sent twice automatically.')
+                self.store.event(row['run_id'], 'status',
+                    'Slack acknowledgment reaction could not be confirmed. Check the bot’s reactions:write permission; the answer will still be delivered.'
+                    if row['kind'] == 'reaction' else
+                    'Slack reply delivery could not be confirmed. The reply remains in the web session and will not be sent twice automatically.')
                 if isinstance(exc, asyncio.CancelledError):
                     raise
             finally:
@@ -306,6 +306,8 @@ class SlackChat:
 
     def recover(self):
         self.store.execute("UPDATE slack_outbox SET status='uncertain' WHERE status='sending'")
+        self.store.execute("UPDATE slack_outbox SET status='skipped' WHERE status='pending' AND "
+                           "(kind IN ('ack','progress') OR (kind='control' AND dedupe_key LIKE 'received:%'))")
         if not self.watcher or self.watcher.done():
             self.watcher = asyncio.create_task(self.watch())
 
