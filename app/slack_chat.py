@@ -232,6 +232,8 @@ class SlackChat:
                 for message in messages:
                     if allowed and not binding['paused']:
                         value = self.scrub(message['content'])
+                        if message['status'] in {'failed', 'cancelled', 'interrupted'}:
+                            value = 'Response ' + message['status'] + ':\n\n' + value
                         if len(value) > 32000:
                             value = value[:32000] + '\n\n[Long response shortened; the full answer is in the web session.]'
                         chunks = split_reply(slack_text(value))

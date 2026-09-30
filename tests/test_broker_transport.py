@@ -1,0 +1,149 @@
+import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import httpx
+import pytest
+
+from app.security import digest
+from sandbox.agent import conversation_prompt
+from sandbox.broker_relay import BrokerRelay, EDGE_ERROR
+from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, cipher, seal, unseal
+from test_spend import active
+from test_workspace import workspace, cloud_capability, wait_for
+
+CODE = '''Repro: curl -s localhost:4100/openapi.json | python3 -c "import json,sys; print(json.load(sys.stdin)['paths'])"
+Router already in sys.modules; check /v1/mcp/server/{server_id}/user-env-vars.
+Fix merged: https://github.com/BerriAI/litellm/pull/38416
+'''
+
+
+def test_envelopes_are_bound_to_turn_capability_route_age_and_size():
+    body = json.dumps({'messages': [{'role': 'tool', 'content': CODE}]}).encode()
+    packet = seal('turn-one', '/v1/chat/completions', body)
+    assert CODE.encode() not in packet
+    assert unseal('turn-one', '/v1/chat/completions', packet) == body
+    for token, path, value in [('turn-two', '/v1/chat/completions', packet),
+                               ('turn-one', '/tools/call', packet),
+                               ('turn-one', '/v1/chat/completions', packet[:-5] + b'AAAAA')]:
+        with pytest.raises(ValueError):
+            unseal(token, path, value)
+    expired = cipher('turn-one').encrypt_at_time(b'/v1/chat/completions\n' + body, int(time.time()) - 301)
+    with pytest.raises(ValueError):
+        unseal('turn-one', '/v1/chat/completions', expired)
+    with pytest.raises(ValueError):
+        seal('turn-one', '/v1/chat/completions', b'x' * (MAX_BODY + 1))
+
+
+def test_sealed_model_keeps_content_model_pin_usage_and_access_checks(workspace, monkeypatch):
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    app.state.settings.litellm_api_key = 'existing-server-key'
+    run = active(app)
+    received = []
+    def upstream(request):
+        assert request.headers['Authorization'] == 'Bearer existing-server-key'
+        received.append(json.loads(request.content))
+        return httpx.Response(200, headers={'x-litellm-response-cost': '0.000123'}, json={
+            'choices': [{'message': {'role': 'assistant', 'content': 'Fix already merged'}}],
+            'usage': {'prompt_tokens': 45, 'completion_tokens': 5, 'total_tokens': 50}})
+    actual = httpx.AsyncClient
+    monkeypatch.setattr('app.main.httpx.AsyncClient', lambda **kw: actual(transport=httpx.MockTransport(upstream), **kw))
+    payload = {'model': 'unapproved-model', 'stream': True, 'messages': [{'role': 'user', 'content': CODE}]}
+    packet = seal('capability', '/v1/chat/completions', json.dumps(payload).encode())
+    endpoint = f"/broker/{run['id']}/v1/chat/completions"
+    headers = {'Authorization': 'Bearer capability', 'Content-Type': CONTENT_TYPE}
+    response = client.post(endpoint, content=packet, headers=headers)
+    assert response.status_code == 200 and '[DONE]' in response.text
+    assert received[0]['messages'] == payload['messages']
+    assert received[0]['model'] == 'openai/gpt-6-astra'
+    record = app.state.store.rows('SELECT * FROM model_requests')[0]
+    assert record['user_id'] == 'google:alice' and record['cost'] == '0.000123'
+    assert record['status'] == 'completed' and record['total_tokens'] == 50
+    assert client.post(endpoint, content=packet, headers={**headers,'Authorization':'Bearer another'}).status_code == 401
+    assert client.post(endpoint, content=seal('capability','/tools/call',b'{}'), headers=headers).status_code == 400
+    assert client.post(endpoint, content=seal('capability','/v1/chat/completions',b'null'), headers=headers).status_code == 422
+    app.state.store.update_run(run['id'], token_hash='')
+    assert client.post(endpoint, content=packet, headers=headers).status_code == 401
+    assert len(received) == 1
+
+
+def test_sealed_tool_writes_still_wait_for_exact_admin_approval(workspace, monkeypatch):
+    app, client = workspace
+    run_id, headers = cloud_capability(app, ['slack'])
+    calls = []
+    async def send(name, arguments):
+        calls.append((name,arguments))
+        return {'ok': True}
+    monkeypatch.setattr(app.state.connectors,'call',send)
+    body = {'name': 'slack_send', 'arguments': {'channel': 'C12345678', 'text': CODE}}
+    packet = seal('run-capability-only','/tools/call',json.dumps(body).encode())
+    with ThreadPoolExecutor() as pool:
+        pending = pool.submit(client.post, f'/broker/{run_id}/tools/call', content=packet, headers={**headers,'Content-Type':CONTENT_TYPE})
+        approval = wait_for(lambda: app.state.store.approvals(run_id))[0]
+        assert not calls
+        arguments = json.loads(approval['arguments']) if isinstance(approval['arguments'], str) else approval['arguments']
+        assert arguments == body['arguments']
+        assert client.post('/api/approvals/'+approval['id'], json={'decision':'deny'}).status_code == 200
+        assert pending.result(timeout=3).json()['error'] == 'Action denied, expired, or cancelled.'
+    assert not calls
+
+
+def test_loopback_relay_seals_model_and_mcp_requests_and_returns_sse():
+    requests = []
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self,*args): pass
+        def do_POST(self):
+            assert self.headers['Authorization'] == 'Bearer runtime-token'
+            assert self.headers['Content-Type'] == CONTENT_TYPE
+            path = self.path.removeprefix('/broker/run')
+            body = unseal('runtime-token',path,self.rfile.read(int(self.headers['Content-Length'])))
+            requests.append((path,json.loads(body)))
+            self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
+            self.wfile.write(b'data: {"choices":[]}\n\ndata: [DONE]\n\n')
+    server=ThreadingHTTPServer(('127.0.0.1',0),Edge)
+    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    relay=BrokerRelay(f'http://127.0.0.1:{server.server_port}/broker/run','runtime-token').start()
+    try:
+        with httpx.Client(base_url=relay.url,timeout=5) as client:
+            for path in ['/v1/chat/completions','/tools/call']:
+                result=client.post(path,json={'content':CODE},headers={'Authorization':'Bearer runtime-token'})
+                assert result.status_code==200 and '[DONE]' in result.text
+            assert client.post('/v1/chat/completions',json={}).status_code==401
+            assert client.post('/admin',json={},headers={'Authorization':'Bearer runtime-token'}).status_code==404
+    finally:
+        relay.close();server.shutdown();server.server_close();thread.join(timeout=2)
+    assert requests==[(path,{'content':CODE}) for path in ['/v1/chat/completions','/tools/call']]
+
+
+def test_edge_failure_is_actionable_and_does_not_guess_about_user_key():
+    class Blocked(BaseHTTPRequestHandler):
+        def log_message(self,*args): pass
+        def do_POST(self):
+            self.send_response(403);self.send_header('Content-Type','text/html');self.end_headers()
+            self.wfile.write(b'<title>Blocked</title>')
+    server=ThreadingHTTPServer(('127.0.0.1',0),Blocked)
+    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    relay=BrokerRelay(f'http://127.0.0.1:{server.server_port}','runtime-token').start()
+    try:
+        result=httpx.post(relay.url+'/v1/chat/completions',json={},headers={'Authorization':'Bearer runtime-token'})
+        assert result.status_code==502
+        assert result.json()['error']['message']==EDGE_ERROR==relay.last_error
+    finally:
+        relay.close();server.shutdown();server.server_close();thread.join(timeout=2)
+
+
+def test_slack_source_is_imported_once_and_current_followup_stays_current():
+    spec={'prompt':'Find the existing PR', 'slack_source': {'messages':[{'text':'Issue LIT-6275'}]}}
+    assert 'Issue LIT-6275' in conversation_prompt(spec)
+    assert conversation_prompt(spec,has_history=True)=='Find the existing PR'
+
+
+def test_failed_turn_is_not_saved_as_a_completed_assistant_answer(workspace):
+    app,_=workspace
+    run=app.state.store.create_run('A request','','modal',[],chat_enabled=True)
+    message=app.state.store.claim_message(run['id'])
+    app.state.store.finish_message(run['id'],message['id'],'Connection failed','failed')
+    assert [m['status'] for m in app.state.store.messages(run['id'])]==['failed','failed']

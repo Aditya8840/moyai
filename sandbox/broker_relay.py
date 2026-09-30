@@ -1,0 +1,84 @@
+"""Loopback OpenAI/MCP adapter; never forwards a model-chosen destination."""
+import hmac
+import json
+import threading
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+try:
+    from .broker_transport import CONTENT_TYPE, MAX_BODY, seal
+except ImportError:  # Loaded by the sandbox script, outside a Python package.
+    from broker_transport import CONTENT_TYPE, MAX_BODY, seal
+
+EDGE_ERROR = ('Moyai could not reach the model because the cloud connection rejected the request. '
+              'Your conversation and files are saved. An administrator needs to repair the connection; '
+              'resending the same message will not fix it.')
+
+
+class BrokerRelay:
+    def __init__(self, remote, token):
+        self.last_error = ''
+        relay = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass  # Never log capabilities, prompts or tool arguments.
+
+            def error(self, status, message):
+                content = json.dumps({'error': {'message': message, 'type': 'broker_error', 'code': 'broker_error'}}).encode()
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+
+            def handle_request(self):
+                if not hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + token):
+                    return self.error(401, 'Invalid cloud session capability.')
+                allowed = {'GET': {'/v1/models', '/tools'}, 'POST': {'/v1/chat/completions', '/tools/call'}}
+                if self.path not in allowed.get(self.command, set()):
+                    return self.error(404, 'Unknown broker route.')
+                try:
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if size < 0 or size > MAX_BODY:
+                        return self.error(413, 'Broker request is too large.')
+                    data = seal(token, self.path, self.rfile.read(size)) if self.command == 'POST' else None
+                    request = urllib.request.Request(remote.rstrip('/') + self.path, data=data,
+                        headers={'Authorization': 'Bearer ' + token, 'Content-Type': CONTENT_TYPE}, method=self.command)
+                    with urllib.request.urlopen(request, timeout=940) as response:
+                        self.send_response(response.status)
+                        self.send_header('Content-Type', response.headers.get('Content-Type', 'application/json'))
+                        self.end_headers()
+                        while chunk := response.read(65536):
+                            self.wfile.write(chunk)
+                        relay.last_error = ''
+                except urllib.error.HTTPError as exc:
+                    message = EDGE_ERROR if exc.code == 403 and 'json' not in exc.headers.get('Content-Type', '') else ''
+                    if not message:
+                        try:
+                            value = json.loads(exc.read(8192))
+                            message = value.get('detail') or value.get('error', {}).get('message')
+                        except (ValueError, AttributeError):
+                            pass
+                    message = str(message or 'The cloud connection failed before a response could finish.')
+                    relay.last_error = message
+                    self.error(502 if exc.code == 403 else exc.code, message)
+                except (urllib.error.URLError, TimeoutError):
+                    relay.last_error = 'The cloud connection timed out or could not be reached. Your message is saved.'
+                    self.error(502, relay.last_error)
+
+            do_GET = do_POST = handle_request
+
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.url = f'http://127.0.0.1:{self.server.server_port}'
+
+    def start(self):
+        self.thread.start()
+        return self
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)

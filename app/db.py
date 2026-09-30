@@ -269,7 +269,7 @@ class Store:
         with self.connect() as conn:
             changed = conn.execute("UPDATE messages SET status=? WHERE id=? AND run_id=? AND status='running'", (status, message_id, run_id)).rowcount
             if changed:
-                conn.execute("INSERT INTO messages(run_id,role,content,status,created_at,model,user_id) SELECT ?,'assistant',?,'completed',?,model,user_id FROM messages WHERE id=?", (run_id, content, now(), message_id))
+                conn.execute("INSERT INTO messages(run_id,role,content,status,created_at,model,user_id) SELECT ?,'assistant',?,?,?,model,user_id FROM messages WHERE id=?", (run_id, content, status, now(), message_id))
         self.event(run_id, "chat", "Response saved", {"message_id": message_id})
 
     def has_queued_messages(self, run_id):

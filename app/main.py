@@ -27,6 +27,7 @@ from .google_sso import GoogleSignIn
 from .access_logging import configure_access_logging
 from .slack import SlackSessions
 from .spend import Spend, UsageCapture, completion_events
+from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, MAX_WIRE, unseal
 
 STATIC = Path(__file__).parent / "static"
 Provider = Literal["linear", "slack", "notion"]
@@ -149,7 +150,8 @@ def create_app(settings: Settings | None = None):
             length = int(request.headers.get("content-length", "0"))
         except ValueError:
             return JSONResponse({"detail": "Invalid request length"}, status_code=400)
-        if length > 5 * 1024 * 1024:
+        limit = MAX_WIRE if request.url.path.startswith('/broker/') and request.headers.get('content-type') == CONTENT_TYPE else MAX_BODY
+        if length < 0 or length > limit:
             return JSONResponse({"detail": "Request too large"}, status_code=413)
         response = await call_next(request)
         if request.method in {"POST", "DELETE", "PUT", "PATCH"} or request.url.path.startswith(("/oauth/", "/auth/")):
@@ -451,6 +453,22 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(401, "Run capability expired or invalid.")
         return run
 
+    async def broker_body(request, route):
+        # Called only after require_run. The edge carries opaque authenticated
+        # data; the application still checks identity, size, schema and tools.
+        raw = await request.body()
+        if request.headers.get('content-type') == CONTENT_TYPE:
+            try:
+                raw = unseal(request.headers.get('authorization', '').removeprefix('Bearer '), route, raw)
+            except ValueError:
+                raise HTTPException(400, 'Invalid or expired broker envelope.')
+        if len(raw) > MAX_BODY:
+            raise HTTPException(413, 'Broker request too large.')
+        try:
+            return json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            raise HTTPException(422, 'Invalid broker request JSON.')
+
     @app.get("/broker/{run_id}/tools")
     async def tool_list(run_id: str, request: Request):
         run = require_run(run_id, request)
@@ -458,8 +476,12 @@ def create_app(settings: Settings | None = None):
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.post("/broker/{run_id}/tools/call")
-    async def tool_call(run_id: str, body: ToolCall, request: Request):
+    async def tool_call(run_id: str, request: Request):
         run = require_run(run_id, request)
+        try:
+            body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
+        except ValidationError:
+            raise HTTPException(422, 'Invalid tool request.')
         if body.name not in TOOLS or TOOLS[body.name][0] not in run["plugins"]:
             raise HTTPException(403, "This tool is not enabled for this task.")
         provider, write, schema, _ = TOOLS[body.name]
@@ -535,13 +557,7 @@ def create_app(settings: Settings | None = None):
             selected_model = settings.resolve_model(fallback=run['active_model'] or run['model'])
         except ValueError as exc:
             raise HTTPException(409, str(exc))
-        raw = await request.body()
-        if len(raw) > 5 * 1024 * 1024:
-            raise HTTPException(413, "Model request too large")
-        try:
-            body = json.loads(raw)
-        except ValueError:
-            raise HTTPException(422, "Invalid model request")
+        body = await broker_body(request, '/v1/chat/completions')
         if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
             raise HTTPException(422, "messages must be an array")
         admitted = store.execute("UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 WHERE id=? AND (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<? AND status IN ('running','awaiting_approval')",
