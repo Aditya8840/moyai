@@ -21,7 +21,7 @@ services:
       - key: DATA_DIR
         value: /var/data/moyai
       - key: RENDER_MIGRATION_STAGE
-        value: "true"
+        value: "false"
       - key: BOOTSTRAP_MODAL_VOLUME
         value: hermes-workspace-state
       # Import existing secrets privately in the Render dashboard. Never regenerate
