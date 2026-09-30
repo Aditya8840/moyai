@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 from app.db import Store
 from app.security import digest
-from app.spend import UsageCapture, money, stamp
+from app.spend import UsageCapture, money, stamp, completion_events
 from test_workspace import workspace
 from test_slack import slack_app
 from test_slack import event, signed
@@ -80,8 +80,9 @@ def test_broker_records_exact_cost_and_blocks_sandbox_attribution_override(works
     def gateway(request):
         data = json.loads(request.content)
         captured.append(data)
-        assert data['user'] == 'moyai:google:alice'
-        assert data['metadata']['session_id'] == run['id']
+        assert 'user' not in data
+        assert 'session_id' not in data['metadata']
+        assert data['stream'] is False
         assert data['metadata']['moyai_request_id'] == request.headers['x-litellm-call-id']
         return httpx.Response(200, headers={'x-litellm-response-cost':'0.0123456789', 'x-litellm-call-id':request.headers['x-litellm-call-id']}, json={'id':'response','choices':[], 'usage':{'prompt_tokens':100,'completion_tokens':10,'total_tokens':110}})
     real = httpx.AsyncClient
@@ -93,7 +94,8 @@ def test_broker_records_exact_cost_and_blocks_sandbox_attribution_override(works
     assert row['total_tokens'] == 110 and row['status'] == 'completed'
     report = client.get('/api/admin/spend').json()
     assert report['total']['spend'] == '0.0123456789'
-    assert report['total']['unreconciled_requests'] == 1
+    assert report['priced_requests'] == 1
+    assert row['cost_source'] == 'response_header'
     assert 'spend-test-key' not in json.dumps(report)
 
 
@@ -110,22 +112,28 @@ def test_stream_parser_handles_split_utf8_and_final_usage_without_storing_text()
     assert money('0') == '0'
 
 
-def test_streaming_zero_header_is_pending_not_free_and_failures_are_recorded(workspace, monkeypatch):
+def test_broker_buffers_gateway_to_obtain_final_cost_for_streaming_clients(workspace, monkeypatch):
     app, client = workspace
     app.state.settings.litellm_api_key = 'spend-test-key'
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
     run = active(app)
     def gateway(request):
         data = json.loads(request.content)
-        assert data['stream_options'] == {'include_usage':True}
-        return httpx.Response(200, headers={'x-litellm-response-cost':'0'}, content=b'data: {"usage":{"total_tokens":9}}\n\ndata: [DONE]\n\n')
+        assert data['stream'] is False and 'stream_options' not in data
+        return httpx.Response(200, headers={'x-litellm-response-cost':'0.02'}, json={'id':'reply','choices':[{'index':0,'message':{'role':'assistant','content':'Ready'},'finish_reason':'stop'}], 'usage':{'total_tokens':9}})
     real = httpx.AsyncClient
     monkeypatch.setattr('app.main.httpx.AsyncClient', lambda **kw: real(transport=httpx.MockTransport(gateway), **kw))
     url = f"/broker/{run['id']}/v1/chat/completions"
-    assert client.post(url,headers={'Authorization':'Bearer capability'},json={'messages':[], 'stream':True}).status_code == 200
+    response = client.post(url,headers={'Authorization':'Bearer capability'},json={'messages':[], 'stream':True})
+    assert response.status_code == 200
+    assert response.headers['content-type'].startswith('text/event-stream')
+    frames = [json.loads(line[5:]) for line in response.text.splitlines() if line.startswith('data:') and '[DONE]' not in line]
+    assert frames[0]['choices'][0]['delta']['content'] == 'Ready'
+    assert frames[-1]['usage']['total_tokens'] == 9
+    assert response.text.endswith('data: [DONE]\n\n')
     row = app.state.store.rows('SELECT * FROM model_requests')[0]
-    assert row['cost'] is None and row['total_tokens'] == 9
-    assert app.state.spend.report()['total']['pending_costs'] == 1
+    assert row['cost'] == '0.02' and row['total_tokens'] == 9
+    assert app.state.spend.report()['total']['missing_costs'] == 0
     def fail(request):
         return httpx.Response(429)
     monkeypatch.setattr('app.main.httpx.AsyncClient', lambda **kw: real(transport=httpx.MockTransport(fail), **kw))
@@ -142,7 +150,7 @@ def test_slack_each_sender_is_tracked_and_admin_can_link_to_sso(slack_app):
     app.state.settings.litellm_api_key = 'spend-test-key'
     app.state.store.claim_message(run_id)
     run = app.state.store.run(run_id)
-    request_id, _ = app.state.spend.begin(run, run['model'])
+    request_id = app.state.spend.begin(run, run['model'])
     app.state.store.execute("UPDATE model_requests SET cost='0.5' WHERE id=?", (request_id,))
     assert client.post('/api/admin/spend/link-slack',json={'slack_user_id':first['user_id'],'google_user_id':'google:alice'}).status_code == 200
     report = client.get('/api/admin/spend').json()
@@ -186,7 +194,7 @@ def test_key_rotation_keeps_previous_key_costs_out_of_current_report(workspace):
     app, _ = workspace
     app.state.settings.litellm_api_key = 'first-key'
     run = active(app)
-    rid, _ = app.state.spend.begin(run, run['model'])
+    rid = app.state.spend.begin(run, run['model'])
     app.state.store.execute("UPDATE model_requests SET cost='2.5' WHERE id=?", (rid,))
     assert app.state.spend.report()['total']['spend'] == '2.5'
     app.state.settings.litellm_api_key = 'replacement-key'
@@ -194,96 +202,109 @@ def test_key_rotation_keeps_previous_key_costs_out_of_current_report(workspace):
     assert app.state.store.rows('SELECT id FROM model_requests')
 
 
-def cost_event(app, rid, amount='0.12', event_id='completion-1'):
-    return {'id':event_id,'response_cost':amount,'total_tokens':100,'prompt_tokens':90,'completion_tokens':10,
-            'metadata':{'spend_logs_metadata':{'moyai_request_id':rid,'moyai_cost_token':app.state.spend.callback_token(rid)}}}
 
-
-def test_cost_callback_authenticates_and_deduplicates_gateway_attempts(workspace):
-    app, client = workspace
-    sign_in(app, client)
-    run = active(app)
-    rid,_ = app.state.spend.begin(run, run['model'])
-    payload = cost_event(app,rid)
-    assert client.post('/hooks/litellm/cost',json=payload).json() == {'accepted':1,'duplicates':0}
-    assert client.post('/hooks/litellm/cost',json=[payload]).json() == {'accepted':0,'duplicates':1}
-    # A separately billed gateway attempt has a different event ID.
-    assert client.post('/hooks/litellm/cost',json=cost_event(app,rid,'0.03','completion-2')).status_code == 200
-    report = client.get('/api/admin/spend').json()
-    assert report['total']['spend'] == report['callback_spend'] == '0.15'
-    assert report['total']['pending_costs'] == report['total']['unreconciled_requests'] == 0
-    assert report['users'][0]['id'] == 'google:alice'
-    assert report['total']['requests'] == 1 and report['total']['total_tokens'] == 200
-
-
-def test_callback_rejects_forgery_unknown_requests_and_other_keys(workspace):
+def test_unknown_cost_is_visible_but_explicit_zero_is_valid(workspace):
     app, client = workspace
     run = active(app)
-    rid,_ = app.state.spend.begin(run, run['model'])
-    valid = cost_event(app,rid)
-    bad = json.loads(json.dumps(valid));bad['metadata']['spend_logs_metadata']['moyai_cost_token']='forged'
-    assert client.post('/hooks/litellm/cost',json=bad).status_code == 401
-    bad = cost_event(app,'nonexistent')
-    assert client.post('/hooks/litellm/cost',json=bad).status_code == 401
-    bad = json.loads(json.dumps(valid));bad['metadata']['user_api_key_hash']='different-key'
-    assert client.post('/hooks/litellm/cost',json=bad).status_code == 401
-    assert not app.state.store.rows('SELECT * FROM cost_callbacks')
-    assert client.post('/hooks/litellm/cost',content='not-json').status_code == 422
-    assert client.post('/hooks/litellm/cost',json=[]).status_code == 422
+    rid = app.state.spend.begin(run, run['model'])
+    assert app.state.spend.report()['total']['pending_costs'] == 1
+    app.state.spend.finish(rid, None, 'failed')
+    rid2 = app.state.spend.begin(run, run['model'])
+    app.state.spend.headers(rid2, httpx.Response(200, headers={'x-litellm-response-cost':'0'}), False)
+    app.state.spend.finish(rid2, None, 'completed')
+    report = app.state.spend.report()
+    assert report['total']['pending_costs'] == 0 and report['total']['missing_costs'] == 1
+    assert report['priced_requests'] == 1 and report['total']['spend'] == '0'
+    assert client.get('/api/admin/spend?start=2026-01-01&end=2026-12-31').status_code == 422
+    assert client.get('/api/admin/spend?start=bad').status_code == 422
+    assert client.post('/hooks/litellm/cost',json={}).status_code == 404
+    assert client.post('/api/admin/spend/sync').status_code == 404
 
 
-def test_callback_before_response_and_after_cancel_remains_authoritative(workspace):
-    app, client = workspace
+def test_header_is_authoritative_and_accounting_is_persistent(workspace):
+    app, _ = workspace
     run = active(app)
-    rid,_ = app.state.spend.begin(run,run['model'])
-    app.state.store.update_run(run['id'],status='cancelled',token_hash='')
-    assert client.post('/hooks/litellm/cost',json=cost_event(app,rid,'0.125')).status_code == 200
-    app.state.spend.headers(rid,httpx.Response(200,headers={'x-litellm-response-cost':'0'}),False)
-    capture=UsageCapture(False);capture.consume({'usage':{'total_tokens':0},'x_litellm_response_cost':0})
-    app.state.spend.finish(rid,capture,'interrupted')
-    row=app.state.store.rows('SELECT * FROM model_requests')[0]
-    assert row['cost']=='0.125' and row['total_tokens']==100 and row['status']=='interrupted'
-    reopened=Store(app.state.settings.data_dir)
-    assert reopened.rows('SELECT cost FROM model_requests')[0]['cost']=='0.125'
+    rid = app.state.spend.begin(run, run['model'])
+    app.state.spend.headers(rid, httpx.Response(200, headers={'x-litellm-response-cost':'0.123456789012345678'}), False)
+    capture = UsageCapture(False)
+    capture.feed(b'{"usage":{"total_tokens":100,"x_litellm_response_cost":0.1}}')
+    capture.finish()
+    app.state.spend.finish(rid, capture, 'interrupted')
+    app.state.spend.finish(rid, capture, 'interrupted')
+    report = app.state.spend.report()
+    assert report['total']['spend'] == '0.123456789012345678'
+    assert report['total']['requests'] == 1
+    assert report['request_details'][0]['cost_source'] == 'response_header'
+    reopened = Store(app.state.settings.data_dir)
+    assert reopened.rows('SELECT cost FROM model_requests')[0]['cost'] == report['total']['spend']
 
 
-def test_unknown_cost_is_pending_but_explicit_zero_is_valid(workspace):
-    app,client=workspace
-    run=active(app)
-    rid,_=app.state.spend.begin(run,run['model'])
-    assert client.post('/hooks/litellm/cost',json=cost_event(app,rid,None)).status_code==200
-    assert app.state.spend.report()['total']['pending_costs']==1
-    rid2,_=app.state.spend.begin(run,run['model'])
-    assert client.post('/hooks/litellm/cost',json=cost_event(app,rid2,'0')).status_code==200
-    report=app.state.spend.report()
-    assert report['total']['pending_costs']==1 and report['callback_requests']==2
-    assert client.get('/api/admin/spend?start=2026-01-01&end=2026-12-31').status_code==422
-    assert client.get('/api/admin/spend?start=bad').status_code==422
+def test_missing_header_uses_final_usage_cost_without_float_rounding(workspace):
+    app, _ = workspace
+    run = active(app)
+    rid = app.state.spend.begin(run, run['model'])
+    app.state.spend.headers(rid, httpx.Response(200), False)
+    capture = UsageCapture(False)
+    capture.feed(b'{"usage":{"total_tokens":100,"x_litellm_response_cost":0.01234567890123456789}}')
+    capture.finish()
+    app.state.spend.finish(rid, capture, 'completed')
+    report = app.state.spend.report()
+    assert report['total']['spend'] == '0.01234567890123456789'
+    assert report['request_details'][0]['cost_source'] == 'response_usage'
 
 
-def test_callback_batch_is_atomic_and_does_not_accept_user_override(workspace):
-    app,client=workspace
-    sign_in(app,client)
-    run=active(app)
-    rid,_=app.state.spend.begin(run,run['model'])
-    valid=cost_event(app,rid)
-    invalid=cost_event(app,'unknown')
-    assert client.post('/hooks/litellm/cost',json=[valid,invalid]).status_code==401
-    assert not app.state.store.rows('SELECT * FROM cost_callbacks')
-    valid.update(user='google:bob',model='another-model',messages='private-prompt',response='private-response')
-    assert client.post('/hooks/litellm/cost',json=valid).status_code==200
-    report=app.state.spend.report()
-    assert report['users'][0]['id']=='google:alice'
-    assert report['models'][0]['model']==run['model']
-    assert 'private-' not in json.dumps(app.state.store.rows('SELECT * FROM cost_callbacks'))
+def test_stream_headers_never_count_as_final_prices(workspace):
+    app, _ = workspace
+    run = active(app)
+    rid = app.state.spend.begin(run, run['model'])
+    app.state.spend.headers(rid, httpx.Response(200, headers={'x-litellm-response-cost':'0'}), True)
+    app.state.spend.finish(rid, None, 'interrupted')
+    assert app.state.spend.report()['total']['missing_costs'] == 1
 
 
-def test_late_callback_is_counted_on_original_request_date(workspace):
-    app,client=workspace
-    run=active(app)
-    rid,_=app.state.spend.begin(run,run['model'])
-    app.state.store.execute("UPDATE model_requests SET created_at='2026-09-29T23:59:59+00:00' WHERE id=?",(rid,))
-    payload=cost_event(app,rid);payload['startTime']=1790740800
-    assert client.post('/hooks/litellm/cost',json=payload).status_code==200
-    assert client.get('/api/admin/spend?start=2026-09-29&end=2026-09-29').json()['total']['spend']=='0.12'
-    assert client.get('/api/admin/spend?start=2026-09-30&end=2026-09-30').json()['total']['spend']=='0'
+def test_completion_adapter_keeps_tool_calls_reasoning_and_cached_usage():
+    value = {'id':'chat-123', 'model':'test-model', 'created':123,
+             'choices':[{'index':0, 'message':{'role':'assistant', 'content':None, 'reasoning_content':'Checking',
+              'tool_calls':[{'id':'call_1','type':'function','function':{'name':'read_file','arguments':'{"path":"a.py"}'}},
+                            {'id':'call_2','type':'function','function':{'name':'terminal','arguments':'{"command":"pwd"}'}}]}, 'finish_reason':'tool_calls'}],
+             'usage':{'prompt_tokens':100,'completion_tokens':10,'total_tokens':110,'prompt_tokens_details':{'cached_tokens':50}}}
+    events = list(completion_events(value))
+    frames = [json.loads(frame[5:]) for frame in events[:-1]]
+    delta = frames[0]['choices'][0]['delta']
+    assert delta['reasoning_content'] == 'Checking'
+    assert [tool['index'] for tool in delta['tool_calls']] == [0,1]
+    assert delta['tool_calls'][0]['function']['arguments'] == '{"path":"a.py"}'
+    assert frames[1]['choices'][0]['finish_reason'] == 'tool_calls'
+    assert frames[2]['usage'] == value['usage']
+    assert events[-1] == 'data: [DONE]\n\n'
+
+
+def test_cost_survives_session_stop_during_inference(workspace, monkeypatch):
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    run = active(app)
+    def gateway(request):
+        app.state.store.update_run(run['id'], status='cancelled', token_hash='')
+        return httpx.Response(200, headers={'x-litellm-response-cost':'0.2'}, json={'choices':[], 'usage':{'total_tokens':40}})
+    real = httpx.AsyncClient
+    monkeypatch.setattr('app.main.httpx.AsyncClient', lambda **kw: real(transport=httpx.MockTransport(gateway), **kw))
+    response = client.post(f"/broker/{run['id']}/v1/chat/completions", headers={'Authorization':'Bearer capability'}, json={'messages':[], 'stream':True})
+    assert response.status_code == 200 and not response.content
+    row = app.state.store.rows('SELECT * FROM model_requests')[0]
+    assert row['cost'] == '0.2' and row['total_tokens'] == 40
+    assert row['user_id'] == 'google:alice'
+
+
+def test_user_session_model_totals_match_exactly_and_requests_keep_original_date(workspace):
+    app, client = workspace
+    for user, model, cost in [('alice','openai/gpt-6-astra','0.12'),('bob','anthropic/claude-opus-5-5','0.034'),('alice','anthropic/claude-opus-5-5','0.006')]:
+        sign_in(app, client, user, user+'@berri.ai')
+        run = active(app, 'google:'+user, model)
+        rid = app.state.spend.begin(run, model)
+        app.state.store.execute("UPDATE model_requests SET created_at='2026-09-29T23:59:59+00:00' WHERE id=?", (rid,))
+        app.state.spend.headers(rid, httpx.Response(200, headers={'x-litellm-response-cost':cost}), False)
+        app.state.spend.finish(rid, None, 'completed')
+    report = app.state.spend.report(start=datetime(2026,9,29).date(),end=datetime(2026,9,29).date())
+    for field in ['users','sessions','models']:
+        assert sum(Decimal(row['spend']) for row in report[field]) == Decimal(report['total']['spend']) == Decimal('0.160')
+    assert app.state.spend.report(start=datetime(2026,9,30).date(),end=datetime(2026,9,30).date())['total']['spend'] == '0'

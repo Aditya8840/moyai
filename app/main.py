@@ -26,7 +26,7 @@ from .security import Security, digest
 from .google_sso import GoogleSignIn
 from .access_logging import configure_access_logging
 from .slack import SlackSessions
-from .spend import Spend, UsageCapture
+from .spend import Spend, UsageCapture, completion_events
 
 STATIC = Path(__file__).parent / "static"
 Provider = Literal["linear", "slack", "notion"]
@@ -558,52 +558,57 @@ def create_app(settings: Settings | None = None):
                 payload[field] = min(payload[field], 16000)
         if not ({"max_tokens", "max_completion_tokens"} & payload.keys()):
             payload["max_tokens"] = 8192
-        request_id, end_user = spend.begin(run, selected_model)
-        payload['user'] = end_user
-        payload['metadata'] = {'moyai_request_id': request_id, 'session_id': run_id,
-                               'moyai_message_id': run['active_message_id'], 'tags': ['moyai-devin'],
-                               'turn_off_message_logging': True,
-                               'spend_logs_metadata': {'moyai_request_id': request_id, 'moyai_cost_token': spend.callback_token(request_id)}}
-        if payload.get('stream'):
-            payload['stream_options'] = {'include_usage': True}
+        request_id = spend.begin(run, selected_model)
+        # Keep user/session accounting local. The existing virtual key remains
+        # the sole billing credential; sandbox-supplied attribution is ignored.
+        payload['metadata'] = {'moyai_request_id': request_id, 'turn_off_message_logging': True}
+        wants_stream = bool(payload.get('stream'))
+        # Streaming headers precede generation and cannot contain its final
+        # charge. Ask for a completed response, then adapt it to Hermes' SSE
+        # protocol. Tool/activity events remain live throughout the session.
+        payload['stream'] = False
+        payload.pop('stream_options', None)
         await checkpoints.flush()
-        client = httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30))
-        try:
-            upstream = await client.send(client.build_request("POST", settings.litellm_api_base.rstrip("/") + "/chat/completions",
-                                                           json=payload, headers={"Authorization": f"Bearer {settings.litellm_api_key}", 'x-litellm-call-id': request_id}), stream=True)
-            spend.headers(request_id, upstream, bool(payload.get('stream')))
-            if upstream.status_code >= 400:
-                spend.finish(request_id, None, 'failed')
-                await upstream.aclose()
-                await client.aclose()
-                raise HTTPException(502, f"Model gateway rejected the request ({upstream.status_code}). Check model access and gateway configuration.")
-        except httpx.HTTPError:
-            spend.finish(request_id, None, 'unknown')
-            await client.aclose()
-            raise HTTPException(502, "Model gateway could not be reached.")
-        except asyncio.CancelledError:
-            spend.finish(request_id, None, 'interrupted')
-            await client.aclose()
-            raise
-
-        async def relay():
-            capture = UsageCapture(bool(payload.get('stream')))
-            status = 'interrupted'
+        capture = UsageCapture(False)
+        status = 'unknown'
+        async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30)) as client:
             try:
-                async for chunk in upstream.aiter_bytes():
-                    capture.feed(chunk)
-                    if store.run(run_id)["status"] not in {"running", "awaiting_approval"}:
+                async with client.stream('POST', settings.litellm_api_base.rstrip('/') + '/chat/completions',
+                                         json=payload, headers={'Authorization': f'Bearer {settings.litellm_api_key}', 'x-litellm-call-id': request_id}) as upstream:
+                    spend.headers(request_id, upstream, False)
+                    if upstream.status_code >= 400:
+                        status = 'failed'
+                        raise HTTPException(502, f'Model gateway rejected the request ({upstream.status_code}). Check model access and gateway configuration.')
+                    # Bound memory even if a provider ignores our output limit.
+                    raw_response = bytearray()
+                    async for chunk in upstream.aiter_bytes():
+                        raw_response.extend(chunk)
+                        if len(raw_response) > 8 * 1024 * 1024:
+                            raise HTTPException(502, 'Model gateway response exceeded the size limit.')
+                    capture.feed(bytes(raw_response))
+                    capture.finish()
+                    if not capture.done:
+                        raise HTTPException(502, 'Model gateway returned an invalid completion.')
+                    status = 'completed'
+            except httpx.HTTPError:
+                raise HTTPException(502, 'Model gateway could not be reached.')
+            except asyncio.CancelledError:
+                status = 'interrupted'
+                raise
+            finally:
+                # Account before returning any data, including if the sandbox
+                # stopped while the already-submitted inference was completing.
+                spend.finish(request_id, capture, status)
+                await checkpoints.flush()
+        value = json.loads(raw_response)
+        if wants_stream:
+            async def relay():
+                for chunk in completion_events(value):
+                    if store.run(run_id)['status'] not in {'running', 'awaiting_approval'}:
                         break
                     yield chunk
-                else:
-                    capture.finish()
-                    status = 'completed' if capture.done else 'unknown'
-            finally:
-                spend.finish(request_id, capture, status)
-                await upstream.aclose()
-                await client.aclose()
-                await checkpoints.flush()
-        return StreamingResponse(relay(), media_type="text/event-stream" if payload.get("stream") else "application/json")
+            return StreamingResponse(relay(), media_type='text/event-stream')
+        return JSONResponse(value)
 
     @app.get("/")
     async def index():

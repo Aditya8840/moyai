@@ -1,6 +1,4 @@
 """Durable, server-attributed gateway usage; monetary values remain decimal strings."""
-import hashlib
-import hmac
 import json
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -89,7 +87,7 @@ class UsageCapture:
             self.line(self.buffer)
         else:
             try:
-                value = json.loads(self.buffer)
+                value = json.loads(self.buffer, parse_float=Decimal)
                 self.consume(value)
                 self.done = isinstance(value, dict) and 'error' not in value
             except (ValueError, UnicodeDecodeError):
@@ -101,6 +99,26 @@ class IdentityLink(BaseModel):
     model_config = ConfigDict(extra='forbid')
     slack_user_id: str = Field(max_length=150)
     google_user_id: str = Field(max_length=150)
+
+
+def completion_events(value):
+    """Preserve text, reasoning, tool calls and usage in the Chat Completions SSE shape."""
+    base = {key: value[key] for key in ('id', 'created', 'model', 'system_fingerprint') if key in value}
+    base['object'] = 'chat.completion.chunk'
+
+    def frame(choices, **extra):
+        return 'data: ' + json.dumps({**base, 'choices': choices, **extra}) + '\n\n'
+
+    for index, choice in enumerate(value.get('choices', [])):
+        delta = dict(choice.get('message') or {})
+        if delta.get('tool_calls'):
+            delta['tool_calls'] = [{**tool, 'index': i} for i, tool in enumerate(delta['tool_calls'])]
+        position = choice.get('index', index)
+        yield frame([{'index': position, 'delta': delta, 'finish_reason': None, 'logprobs': choice.get('logprobs')}])
+        yield frame([{'index': position, 'delta': {}, 'finish_reason': choice.get('finish_reason') or 'stop', 'logprobs': None}])
+    if isinstance(value.get('usage'), dict):
+        yield frame([], usage=value['usage'])
+    yield 'data: [DONE]\n\n'
 
 
 class Spend:
@@ -117,17 +135,10 @@ class Spend:
                 );
                 CREATE INDEX IF NOT EXISTS idx_model_requests_gateway ON model_requests(key_hash,gateway_id);
                 CREATE INDEX IF NOT EXISTS idx_model_requests_time ON model_requests(key_hash,created_at);
-                CREATE TABLE IF NOT EXISTS cost_callbacks (
-                    request_id TEXT NOT NULL REFERENCES model_requests(id), event_id TEXT NOT NULL,
-                    cost TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER,
-                    received_at TEXT NOT NULL, PRIMARY KEY(request_id,event_id)
-                );
             ''')
             columns = {row['name'] for row in conn.execute('PRAGMA table_info(model_requests)')}
-            if 'callback_at' not in columns:
-                conn.execute('ALTER TABLE model_requests ADD COLUMN callback_at TEXT')
-            if 'callback_pending' not in columns:
-                conn.execute('ALTER TABLE model_requests ADD COLUMN callback_pending INTEGER NOT NULL DEFAULT 0')
+            if 'cost_source' not in columns:
+                conn.execute("ALTER TABLE model_requests ADD COLUMN cost_source TEXT NOT NULL DEFAULT ''")
 
     @property
     def key_hash(self):
@@ -138,78 +149,24 @@ class Spend:
         user_id = run['active_user_id'] if run['chat_enabled'] else run['owner_id']
         self.store.execute('INSERT INTO model_requests(id,key_hash,run_id,message_id,user_id,model,created_at) VALUES(?,?,?,?,?,?,?)',
                            (request_id, self.key_hash, run['id'], run['active_message_id'], user_id, model, now()))
-        return request_id, 'moyai:' + (user_id or 'unattributed')
+        return request_id
 
     def headers(self, request_id, upstream, streaming):
         # Streaming headers arrive before generation ends and may report zero.
-        # Only the final stream extension or reconciled logs can price a stream.
+        # Only a final usage field can price a streamed response.
         cost = None if streaming else money(upstream.headers.get('x-litellm-response-cost'))
         gateway_id = upstream.headers.get('x-litellm-call-id', '')[:200]
-        self.store.execute('UPDATE model_requests SET gateway_id=?,cost=CASE WHEN callback_at IS NULL THEN ? ELSE cost END WHERE id=?', (gateway_id, cost, request_id))
+        self.store.execute('UPDATE model_requests SET gateway_id=?,cost=?,cost_source=? WHERE id=?',
+                           (gateway_id, cost, 'response_header' if cost is not None else '', request_id))
 
     def finish(self, request_id, capture, status):
         usage = capture.usage if capture else {}
         def tokens(field):
             value = usage.get(field)
             return value if type(value) is int and value >= 0 else None
-        self.store.execute('UPDATE model_requests SET status=?,finished_at=?,cost=CASE WHEN callback_at IS NULL THEN COALESCE(?,cost) ELSE cost END,prompt_tokens=COALESCE(prompt_tokens,?),completion_tokens=COALESCE(completion_tokens,?),total_tokens=COALESCE(total_tokens,?) WHERE id=?',
-                           (status, now(), capture.cost if capture else None, tokens('prompt_tokens'), tokens('completion_tokens'), tokens('total_tokens'), request_id))
-
-    def callback_token(self, request_id):
-        return hmac.new(self.security.secret.encode(), ('moyai-cost:' + request_id).encode(), hashlib.sha256).hexdigest()
-
-    def callback(self, payload):
-        records = payload if isinstance(payload, list) else [payload]
-        if not records or len(records) > 1000:
-            raise HTTPException(422, 'Send one cost event or a batch of up to 1000.')
-        normalized = []
-        for record in records:
-            if not isinstance(record, dict):
-                raise HTTPException(422, 'Invalid cost event.')
-            metadata = record.get('metadata') or {}
-            if not isinstance(metadata, dict):
-                raise HTTPException(422, 'Invalid cost metadata.')
-            # StandardLoggingPayload preserves this caller-owned metadata slot.
-            source = metadata.get('spend_logs_metadata') or metadata.get('requester_metadata') or metadata
-            if not isinstance(source, dict):
-                raise HTTPException(401, 'Invalid cost event authentication.')
-            request_id, token = source.get('moyai_request_id'), source.get('moyai_cost_token')
-            if (not isinstance(request_id, str) or len(request_id) > 100 or not isinstance(token, str)
-                    or not hmac.compare_digest(token, self.callback_token(request_id))):
-                raise HTTPException(401, 'Invalid cost event authentication.')
-            rows = self.store.rows('SELECT * FROM model_requests WHERE id=?', (request_id,))
-            if not rows:
-                raise HTTPException(401, 'Invalid cost event authentication.')
-            local = rows[0]
-            # The token is valid only for one pre-existing broker request. The
-            # sender/owner/model remain those captured by the server, never the
-            # untrusted user/model strings in the callback payload.
-            supplied_key = metadata.get('user_api_key_hash')
-            if supplied_key and supplied_key != local['key_hash']:
-                raise HTTPException(401, 'Cost event belongs to another gateway key.')
-            event_id = record.get('id') or record.get('litellm_call_id')
-            if not isinstance(event_id, str) or not event_id or len(event_id) > 300:
-                raise HTTPException(422, 'Cost event requires a stable event ID.')
-            cost = money(record.get('response_cost'))
-            usage = record.get('usage') if isinstance(record.get('usage'), dict) else record
-            def tokens(field):
-                value = usage.get(field)
-                return value if type(value) is int and value >= 0 else None
-            normalized.append((request_id, event_id, cost, tokens('prompt_tokens'), tokens('completion_tokens'), tokens('total_tokens'), now()))
-        accepted = 0
-        with self.store.connect() as conn:
-            for row in normalized:
-                accepted += conn.execute('INSERT OR IGNORE INTO cost_callbacks VALUES(?,?,?,?,?,?,?)', row).rowcount
-            for request_id in {row[0] for row in normalized}:
-                events = conn.execute('SELECT * FROM cost_callbacks WHERE request_id=?', (request_id,)).fetchall()
-                total = sum((Decimal(event['cost'] or '0') for event in events), Decimal(0))
-                pending = any(event['cost'] is None for event in events)
-                def tokens(field):
-                    known = [event[field] for event in events if event[field] is not None]
-                    return sum(known) if known else None
-                conn.execute('UPDATE model_requests SET cost=?,callback_at=?,callback_pending=?,prompt_tokens=?,completion_tokens=?,total_tokens=? WHERE id=?',
-                             (str(total), now(), pending, tokens('prompt_tokens'), tokens('completion_tokens'), tokens('total_tokens'), request_id))
-        return {'accepted': accepted, 'duplicates': len(records) - accepted}
+        cost = capture.cost if capture else None
+        self.store.execute('UPDATE model_requests SET status=?,finished_at=?,cost_source=CASE WHEN cost IS NULL AND ? IS NOT NULL THEN ? ELSE cost_source END,cost=COALESCE(cost,?),prompt_tokens=?,completion_tokens=?,total_tokens=? WHERE id=?',
+                           (status, now(), cost, 'response_usage', cost, tokens('prompt_tokens'), tokens('completion_tokens'), tokens('total_tokens'), request_id))
 
     def report(self, start=None, end=None):
         start, end, lower, upper = period(start, end)
@@ -217,13 +174,13 @@ class Spend:
         requests = {r['id']: r for r in self.store.rows('SELECT * FROM model_requests WHERE key_hash=?', (self.key_hash,))}
         rows = [row for row in requests.values() if lower <= row['created_at'] < upper]
         def empty():
-            return {'spend': Decimal(0), 'requests': 0, 'pending_costs': 0, 'unreconciled_requests': 0, 'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0, 'sessions': set()}
+            return {'spend': Decimal(0), 'requests': 0, 'pending_costs': 0, 'missing_costs': 0, 'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0, 'sessions': set()}
         groups = {user['id']: empty() for user in users.values() if user['kind'] == 'google'}
         sessions, models = {}, {}
         def add(bucket, row):
             bucket['requests'] += 1
-            bucket['pending_costs'] += row['cost'] is None or bool(row['callback_pending'])
-            bucket['unreconciled_requests'] += not bool(row['callback_at'])
+            bucket['pending_costs'] += row['cost'] is None and row['status'] == 'pending'
+            bucket['missing_costs'] += row['cost'] is None and row['status'] != 'pending'
             bucket['spend'] += Decimal(row['cost'] or '0')
             for key in ('prompt_tokens', 'completion_tokens', 'total_tokens'):
                 bucket[key] += row[key] or 0
@@ -244,13 +201,12 @@ class Spend:
         def identity(user_id):
             return users.get(user_id, {'id': 'unattributed', 'name': 'Unattributed / earlier usage', 'email': '', 'kind': 'unattributed'})
         titles = {r['id']: r['prompt'].split('\n')[0][:150] for r in self.store.rows('SELECT id,prompt FROM runs')}
-        callback_total = sum((Decimal(row['cost'] or '0') for row in rows if row['callback_at']), Decimal(0))
         return {'start': str(start), 'end': str(end), 'currency': 'USD', 'timezone': 'UTC', 'total': clean(total),
-                'callback_spend': str(callback_total), 'callback_requests': sum(bool(row['callback_at']) for row in rows),
-                'last_callback_at': max((row['callback_at'] for row in requests.values() if row['callback_at']), default=None),
+                'priced_requests': sum(row['cost'] is not None for row in rows),
                 'users': [{**identity(key), **clean(value)} for key, value in sorted(groups.items(), key=lambda x: x[1]['spend'], reverse=True)],
                 'sessions': [{'user_id': user, 'user_name': identity(user)['name'], 'run_id': run, 'title': titles.get(run, 'Session'), **clean(value)} for (user, run), value in sorted(sessions.items(), key=lambda x: x[1]['spend'], reverse=True)],
                 'models': [{'model': key, **clean(value)} for key, value in models.items()],
+                'request_details': [{key: row[key] for key in ('id','gateway_id','run_id','message_id','user_id','model','created_at','status','cost','cost_source','prompt_tokens','completion_tokens','total_tokens')} for row in sorted(rows, key=lambda r: r['created_at'], reverse=True)[:500]],
                 'identities': list(users.values()), 'tracked_since': min((r['created_at'] for r in requests.values()), default=None)}
 
     def routes(self):
@@ -260,19 +216,6 @@ class Spend:
         async def report(request: Request, start: date | None = None, end: date | None = None):
             self.security.require(request, admin=True)
             return self.report(start, end)
-
-        @router.post('/hooks/litellm/cost')
-        async def callback(request: Request):
-            raw = await request.body()
-            if len(raw) > 5 * 1024 * 1024:
-                raise HTTPException(413, 'Cost callback is too large.')
-            try:
-                payload = json.loads(raw)
-            except (ValueError, UnicodeDecodeError):
-                raise HTTPException(422, 'Invalid cost event JSON.')
-            result = self.callback(payload)
-            await self.checkpoints.flush()
-            return result
 
         @router.post('/api/admin/spend/link-slack')
         async def link(body: IdentityLink, request: Request):
