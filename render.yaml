@@ -8,7 +8,6 @@ services:
     buildCommand: pip install uv==0.11.17 && uv sync --frozen --no-dev
     startCommand: .venv/bin/python render_start.py
     healthCheckPath: /health
-    maxShutdownDelaySeconds: 90
     autoDeployTrigger: "off"
     disk:
       name: moyai-state

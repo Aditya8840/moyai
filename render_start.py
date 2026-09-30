@@ -115,7 +115,7 @@ def main():
     if stage == "false":
         asyncio.run(bootstrap())
     uvicorn.run(maintenance if stage == "true" else "app.main:app", host="0.0.0.0",
-                port=int(os.environ.get("PORT", "10000")), workers=1, timeout_graceful_shutdown=80)
+                port=int(os.environ.get("PORT", "10000")), workers=1, timeout_graceful_shutdown=20)
 
 
 if __name__ == "__main__":
