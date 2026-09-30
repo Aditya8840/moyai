@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 import secrets
+import time
 from pathlib import Path
 
 import modal
@@ -10,6 +11,21 @@ from .security import digest
 
 TERMINAL = {"completed", "failed", "cancelled", "interrupted", "idle"}
 SANDBOX_FILES = Path(__file__).parent.parent / "sandbox"
+SAVE_WARNING = ("Your answer is saved, but the latest workspace files could not be saved. "
+                "The previous workspace checkpoint is unchanged. Download the recovered files before continuing; "
+                "they may be incomplete. Queued follow-ups were stopped, and no actions were replayed.")
+
+
+def safe_error_detail(exc, secrets_to_hide=()):
+    """Keep useful provider diagnostics without logging credentials or URLs."""
+    value = str(exc)
+    for secret in secrets_to_hide:
+        if secret:
+            value = value.replace(secret, "[redacted]")
+    value = re.sub(r"https?://\S+", "[URL redacted]", value)
+    value = re.sub(r"(?i)(bearer\s+|(?:api[_-]?key|token|secret|authorization)[\s\"':=]+)\S+", r"\1[redacted]", value)
+    value = re.sub(r"\b(?:sk-|xox[baprs]-|ak-|as-)[A-Za-z0-9_-]+", "[redacted]", value)
+    return value[:1500]
 
 
 class RunManager:
@@ -25,6 +41,17 @@ class RunManager:
     async def persist(self):
         """Replaced by the cloud checkpoint callback when hosted on Modal."""
 
+    def preserve_answer(self, run_id, reason=SAVE_WARNING):
+        """Called on failure/restart; never turn an unsaved workspace into success."""
+        row = self.store.run(run_id)
+        pending = json.loads(row.get("pending_result") or "null")
+        if not pending or not pending.get("message") or pending.get("checkpoint_saved"):
+            return False
+        pending["save_failed"] = True
+        self.store.update_run(run_id, summary=pending["message"] + "\n\n---\n**Workspace save warning:** " + reason,
+                              checkpoint_error=reason, pending_result=json.dumps(pending))
+        return True
+
     async def terminate(self, sandbox):
         async with asyncio.timeout(30):
             await sandbox.terminate.aio()
@@ -32,13 +59,25 @@ class RunManager:
             await sandbox.wait.aio(raise_on_termination=False)
 
     async def recover(self):
-        rows = self.store.rows("SELECT id,sandbox_id,status FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle') OR EXISTS(SELECT 1 FROM messages WHERE messages.run_id=runs.id AND messages.status IN ('running','queued'))")
+        rows = self.store.rows("SELECT * FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle') OR EXISTS(SELECT 1 FROM messages WHERE messages.run_id=runs.id AND messages.status IN ('running','queued'))")
         for row in rows:
-            self.store.update_run(row["id"], status="interrupted", token_hash="", error="The workspace restarted. This task was not replayed.")
+            pending = json.loads(row.get("pending_result") or "null")
+            if pending and pending.get("message"):
+                saved = pending.get("checkpoint_saved") is True
+                if not saved:
+                    self.preserve_answer(row["id"])
+                response = self.store.run(row["id"])["summary"]
+                status = ("completed" if pending.get("completed") and pending.get("exit_code") == 0 else "failed") if saved else "save_failed"
+                if pending.get("message_id"):
+                    self.store.finish_message(row["id"], pending["message_id"], response, status)
+                self.store.update_run(row["id"], status="idle" if status == "completed" else "failed", token_hash="",
+                                      error="" if status == "completed" else "The workspace restarted after the answer was received.")
+            else:
+                self.store.update_run(row["id"], status="interrupted", token_hash="", error="The workspace restarted. This task was not replayed.")
             self.store.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (row["id"],))
             self.store.execute("UPDATE approvals SET status='uncertain' WHERE run_id=? AND status='executing'", (row["id"],))
             self.store.execute("UPDATE messages SET status='interrupted' WHERE run_id=? AND status IN ('running','queued')", (row["id"],))
-            self.store.event(row["id"], "error", "Workspace restarted. Unfinished messages were interrupted and not replayed. Send a new message to continue from the last saved workspace.")
+            self.store.event(row["id"], "error", "Workspace restarted. Received answers were preserved; unfinished messages were interrupted and not replayed.")
             if row["sandbox_id"] and self.settings.modal_token_id and self.settings.modal_token_secret:
                 try:
                     sandbox = await modal.Sandbox.from_id.aio(row["sandbox_id"], client=await self.client())
@@ -77,7 +116,9 @@ class RunManager:
             try:
                 await self.execute(turn)
             except asyncio.CancelledError:
-                self.store.finish_message(run_id, message["id"], "This response was interrupted. Send a new message to continue from the last saved workspace; external actions were not replayed.", "interrupted")
+                row = self.store.run(run_id)
+                pending = json.loads(row.get("pending_result") or "{}")
+                self.store.finish_message(run_id, message["id"], row["summary"] if pending.get("message") else "This response was interrupted. Send a new message to continue from the last saved workspace; external actions were not replayed.", "save_failed" if pending.get("save_failed") else "interrupted")
                 self.store.execute("UPDATE messages SET status='interrupted' WHERE run_id=? AND status='queued'", (run_id,))
                 raise
             row = self.store.run(run_id)
@@ -87,7 +128,8 @@ class RunManager:
                 await self.persist()
             else:
                 explanation = row["summary"] or row["error"] or "This response was stopped. The last completed workspace checkpoint is preserved; recent unfinished changes may not be saved."
-                self.store.finish_message(run_id, message["id"], explanation, row["status"])
+                preserved = json.loads(row.get("pending_result") or "{}").get("save_failed")
+                self.store.finish_message(run_id, message["id"], explanation, "save_failed" if preserved else row["status"])
                 self.store.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status='queued'", (run_id,))
                 await self.persist()
                 return
@@ -126,16 +168,18 @@ class RunManager:
             async with self.slots:
                 if self.stopped(run_id):
                     return
-                async with asyncio.timeout(self.settings.run_timeout_seconds + 180):
+                async with asyncio.timeout(self.settings.run_timeout_seconds + self.settings.snapshot_timeout_seconds + 180):
                     if run["mode"] == "demo":
                         await self.demo(run)
                     else:
                         await self.cloud(run)
         except asyncio.CancelledError:
+            self.preserve_answer(run_id)
             self.store.update_run(run_id, status="interrupted", token_hash="", error="Workspace shut down while the task was active.")
             self.store.event(run_id, "error", "Workspace shut down. This run was interrupted.")
             raise
         except Exception as exc:
+            self.preserve_answer(run_id)
             if self.stopped(run_id):
                 self.store.update_run(run_id, status="cancelled", token_hash="")
             else:
@@ -143,6 +187,10 @@ class RunManager:
                 self.store.update_run(run_id, status="failed", token_hash="", error=message)
                 self.store.event(run_id, "error", message)
         finally:
+            row = self.store.run(run_id)
+            pending = json.loads(row.get("pending_result") or "{}")
+            if row.get("chat_enabled") and pending and not pending.get("checkpoint_saved") and row["status"] in {"stopping", "cancelled", "interrupted", "failed"}:
+                self.preserve_answer(run_id)
             sandbox = self.sandboxes.pop(run_id, None)
             if sandbox:
                 try:
@@ -205,7 +253,7 @@ class RunManager:
             app=app, client=client, image=image, secrets=[secret],
             env={"PYTHONUNBUFFERED": "1", "PYTHONPATH": "/opt/hermes", "HERMES_HOME": "/tmp/hermes-home",
                  "HERMES_RUNTIME_DIR": "/opt/hermes-tools", "HERMES_PYTHON": "/opt/hermes-env/bin/python", "GIT_TERMINAL_PROMPT": "0"},
-            timeout=self.settings.run_timeout_seconds, cpu=2, memory=4096,
+            timeout=self.settings.run_timeout_seconds + self.settings.snapshot_timeout_seconds + 60, cpu=2, memory=4096,
             experimental_options={"vm_runtime": True} if self.settings.modal_vm_runtime else {},
         ))
         try:
@@ -225,6 +273,7 @@ class RunManager:
                 "model": self.settings.resolve_model(fallback=run.get('active_model') or run.get('model') or ''), "max_iterations": self.settings.max_agent_iterations,
                 "timeout": self.settings.run_timeout_seconds - 90,
                 "chat_enabled": bool(run.get("chat_enabled")),
+                "workspace_warning": run.get("checkpoint_error", ""),
                 "slack_source": self.store.slack_source(run_id),
                 "slack_thread_chat": bool(self.store.rows("SELECT 1 FROM slack_threads WHERE run_id=?", (run_id,))) if self.settings.slack_thread_chat_enabled else False,
                 "history_fallback": [{"role": m["role"], "content": (f"[Prior {m['status']} message; context only, do not replay] " if m["role"] == "user" and m["status"] != "completed" else "") + m["content"]} for m in self.store.messages(run_id)
@@ -232,7 +281,7 @@ class RunManager:
         # Restored snapshots can contain an older adapter; refresh only our own
         # runner files, preserving all user workspace files and agent history.
         if run.get("snapshot_id"):
-            for name in ("agent.py", "mcp_bridge.py", "broker_relay.py", "broker_transport.py"):
+            for name in ("agent.py", "artifacts.py", "mcp_bridge.py", "broker_relay.py", "broker_transport.py"):
                 await sandbox.filesystem.write_text.aio((SANDBOX_FILES / name).read_text(), f"/opt/workspace-runner/{name}")
         await sandbox.filesystem.write_text.aio(json.dumps(spec), "/tmp/task.json")
         self.store.update_run(run_id, status="running")
@@ -266,11 +315,19 @@ class RunManager:
                         event = json.loads(scrub(line[len("WORKSPACE_EVENT "):]))
                         if event.get("kind") == "final":
                             result = event
+                            # Store the answer independently of artifacts and the Modal
+                            # checkpoint. Recovery can finish this exact turn after a crash.
+                            result["message_id"] = run.get("message_id")
+                            self.store.update_run(run_id, summary=str(result.get("message", "")), pending_result=json.dumps(result))
+                            await self.persist()
                         elif event.get("kind") in {"tool", "status", "error", "message"}:
                             self.store.event(run_id, event["kind"], str(event.get("message", "")), event.get("data", {}))
                     except (ValueError, TypeError):
                         self.store.event(run_id, "error", "An agent progress event could not be decoded.")
             code = await process.wait.aio()
+            if result:
+                result["exit_code"] = code
+                self.store.update_run(run_id, pending_result=json.dumps(result))
             if self.stopped(run_id):
                 return
             await self.save_artifact(sandbox, run_id)
@@ -279,8 +336,22 @@ class RunManager:
             if run.get("chat_enabled"):
                 self.store.update_run(run_id, status="saving", token_hash="")
                 self.store.event(run_id, "status", "Saving conversation and workspace for your next message")
-                snapshot = await sandbox.snapshot_filesystem.aio(timeout=55, ttl=None)
-                self.store.update_run(run_id, snapshot_id=snapshot.object_id)
+                started = time.monotonic()
+                try:
+                    snapshot = await sandbox.snapshot_filesystem.aio(timeout=self.settings.snapshot_timeout_seconds, ttl=None)
+                except Exception as exc:
+                    preserved = self.preserve_answer(run_id)
+                    warning = SAVE_WARNING if preserved else "The workspace save failed and no final answer was received. The previous checkpoint is unchanged; queued follow-ups were stopped."
+                    self.store.update_run(run_id, status="failed", error=warning, checkpoint_error=warning)
+                    self.store.event(run_id, "error", "Workspace save failed; the received answer was preserved." if preserved else "Workspace save failed before a final answer was received.",
+                                     {"detail": {"stage": "snapshot_filesystem", "error_type": type(exc).__name__,
+                                                 "elapsed_seconds": round(time.monotonic() - started, 2),
+                                                 "timeout_seconds": self.settings.snapshot_timeout_seconds,
+                                                 "reason": safe_error_detail(exc, secrets_to_hide)}})
+                    return
+                if result:
+                    result["checkpoint_saved"] = True
+                self.store.update_run(run_id, snapshot_id=snapshot.object_id, checkpoint_error="", pending_result=json.dumps(result) if result else "")
                 await self.persist()
             if self.stopped(run_id):
                 return

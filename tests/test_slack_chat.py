@@ -64,6 +64,22 @@ def test_parallel_duplicate_delivery_cannot_enqueue_twice(slack_app):
     assert len(app.state.store.rows('SELECT * FROM slack_receipts')) == 2
 
 
+def test_workspace_save_failure_delivers_the_preserved_answer_once(slack_app):
+    from app.runner import SAVE_WARNING
+    app, client, run_id = start(slack_app)
+    message = app.state.store.claim_message(run_id)
+    answer = 'Implementation prepared; nine tests still fail.\n\nWorkspace save warning: ' + SAVE_WARNING
+    app.state.store.finish_message(run_id, message['id'], answer, 'save_failed')
+    app.state.store.update_run(run_id, status='failed', summary=answer, checkpoint_error=SAVE_WARNING)
+    app.state.slack.chat.collect()
+    app.state.slack.chat.collect()
+    answers = app.state.store.rows("SELECT * FROM slack_outbox WHERE kind='answer' AND run_id=?", (run_id,))
+    assert len(answers) == 1
+    assert answers[0]['text'].startswith('Implementation prepared')
+    assert 'latest workspace files could not be saved' in answers[0]['text']
+    assert 'Response failed:' not in answers[0]['text']
+
+
 def test_ignores_unrelated_threads_bots_edits_wrong_team_and_shared_channels(slack_app):
     app, client, run_id = start(slack_app)
     for index, changes in enumerate([

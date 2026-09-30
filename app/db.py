@@ -126,7 +126,7 @@ class Store:
             for name in ("chat_enabled", "turn_model_calls"):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
-            for name in ('model', 'active_model'):
+            for name in ('model', 'active_model', 'pending_result', 'checkpoint_error'):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             if 'model' not in {row['name'] for row in conn.execute('PRAGMA table_info(messages)')}:
@@ -261,7 +261,7 @@ class Store:
             if not row:
                 return None
             conn.execute("UPDATE messages SET status='running' WHERE id=?", (row["id"],))
-            conn.execute("UPDATE runs SET status='queued',turn_model_calls=0,error='',summary='',active_model=?,active_user_id=?,active_message_id=? WHERE id=?", (row['model'], row['user_id'], row['id'], run_id))
+            conn.execute("UPDATE runs SET status='queued',turn_model_calls=0,error='',summary='',pending_result='',active_model=?,active_user_id=?,active_message_id=? WHERE id=?", (row['model'], row['user_id'], row['id'], run_id))
         self.event(run_id, "chat", "Response started", {"message_id": row["id"], "model": row['model']})
         return dict(row)
 
@@ -297,7 +297,7 @@ class Store:
         return user_id
 
     def update_run(self, run_id: str, **fields):
-        allowed = {"status", "summary", "error", "sandbox_id", "snapshot_id", "token_hash"}
+        allowed = {"status", "summary", "error", "sandbox_id", "snapshot_id", "token_hash", "pending_result", "checkpoint_error"}
         if not fields.keys() <= allowed:
             raise ValueError("Unsupported run update")
         fields["updated_at"] = now()

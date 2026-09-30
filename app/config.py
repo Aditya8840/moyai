@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     hermes_revision: str = "7968c72a3cb80beaae51948378944dd6e3423b96"
     max_concurrent_runs: int = Field(default=2, ge=1, le=10)
     run_timeout_seconds: int = Field(default=1800, ge=120, le=7200)
+    snapshot_timeout_seconds: int = Field(default=180, ge=10, le=600)
     max_agent_iterations: int = Field(default=30, ge=1, le=100)
     demo_step_seconds: float = Field(default=0.8, ge=0, le=10)
     linear_client_id: str = ""

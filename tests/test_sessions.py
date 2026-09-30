@@ -27,7 +27,7 @@ class SessionSandbox(FakeSandbox):
             assert path.startswith('/opt/workspace-runner/')
 
     async def snapshot(self, *, timeout, ttl):
-        assert ttl is None and timeout == 55
+        assert ttl is None and timeout == 180
         return SimpleNamespace(object_id=f'im-session-{self.index}')
 
 
@@ -93,7 +93,92 @@ async def test_snapshot_failure_does_not_claim_saved_success_or_replay_followups
     await wait_jobs(runner)
     row = runner.store.run(run['id'])
     assert row['status'] == 'failed' and not row['snapshot_id'] and machine.terminated
-    assert [m['status'] for m in runner.store.messages(run['id']) if m['role'] == 'user'] == ['failed', 'cancelled']
+    assert [m['status'] for m in runner.store.messages(run['id']) if m['role'] == 'user'] == ['save_failed', 'cancelled']
+    answer = next(m for m in runner.store.messages(run['id']) if m['role'] == 'assistant')
+    assert answer['content'].startswith('Tests passed')
+    assert 'latest workspace files could not be saved' in answer['content']
+    assert answer['status'] == 'save_failed'
+    detail = next(e['data']['detail'] for e in runner.store.events(run['id']) if e['message'].startswith('Workspace save failed'))
+    assert detail['stage'] == 'snapshot_filesystem' and detail['reason'] == 'Snapshot storage unavailable'
+
+
+async def test_answer_is_durable_before_snapshot_and_survives_restart(runner, monkeypatch):
+    import json
+    machine = SessionSandbox(1)
+    started, release = asyncio.Event(), asyncio.Event()
+    async def blocked_snapshot(**kwargs):
+        started.set()
+        await release.wait()
+        raise RuntimeError('Snapshot unavailable')
+    machine.snapshot_filesystem = aio(blocked_snapshot)
+    async def create(**kwargs): return machine
+    monkeypatch.setattr('app.runner.modal.Sandbox.create', aio(create))
+    run = runner.store.create_run('First response', '', 'modal', [], chat_enabled=True)
+    runner.submit(run)
+    await started.wait()
+    # A new Store sees the answer on disk while the remote save is still blocked.
+    reopened = Store(runner.settings.data_dir)
+    row = reopened.run(run['id'])
+    assert row['status'] == 'saving' and row['summary'] == 'Tests passed'
+    assert json.loads(row['pending_result'])['message'] == 'Tests passed'
+    from app.runner import RunManager
+    recovery = RunManager(reopened, runner.settings)
+    recovery.settings = runner.settings.model_copy(update={'modal_token_id': ''})
+    await recovery.recover()
+    await recovery.recover()
+    answers = [m for m in reopened.messages(run['id']) if m['role'] == 'assistant']
+    assert len(answers) == 1 and answers[0]['content'].startswith('Tests passed')
+    assert answers[0]['status'] == 'save_failed'
+    release.set()
+    await wait_jobs(runner)
+    assert len([m for m in reopened.messages(run['id']) if m['role'] == 'assistant']) == 1
+
+
+async def test_failed_save_retains_prior_checkpoint_and_next_turn_uses_saved_chat(runner, monkeypatch):
+    machines, specs = [], []
+    async def create(**kwargs):
+        machine = SessionSandbox(len(machines) + 1)
+        machines.append(machine)
+        if len(machines) == 1:
+            async def broken(**kwargs): raise RuntimeError('Snapshot unavailable')
+            machine.snapshot_filesystem = aio(broken)
+        return machine
+    monkeypatch.setattr('app.runner.modal.Sandbox.create', aio(create))
+    monkeypatch.setattr('app.runner.modal.Image.from_id', lambda image_id, **kwargs: image_id)
+    run = runner.store.create_run('First response', '', 'modal', [], chat_enabled=True)
+    runner.store.update_run(run['id'], snapshot_id='im-previous-good')
+    runner.submit(runner.store.run(run['id']))
+    await wait_jobs(runner)
+    assert runner.store.run(run['id'])['snapshot_id'] == 'im-previous-good'
+    runner.store.enqueue_message(run['id'], 'Inspect what was saved; do not replay work.', 'inspect-next')
+    runner.submit(runner.store.run(run['id']))
+    await wait_jobs(runner)
+    assert machines[1].spec['workspace_warning']
+    assert any(m['role'] == 'assistant' and 'Tests passed' in m['content'] for m in machines[1].spec['history_fallback'])
+    row = runner.store.run(run['id'])
+    assert row['status'] == 'idle' and not row['checkpoint_error'] and row['snapshot_id'] == 'im-session-2'
+
+
+@pytest.mark.parametrize('failure', [RuntimeError, asyncio.CancelledError])
+async def test_failure_after_saved_checkpoint_keeps_answer_without_false_save_warning(runner, monkeypatch, failure):
+    machine = SessionSandbox(1)
+    async def create(**kwargs): return machine
+    monkeypatch.setattr('app.runner.modal.Sandbox.create', aio(create))
+    run = runner.store.create_run('Save before stopping', '', 'modal', [], chat_enabled=True)
+    raised = False
+    async def persist():
+        nonlocal raised
+        if runner.store.run(run['id'])['snapshot_id'] and not raised:
+            raised = True
+            raise failure()
+    runner.persist = persist
+    runner.submit(run)
+    await wait_jobs(runner)
+    row = runner.store.run(run['id'])
+    answer = next(m for m in runner.store.messages(run['id']) if m['role'] == 'assistant')
+    assert answer['content'] == 'Tests passed'
+    assert not row['checkpoint_error'] and row['snapshot_id'] == 'im-session-1'
+    assert machine.terminated
 
 
 async def test_cancel_before_chat_driver_starts_cannot_restart_it(runner):

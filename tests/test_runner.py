@@ -92,7 +92,7 @@ def runner(tmp_path, monkeypatch):
 async def test_cloud_lifecycle_collects_result_and_cleans_up(runner, monkeypatch, completed, expected_status):
     sandbox = FakeSandbox(completed=completed)
     async def create(**kwargs):
-        assert kwargs["timeout"] == 1800
+        assert kwargs["timeout"] == 2040  # 30m agent budget plus save/cleanup reserve
         assert kwargs["cpu"] == 2 and kwargs["memory"] == 4096
         return sandbox
     monkeypatch.setattr("app.runner.modal.Sandbox.create", aio(create))

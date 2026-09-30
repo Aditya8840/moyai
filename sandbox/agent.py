@@ -5,12 +5,13 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
-import zipfile
 
 try:
     from .broker_relay import BrokerRelay
+    from .artifacts import collect_archive
 except ImportError:
     from broker_relay import BrokerRelay
+    from artifacts import collect_archive
 LOCK = threading.Lock()
 
 
@@ -79,13 +80,18 @@ def run_agent(spec, relay):
     result = {}
     history_path = Path("/session/conversation.json")
     history = spec.get("history_fallback", [])
-    if spec.get("chat_enabled") and history_path.exists():
+    if spec.get("chat_enabled") and history_path.exists() and not spec.get("workspace_warning"):
         history = json.loads(history_path.read_text())
     try:
         if not any("browser_open" in tool["function"]["name"] for tool in agent.tools):
             print("Available agent tools:", sorted(agent.valid_tool_names), file=sys.stderr, flush=True)
             raise RuntimeError("Workspace MCP tools were not loaded")
-        result = agent.run_conversation(conversation_prompt(spec, has_history=bool(history)), conversation_history=history, system_message=(
+        prompt = conversation_prompt(spec, has_history=bool(history))
+        if spec.get("workspace_warning"):
+            prompt = ("WORKSPACE RECOVERY NOTICE: The previous answer was saved, but the latest filesystem checkpoint failed. "
+                      "The files may be from an older turn. Use the saved chat below for context, inspect files before claiming "
+                      "changes exist, and verify external actions before considering a retry.\n\nCURRENT REQUEST:\n" + prompt)
+        result = agent.run_conversation(prompt, conversation_history=history, system_message=(
             "You are Moyai Devin, an internal engineering agent in an ongoing chat session. Work only within /workspace. "
             "The conversation and filesystem are saved between responses. Answer follow-ups in that context. "
             "If you need clarification, ask a concise question and wait for the next user message. "
@@ -110,6 +116,12 @@ def run_agent(spec, relay):
             "Do not claim a check passed unless you ran it. For work tasks, summarize work done, verification, and limitations. "
             "For conversational questions, answer directly and naturally without status preambles or a routine work summary."
         ))
+        completed = result.get("completed") is True and not result.get("interrupted") and not result.get("partial")
+        summary = str((relay.last_error if not completed else '') or result.get("final_response") or "Hermes ended without a final response.")
+        # The control plane durably stores this before any filesystem saving or
+        # archive work can fail. A nonzero exit still marks the turn incomplete.
+        emit("final", summary, completed=completed)
+        (artifacts / "result.md").write_text(summary)
         if spec.get("chat_enabled"):
             if not isinstance(result.get("messages"), list):
                 raise RuntimeError("Hermes did not return conversation history")
@@ -120,36 +132,7 @@ def run_agent(spec, relay):
             temporary.replace(history_path)
     finally:
         agent.close()
-    completed = result.get("completed") is True and not result.get("interrupted") and not result.get("partial")
-    summary = str((relay.last_error if not completed else '') or result.get("final_response") or "Hermes ended without a final response.")
-    (artifacts / "result.md").write_text(summary)
-    if (workspace / ".git").exists():
-        patch = subprocess.run(["git", "diff", "HEAD", "--binary"], capture_output=True, timeout=20, check=True)
-        (artifacts / "changes.patch").write_bytes(patch.stdout)
-        # Include new files in a separate archive folder without following symlinks.
-        untracked = subprocess.run(["git", "ls-files", "--others", "--exclude-standard", "-z"], capture_output=True, timeout=20, check=True).stdout
-        new_files = [workspace / name.decode() for name in untracked.split(b"\0") if name]
-    else:
-        new_files = list(workspace.rglob("*"))[:1000]
-    total = 0
-    with zipfile.ZipFile(artifacts / "result.zip", "w", zipfile.ZIP_DEFLATED) as archive:
-        for path in [artifacts / "result.md", artifacts / "changes.patch", artifacts / "browser.png", *new_files]:
-            if not path.is_file() or path.is_symlink():
-                continue
-            root = artifacts if path.parent == artifacts else workspace
-            if not path.resolve().is_relative_to(root.resolve()):
-                continue
-            relative = path.relative_to(root)
-            if any(part.startswith(".") or part in {"node_modules", "__pycache__"} for part in relative.parts):
-                continue
-            if path.stat().st_size > 2 * 1024 * 1024 or total + path.stat().st_size > 15 * 1024 * 1024:
-                continue
-            data = path.read_bytes()
-            token = os.environ["WORKSPACE_RUN_TOKEN"].encode()
-            data = data.replace(token, b"[redacted]")
-            archive.writestr(str(relative) if root == artifacts else f"new-files/{relative}", data)
-            total += len(data)
-    emit("final", summary, completed=completed)
+    collect_archive(workspace, artifacts, os.environ["WORKSPACE_RUN_TOKEN"].encode())
     return 0 if completed else 1
 
 

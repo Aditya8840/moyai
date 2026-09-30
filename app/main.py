@@ -344,7 +344,7 @@ def create_app(settings: Settings | None = None):
                 if not row["chat_enabled"] and row["status"] in TERMINAL and run_id not in manager.jobs and len(batch) < 200:
                     yield "event: settled\ndata: {}\n\n"
                     break
-                yield f"event: run-status\ndata: {json.dumps({'status': row['status'], 'active': run_id in manager.jobs, 'model': row['model'], 'active_model': row['active_model'], 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
+                yield f"event: run-status\ndata: {json.dumps({'status': row['status'], 'active': run_id in manager.jobs, 'model': row['model'], 'active_model': row['active_model'], 'checkpoint_error': row['checkpoint_error'], 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
                 await asyncio.sleep(0.5)
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -635,7 +635,7 @@ def create_app(settings: Settings | None = None):
 
 
 def public_run(run):
-    return {key: value for key, value in run.items() if key != "token_hash"}
+    return {key: value for key, value in run.items() if key not in {"token_hash", "pending_result"}}
 
 
 app = create_app()
