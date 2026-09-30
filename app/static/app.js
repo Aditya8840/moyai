@@ -12,7 +12,7 @@ async function api(path, options = {}) {
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(state.toast); state.toast = setTimeout(() => $('#toast').hidden = true, 5500); }
 function statusLabel(status) { return `<span class="status ${esc(status)}">${esc(status==='idle'?'Ready':status.replaceAll('_',' '))}</span>`; }
 function relative(date) { const min = Math.max(0, Math.floor((Date.now() - new Date(date)) / 60000)); return min < 1 ? 'Just now' : min < 60 ? `${min}m ago` : min < 1440 ? `${Math.floor(min/60)}h ago` : new Date(date).toLocaleDateString(); }
-function stopStream(){ state.source?.close(); state.source = null; }
+function stopStream(){ clearTimeout(state.streamRetry); state.streamRetry=null; state.source?.close(); state.source = null; }
 function sessionTitle(run){return run.prompt.split('\n')[0].replace(/\s+/g,' ').trim();}
 function modelName(model=state.config.model){return (state.config.models||[]).find(m=>m.id===model)?.name||model||'Hermes Agent';}
 function modelPicker(id,selected,disabled=false){return `<label class="model-picker"><span class="sr-only">Model for next message</span><select id="${id}" aria-label="Model for next message" ${disabled?'disabled':''}>${(state.config.models||[]).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}</select></label>`;}
@@ -123,11 +123,32 @@ function renderChat(run){
     catch(error){toast(error.message);}finally{state.sending.delete(id);if(state.selected===id&&$('#message-form'))$('#message-form [type="submit"]').disabled=false;}
   };
   updateChat(run,true);
-  const source=new EventSource(`/api/runs/${id}/events?after=${run.events.at(-1)?.id||0}`);state.source=source;
-  source.onopen=()=>{if(state.selected===id){$('#connection-state').hidden=true;refreshChat(id).catch(showError);}};
-  source.onmessage=e=>{if(state.selected!==id)return;const event=JSON.parse(e.data);if(!['chat','result'].includes(event.kind))$('#timeline').insertAdjacentHTML('beforeend',eventHTML(event));if(['chat','approval','artifact','context'].includes(event.kind))refreshChat(id).catch(showError);};
-  source.addEventListener('run-status',e=>{if(state.selected===id){$('#connection-state').hidden=true;updateChatStatus(JSON.parse(e.data));}});
-  source.onerror=()=>{if(state.selected===id&&$('#connection-state'))$('#connection-state').hidden=false;};
+  connectChatStream(run);
+}
+function connectChatStream(run){
+  const id=run.id;let cursor=run.events.at(-1)?.id||0;
+  const connect=()=>{
+    if(state.selected!==id)return;
+    const source=new EventSource(`/api/runs/${id}/events?after=${cursor}`);state.source=source;
+    const current=()=>state.selected===id&&state.source===source;
+    source.onopen=()=>{if(current()){$('#connection-state').hidden=true;refreshChat(id).catch(showError);}};
+    source.onmessage=e=>{
+      if(!current())return;
+      const event=JSON.parse(e.data);if(event.id<=cursor)return;cursor=event.id;
+      if(!['chat','result'].includes(event.kind))$('#timeline').insertAdjacentHTML('beforeend',eventHTML(event));
+      if(['chat','approval','artifact','context'].includes(event.kind))refreshChat(id).catch(showError);
+    };
+    source.addEventListener('run-status',e=>{if(current()){$('#connection-state').hidden=true;updateChatStatus(JSON.parse(e.data));}});
+    source.onerror=()=>{
+      if(!current())return;
+      $('#connection-state').hidden=false;
+      // HTTP errors during a deploy can permanently close native EventSource.
+      // Reopen from the last received event without replacing the composer.
+      source.close();clearTimeout(state.streamRetry);
+      state.streamRetry=setTimeout(()=>{state.streamRetry=null;if(current())connect();},3000);
+    };
+  };
+  connect();
 }
 function updateChatStatus(run){
   if(run.model&&$('#chat-model')&&!state.modelDrafts[state.selected])$('#chat-model').value=run.model;
