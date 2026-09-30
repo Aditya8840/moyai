@@ -24,6 +24,7 @@ from .runner import RunManager, TERMINAL
 from .persistence import Checkpoints, restore_checkpoint
 from .security import Security, digest
 from .google_sso import GoogleSignIn
+from .access_logging import configure_access_logging
 from .slack import SlackSessions
 
 STATIC = Path(__file__).parent / "static"
@@ -89,6 +90,7 @@ class OrganizationName(BaseModel):
 
 
 def create_app(settings: Settings | None = None):
+    configure_access_logging()
     settings = settings or Settings()
     restore_checkpoint(settings)
     store = Store(settings.data_dir)
