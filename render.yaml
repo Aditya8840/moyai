@@ -23,6 +23,6 @@ services:
       - key: RENDER_MIGRATION_STAGE
         value: "false"
       - key: BOOTSTRAP_MODAL_VOLUME
-        value: hermes-workspace-state
+        value: ""
       # Import existing secrets privately in the Render dashboard. Never regenerate
       # ENCRYPTION_KEY or saved organization connections cannot be decrypted.
