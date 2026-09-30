@@ -38,6 +38,7 @@ class NewRun(BaseModel):
     mode: Literal["demo", "modal"] = "demo"
     plugins: list[Provider] = Field(default_factory=list, max_length=3)
     chat_enabled: bool = True
+    model: str | None = Field(default=None, max_length=120)
 
     @field_validator("repo_url")
     @classmethod
@@ -76,6 +77,7 @@ class ChatMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     content: str = Field(min_length=1, max_length=16000)
     client_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,80}$")
+    model: str | None = Field(default=None, max_length=120)
 
 
 class ConnectionPolicy(BaseModel):
@@ -93,7 +95,7 @@ def create_app(settings: Settings | None = None):
     configure_access_logging()
     settings = settings or Settings()
     restore_checkpoint(settings)
-    store = Store(settings.data_dir)
+    store = Store(settings.data_dir, default_model=settings.resolve_model())
     security = Security(settings)
     connectors = Connectors(store, security, settings)
     manager = RunManager(store, settings)
@@ -217,7 +219,7 @@ def create_app(settings: Settings | None = None):
     async def config(request: Request):
         security.require(request)
         missing = missing_cloud()
-        return {"cloud_ready": not missing, "missing": missing, "model": settings.agent_model,
+        return {"cloud_ready": not missing, "missing": missing, "model": settings.resolve_model(), "models": settings.model_choices(),
                 "public_url": settings.public_url, "max_concurrent_runs": settings.max_concurrent_runs,
                 "run_timeout_seconds": settings.run_timeout_seconds, "max_agent_iterations": settings.max_agent_iterations,
                 "hermes_revision": settings.hermes_revision, "auth": "Google Workspace" if settings.google_enabled() else "Workspace password" if settings.workspace_password else "Local access only"}
@@ -246,6 +248,10 @@ def create_app(settings: Settings | None = None):
     @app.post("/api/runs", status_code=201)
     async def create(body: NewRun, request: Request):
         security.require(request, mutation=True)
+        try:
+            model = settings.resolve_model(body.model)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
         if body.mode == "modal":
             if missing_cloud():
                 raise HTTPException(503, "Cloud setup is incomplete. See Runtime for the missing settings.")
@@ -255,7 +261,7 @@ def create_app(settings: Settings | None = None):
         pending = store.rows("SELECT COUNT(*) AS n FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')")[0]["n"]
         if pending >= 20:
             raise HTTPException(429, "The queue is full. Wait for a task to finish.")
-        run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled)
+        run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled, model=model)
         await checkpoints.flush()
         manager.submit(run)
         return public_run(run)
@@ -279,14 +285,22 @@ def create_app(settings: Settings | None = None):
         if run["mode"] == "modal" and missing_cloud():
             raise HTTPException(503, "Cloud setup is incomplete. See Runtime.")
         try:
-            message, created = store.enqueue_message(run_id, body.content, body.client_id)
+            # Omitted models use the session preference inside the enqueue
+            # transaction; retries retain their originally selected model.
+            selected_model = settings.resolve_model(body.model) if body.model is not None else None
+            if selected_model is None:
+                settings.resolve_model(fallback=run['model'])
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        try:
+            message, created = store.enqueue_message(run_id, body.content, body.client_id, selected_model)
         except ValueError as exc:
             raise HTTPException(409, str(exc))
         await checkpoints.flush()
         # Resume even for a duplicate whose first acknowledgement was lost.
         if store.has_queued_messages(run_id):
             manager.submit(store.run(run_id))
-        return {"id": message["id"], "status": message["status"], "created": created}
+        return {"id": message["id"], "status": message["status"], "model": message['model'], "created": created}
 
     @app.post("/api/runs/{run_id}/cancel")
     async def cancel(run_id: str, request: Request):
@@ -317,7 +331,7 @@ def create_app(settings: Settings | None = None):
                 if not row["chat_enabled"] and row["status"] in TERMINAL and run_id not in manager.jobs and len(batch) < 200:
                     yield "event: settled\ndata: {}\n\n"
                     break
-                yield f"event: run-status\ndata: {json.dumps({'status': row['status'], 'active': run_id in manager.jobs, 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
+                yield f"event: run-status\ndata: {json.dumps({'status': row['status'], 'active': run_id in manager.jobs, 'model': row['model'], 'active_model': row['active_model'], 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
                 await asyncio.sleep(0.5)
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -496,8 +510,8 @@ def create_app(settings: Settings | None = None):
 
     @app.get("/broker/{run_id}/v1/models")
     async def models(run_id: str, request: Request):
-        require_run(run_id, request)
-        return {"object": "list", "data": [{"id": settings.agent_model, "object": "model", "owned_by": "workspace"}]}
+        run = require_run(run_id, request)
+        return {"object": "list", "data": [{"id": run['active_model'] or run['model'] or settings.agent_model, "object": "model", "owned_by": "workspace"}]}
 
     @app.post("/hooks/slack/events")
     async def slack_events(request: Request):
@@ -505,7 +519,11 @@ def create_app(settings: Settings | None = None):
 
     @app.post("/broker/{run_id}/v1/chat/completions")
     async def model_proxy(run_id: str, request: Request):
-        require_run(run_id, request)
+        run = require_run(run_id, request)
+        try:
+            selected_model = settings.resolve_model(fallback=run['active_model'] or run['model'])
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
         raw = await request.body()
         if len(raw) > 5 * 1024 * 1024:
             raise HTTPException(413, "Model request too large")
@@ -521,7 +539,7 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(429, "This run reached its model request limit.")
         allowed = {"messages", "tools", "tool_choice", "parallel_tool_calls", "temperature", "top_p", "stop", "stream", "stream_options", "response_format", "reasoning_effort", "max_tokens", "max_completion_tokens", "seed"}
         payload = {key: value for key, value in body.items() if key in allowed}
-        payload["model"] = settings.agent_model
+        payload["model"] = selected_model
         for field in ("max_tokens", "max_completion_tokens"):
             if field in payload:
                 if not isinstance(payload[field], int) or payload[field] < 1:

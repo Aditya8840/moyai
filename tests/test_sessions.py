@@ -54,24 +54,26 @@ async def test_queued_followup_runs_once_with_saved_workspace_and_fresh_capabili
         return machine
     monkeypatch.setattr('app.runner.modal.Sandbox.create', aio(create))
     monkeypatch.setattr('app.runner.modal.Image.from_id', lambda image_id, **kwargs: image_id)
-    run = runner.store.create_run('Create a file', '', 'modal', [], chat_enabled=True)
+    run = runner.store.create_run('Create a file', '', 'modal', [], chat_enabled=True, model='openai/gpt-6-astra')
     runner.submit(run)
     runner.submit(run)
     await started.wait()
     token1 = runner.store.run(run['id'])['token_hash']
-    message, created = runner.store.enqueue_message(run['id'], 'Read the same file', 'request-0002')
+    message, created = runner.store.enqueue_message(run['id'], 'Read the same file', 'request-0002', 'anthropic/claude-opus-5-5')
     runner.submit(runner.store.run(run['id']))
     release.set()
     await wait_jobs(runner)
     assert created and len(machines) == 2
     assert images == ['fake image', 'im-session-1']
     assert machines[1].spec['prompt'] == 'Read the same file'
+    assert [m.spec['model'] for m in machines] == ['openai/gpt-6-astra', 'anthropic/claude-opus-5-5']
     assert all(m.terminated for m in machines)
     row = runner.store.run(run['id'])
     assert row['status'] == 'idle' and row['snapshot_id'] == 'im-session-2'
     assert row['token_hash'] == '' and token1
     transcript = runner.store.messages(run['id'])
     assert len(transcript) == 4
+    assert [m['model'] for m in transcript] == ['openai/gpt-6-astra', 'anthropic/claude-opus-5-5'] * 2
     assert all(m['status'] == 'completed' for m in transcript)
     runner.store.enqueue_message(run['id'], 'Read the same file', 'request-0002')
     assert not runner.store.has_queued_messages(run['id'])

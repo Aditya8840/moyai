@@ -222,7 +222,7 @@ class RunManager:
             return
         spec = {"run_id": run_id, "prompt": run["prompt"], "repo_url": run["repo_url"],
                 "broker_url": f"{self.settings.public_url.rstrip('/')}/broker/{run_id}",
-                "model": self.settings.agent_model, "max_iterations": self.settings.max_agent_iterations,
+                "model": self.settings.resolve_model(fallback=run.get('active_model') or run.get('model') or ''), "max_iterations": self.settings.max_agent_iterations,
                 "timeout": self.settings.run_timeout_seconds - 90,
                 "chat_enabled": bool(run.get("chat_enabled")),
                 "slack_source": self.store.slack_source(run_id),

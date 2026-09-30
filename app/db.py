@@ -11,8 +11,9 @@ def now() -> str:
 
 
 class Store:
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, default_model: str = ''):
         self.generation = 0
+        self.default_model = default_model
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = directory / "workspace.db"
         with self.connect() as conn:
@@ -109,6 +110,15 @@ class Store:
             for name in ("chat_enabled", "turn_model_calls"):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
+            for name in ('model', 'active_model'):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            if 'model' not in {row['name'] for row in conn.execute('PRAGMA table_info(messages)')}:
+                conn.execute("ALTER TABLE messages ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+            if default_model:
+                conn.execute("UPDATE runs SET model=? WHERE model=''", (default_model,))
+                conn.execute("UPDATE runs SET active_model=model WHERE active_model='' AND status NOT IN ('idle','completed','failed','cancelled','interrupted')")
+                conn.execute("UPDATE messages SET model=(SELECT model FROM runs WHERE runs.id=messages.run_id) WHERE model='' AND status IN ('queued','running')")
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(slack_events)")}
             for name, default in (("mention_ts", ""), ("context_status", "legacy"), ("context_json", "{}")):
                 if name not in columns:
@@ -144,15 +154,16 @@ class Store:
         row["plugins"] = json.loads(row["plugins"])
         return row
 
-    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False):
+    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model=''):
         run_id = uuid4().hex
         stamp = now()
+        model = model or self.default_model
         self.execute(
-            "INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled) VALUES(?,?,?,?,?,?,?,?,?)",
-            (run_id, prompt, repo_url, mode, "queued", json.dumps(plugins), stamp, stamp, chat_enabled),
+            "INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,active_model) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (run_id, prompt, repo_url, mode, "queued", json.dumps(plugins), stamp, stamp, chat_enabled, model, model),
         )
         if chat_enabled:
-            self.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at) VALUES(?,'user',?,'queued','initial',?)", (run_id, prompt, stamp))
+            self.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model) VALUES(?,'user',?,'queued','initial',?,?)", (run_id, prompt, stamp, model))
         self.event(run_id, "status", "Task queued")
         return self.run(run_id)
 
@@ -167,9 +178,9 @@ class Store:
             pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0]
             if pending >= 20:
                 raise ValueError("The session queue is full.")
-            conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled) VALUES(?,?,'','modal','queued',?,?,?,1)",
-                         (run_id, prompt, json.dumps(plugins), stamp, stamp))
-            conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at) VALUES(?,'user',?,'queued','initial',?)", (run_id, prompt, stamp))
+            conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model) VALUES(?,?,'','modal','queued',?,?,?,1,?)",
+                         (run_id, prompt, json.dumps(plugins), stamp, stamp, self.default_model))
+            conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model) VALUES(?,'user',?,'queued','initial',?,?)", (run_id, prompt, stamp, self.default_model))
             conn.execute("INSERT INTO slack_events(event_id,run_id,channel,thread_ts,user_id,created_at,mention_ts,context_status) VALUES(?,?,?,?,?,?,?,'pending')",
                          (event_id, run_id, channel, thread_ts, user_id, stamp, mention_ts or thread_ts))
             conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'status','Session requested from Slack','{}',?)", (run_id, stamp))
@@ -184,25 +195,25 @@ class Store:
         return {**context, **row}
 
     def messages(self, run_id):
-        return self.rows("SELECT id,role,content,status,created_at FROM messages WHERE run_id=? ORDER BY id", (run_id,))
+        return self.rows("SELECT id,role,content,status,created_at,model FROM messages WHERE run_id=? ORDER BY id", (run_id,))
 
-    def enqueue_message(self, run_id, content, client_id):
+    def enqueue_message(self, run_id, content, client_id, model=None):
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            result, created = self.enqueue_message_in(conn, run_id, content, client_id)
+            result, created = self.enqueue_message_in(conn, run_id, content, client_id, model)
         if created:
             self.event(run_id, "chat", "Message queued", {"message_id": result["id"]})
         return result, created
 
-    def enqueue_message_in(self, conn, run_id, content, client_id):
+    def enqueue_message_in(self, conn, run_id, content, client_id, model=None):
         """Caller owns a write transaction, including any transport receipt."""
         row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         if not row or not row["chat_enabled"]:
             raise ValueError("This older task has no saved chat workspace. Start a new session.")
         existing = conn.execute("SELECT * FROM messages WHERE run_id=? AND client_id=?", (run_id, client_id)).fetchone()
         if existing:
-            if existing["content"] != content:
-                raise ValueError("That message ID was already used for different text.")
+            if existing["content"] != content or (model is not None and existing['model'] != model):
+                raise ValueError("That message ID was already used for different text or model.")
             return dict(existing), False
         if row["status"] == "stopping":
             raise ValueError("Wait for the current response to stop before sending another message.")
@@ -213,11 +224,13 @@ class Store:
         if conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0] >= 20 and row["status"] in {"idle", "completed", "failed", "cancelled", "interrupted"}:
             raise ValueError("The session queue is full. Wait for a response to finish.")
         stamp = now()
-        message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at) VALUES(?,'user',?,'queued',?,?)", (run_id, content, client_id, stamp)).lastrowid
+        model = model if model is not None else row['model'] or self.default_model
+        message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model) VALUES(?,'user',?,'queued',?,?,?)", (run_id, content, client_id, stamp, model)).lastrowid
+        conn.execute('UPDATE runs SET model=?,updated_at=? WHERE id=?', (model, stamp, run_id))
         running = conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='running'", (run_id,)).fetchone()
         if not running:
             conn.execute("UPDATE runs SET status='queued',error='',updated_at=? WHERE id=?", (stamp, run_id))
-        return {"id": message_id, "status": "queued"}, True
+        return {"id": message_id, "status": "queued", "model": model}, True
 
     def claim_message(self, run_id):
         with self.connect() as conn:
@@ -231,15 +244,15 @@ class Store:
             if not row:
                 return None
             conn.execute("UPDATE messages SET status='running' WHERE id=?", (row["id"],))
-            conn.execute("UPDATE runs SET status='queued',turn_model_calls=0,error='',summary='' WHERE id=?", (run_id,))
-        self.event(run_id, "chat", "Response started", {"message_id": row["id"]})
+            conn.execute("UPDATE runs SET status='queued',turn_model_calls=0,error='',summary='',active_model=? WHERE id=?", (row['model'], run_id))
+        self.event(run_id, "chat", "Response started", {"message_id": row["id"], "model": row['model']})
         return dict(row)
 
     def finish_message(self, run_id, message_id, content, status="completed"):
         with self.connect() as conn:
             changed = conn.execute("UPDATE messages SET status=? WHERE id=? AND run_id=? AND status='running'", (status, message_id, run_id)).rowcount
             if changed:
-                conn.execute("INSERT INTO messages(run_id,role,content,status,created_at) VALUES(?,'assistant',?,'completed',?)", (run_id, content, now()))
+                conn.execute("INSERT INTO messages(run_id,role,content,status,created_at,model) SELECT ?,'assistant',?,'completed',?,model FROM messages WHERE id=?", (run_id, content, now(), message_id))
         self.event(run_id, "chat", "Response saved", {"message_id": message_id})
 
     def has_queued_messages(self, run_id):

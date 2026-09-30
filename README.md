@@ -147,6 +147,21 @@ Set `LINEAR_CLIENT_ID` / `LINEAR_CLIENT_SECRET`, `SLACK_CLIENT_ID` / `SLACK_CLIE
 
 This application registers its own app integrations. It does not reuse or copy credentials from the Codex/ChatGPT connectors in this chat.
 
+## Choose the model
+
+Use the model picker in the new-session composer or below an existing conversation to choose **GPT-6 Astra** (`openai/gpt-6-astra`) or **Claude Opus 5.5** (`anthropic/claude-opus-5-5`). The choice applies when you send the next message and becomes that session's preference. Your conversation and saved workspace stay together across a model switch. Each new assistant answer records its model; old answers without a stored model are left unlabeled.
+
+Every queued message captures its model at submission. Changing the picker or Slack preference does not reroute a response already running or queued. The gateway broker pins each turn to its selected, allowed model and ignores any model override supplied by sandbox code. `AGENT_MODEL` sets the default; `AGENT_MODELS` configures the picker allowlist. Gateway credentials must have access to each enabled model.
+
+In Slack, mention the bot with `model opus` or `model astra` to set the model for that thread's next messages. You can start with a model directive on the first line and the task on the next line, for example:
+
+```text
+@Moyai Devin model opus
+Read this thread and suggest the next step.
+```
+
+A model-only command starts or updates the saved session without launching a sandbox. Its confirmation does not change running or already queued turns. Until ordinary Slack thread events are installed, include the bot mention on commands and follow-ups.
+
 ## Chat with Moyai in Slack
 
 **Live thread-chat verification (September 29):** [#bot-spam test thread](https://berriaillm.slack.com/archives/C0B302ZJU05/p1790740160956979) used one session, `35f33e443f214d159978842947ed69d8`, for two real Hermes responses posted automatically to Slack. The first read the parent marker `cobalt-otter-58` and saved a local file containing `7`; the next recalled the marker, restored the file, and changed it to `12`. Both requests used mentions. Ordinary follow-up replies await the bot message-event subscriptions and the additional bot history grant; those settings are staged for approval. No external connected-app writes were performed.

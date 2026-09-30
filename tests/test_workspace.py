@@ -38,7 +38,7 @@ def wait_for(predicate, timeout=3):
 def cloud_capability(app, plugins):
     for provider in plugins:
         app.state.connectors.save(provider, {"access_token": "provider-test-token", "kind": "personal"}, "Test team")
-    run = app.state.store.create_run("A controlled test task", "", "modal", plugins)
+    run = app.state.store.create_run("A controlled test task", "", "modal", plugins, model=app.state.settings.agent_model)
     token = "run-capability-only"
     app.state.store.update_run(run["id"], status="running", token_hash=digest(token))
     return run["id"], {"Authorization": f"Bearer {token}"}

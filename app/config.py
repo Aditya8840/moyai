@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     litellm_api_base: str = ""
     litellm_api_key: str = ""
     agent_model: str = ""
+    agent_models: str = "openai/gpt-6-astra,anthropic/claude-opus-5-5"
     modal_token_id: str = ""
     modal_token_secret: str = ""
     modal_app_name: str = "hermes-workspace"
@@ -54,6 +55,26 @@ class Settings(BaseSettings):
 
     def google_enabled(self) -> bool:
         return bool(self.google_client_id and self.google_client_secret)
+
+    def allowed_models(self) -> list[str]:
+        return list(dict.fromkeys(x.strip() for x in [self.agent_model, *self.agent_models.split(',')] if x.strip()))
+
+    def resolve_model(self, value: str | None = None, fallback: str = '') -> str:
+        aliases = {
+            'astra': 'openai/gpt-6-astra', '6-astra': 'openai/gpt-6-astra',
+            'openai/6-astra': 'openai/gpt-6-astra', 'gpt-6-astra': 'openai/gpt-6-astra',
+            'opus': 'anthropic/claude-opus-5-5', 'opus-5-5': 'anthropic/claude-opus-5-5',
+            'claude/opus-5-5': 'anthropic/claude-opus-5-5', 'claude-opus-5-5': 'anthropic/claude-opus-5-5',
+        }
+        selected = value if value is not None else fallback or self.agent_model or (self.allowed_models() or [''])[0]
+        selected = aliases.get(selected.strip().lower(), selected.strip())
+        if selected not in self.allowed_models():
+            raise ValueError('Choose a model enabled for this workspace.')
+        return selected
+
+    def model_choices(self) -> list[dict[str, str]]:
+        names = {'openai/gpt-6-astra': 'GPT-6 Astra', 'anthropic/claude-opus-5-5': 'Claude Opus 5.5'}
+        return [{'id': model, 'name': names.get(model, model)} for model in self.allowed_models()]
 
     def google_domains(self) -> set[str]:
         return {value.strip().lower() for value in self.google_allowed_domains.split(",") if value.strip()}

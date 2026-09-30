@@ -1,6 +1,6 @@
 const $ = (s) => document.querySelector(s);
 const esc = (s = '') => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state = {view:'tasks', runs:[], config:{missing:[]}, connections:[], organization:{}, role:'member', selected:null, source:null, csrf:'', drafts:{}, pendingMessages:{}, pageVersion:0, newDraft:{}, detailsOpen:false, sending:new Set()};
+const state = {view:'tasks', runs:[], config:{missing:[]}, connections:[], organization:{}, role:'member', selected:null, source:null, csrf:'', drafts:{}, modelDrafts:{}, pendingMessages:{}, pageVersion:0, newDraft:{}, detailsOpen:false, sending:new Set()};
 const terminal = new Set(['completed','failed','cancelled','interrupted','idle']);
 const providerNames = {linear:'Linear', slack:'Slack', notion:'Notion'};
 async function api(path, options = {}) {
@@ -14,7 +14,9 @@ function statusLabel(status) { return `<span class="status ${esc(status)}">${esc
 function relative(date) { const min = Math.max(0, Math.floor((Date.now() - new Date(date)) / 60000)); return min < 1 ? 'Just now' : min < 60 ? `${min}m ago` : min < 1440 ? `${Math.floor(min/60)}h ago` : new Date(date).toLocaleDateString(); }
 function stopStream(){ state.source?.close(); state.source = null; }
 function sessionTitle(run){return run.prompt.split('\n')[0].replace(/\s+/g,' ').trim();}
-function modelName(){return (state.config.model||'Hermes Agent').split('/').at(-1).replace(/^gpt-/,'GPT-').replace(/-astra$/,' Astra');}
+function modelName(model=state.config.model){return (state.config.models||[]).find(m=>m.id===model)?.name||model||'Hermes Agent';}
+function modelPicker(id,selected,disabled=false){return `<label class="model-picker"><span class="sr-only">Model for next message</span><select id="${id}" aria-label="Model for next message" ${disabled?'disabled':''}>${(state.config.models||[]).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}</select></label>`;}
+
 function setSidebar(open){document.body.classList.toggle('sidebar-open',open);$('#sidebar-scrim').hidden=!open;$('#open-sidebar').setAttribute('aria-expanded',String(open));$('#sidebar').inert=matchMedia('(max-width:850px)').matches&&!open;if(open)$('#session-search').focus();}
 function renderSidebar(){
   const search=($('#session-search').value||'').toLowerCase();
@@ -57,21 +59,21 @@ async function renderHome(){
   if(version!==state.pageVersion)return;state.connections=connections;
   const apps=connections.filter(c=>c.connected&&c.enabled),draft=state.newDraft;
   $('#content').innerHTML=`<section class="new-conversation"><div class="welcome-mark"><img src="/static/favicon.svg" alt=""><span>Moyai Devin</span></div><h1>What are we working on?</h1><p class="welcome-note">A teammate for your code, questions, and next steps.</p>
-    <form id="task-form" class="composer"><textarea id="prompt" name="prompt" aria-label="Message Moyai Devin" placeholder="Ask Moyai to build, investigate, or pick up a thread…" required minlength="3" maxlength="16000" rows="3"></textarea><div class="composer-toolbar"><details class="task-options"><summary aria-label="Session options"><span aria-hidden="true">＋</span> Context & tools</summary><div class="task-settings"><div class="field"><label for="repo">Public GitHub repository</label><input id="repo" type="url" placeholder="https://github.com/owner/repo" value="${esc(draft.repo||'')}"></div><div class="field"><label for="mode">Execution</label><select id="mode"><option value="modal" ${state.config.cloud_ready?'':'disabled'}>Cloud session</option><option value="demo" ${state.config.cloud_ready?'':'selected'}>Demo · simulated</option></select></div><div id="plugin-options"><span>Organization connections</span>${apps.map(c=>`<label class="plugin-toggle"><input type="checkbox" name="plugin" value="${c.id}" ${!draft.plugins||draft.plugins.includes(c.id)?'checked':''}>${providerNames[c.id]}</label>`).join('')||'<small>Connect apps in organization settings.</small>'}</div></div></details><span class="composer-model">${esc(modelName())}</span><button class="send-button" type="submit" aria-label="Start session" title="Start session"><span aria-hidden="true">↑</span></button></div></form>
+    <form id="task-form" class="composer"><textarea id="prompt" name="prompt" aria-label="Message Moyai Devin" placeholder="Ask Moyai to build, investigate, or pick up a thread…" required minlength="3" maxlength="16000" rows="3"></textarea><div class="composer-toolbar"><details class="task-options"><summary aria-label="Session options"><span aria-hidden="true">＋</span> Context & tools</summary><div class="task-settings"><div class="field"><label for="repo">Public GitHub repository</label><input id="repo" type="url" placeholder="https://github.com/owner/repo" value="${esc(draft.repo||'')}"></div><div class="field"><label for="mode">Execution</label><select id="mode"><option value="modal" ${state.config.cloud_ready?'':'disabled'}>Cloud session</option><option value="demo" ${state.config.cloud_ready?'':'selected'}>Demo · simulated</option></select></div><div id="plugin-options"><span>Organization connections</span>${apps.map(c=>`<label class="plugin-toggle"><input type="checkbox" name="plugin" value="${c.id}" ${!draft.plugins||draft.plugins.includes(c.id)?'checked':''}>${providerNames[c.id]}</label>`).join('')||'<small>Connect apps in organization settings.</small>'}</div></div></details>${modelPicker('new-model',draft.model||state.config.model)}<button class="send-button" type="submit" aria-label="Start session" title="Start session"><span aria-hidden="true">↑</span></button></div></form>
     <div class="composer-caption"><span id="mode-note">${state.config.cloud_ready?'Your own cloud workspace':'Demo mode · no AI or cloud usage'}</span><span>Enter to send · Shift + Enter for a new line</span></div>
     <div class="suggestions"><button type="button" data-prompt="Help me investigate a bug. "><span aria-hidden="true">⌘</span> Investigate a bug</button><button type="button" data-prompt="Read the repository and explain how it works. Make no changes. "><span aria-hidden="true">⌑</span> Explore a codebase</button><button type="button" data-prompt="Find the team context for "><span aria-hidden="true">⌕</span> Find team context</button></div><p class="connected-note">${apps.length?`<span class="connected-dot"></span>${apps.map(c=>providerNames[c.id]).join(', ')} connected`:'Add your team’s apps in Connections'}</p></section>`;
   $('#prompt').value=draft.prompt||'';
   if(draft.mode&&($('#mode option[value="'+draft.mode+'"]').disabled===false))$('#mode').value=draft.mode;
-  const saveDraft=()=>{state.newDraft={prompt:$('#prompt').value,repo:$('#repo').value,mode:$('#mode').value,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value)};};
+  const saveDraft=()=>{state.newDraft={prompt:$('#prompt').value,repo:$('#repo').value,mode:$('#mode').value,model:$('#new-model').value,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value)};};
   $('#task-form').oninput=saveDraft;$('#task-form').onchange=saveDraft;$('#task-form').onsubmit=submitTask;
-  $('#mode').addEventListener('change',()=>{$('#mode-note').textContent=$('#mode').value==='demo'?'Demo mode · no AI or cloud usage':'Your own cloud workspace';});
+  $('#mode').addEventListener('change',()=>{$('#new-model').disabled=$('#mode').value==='demo';$('#mode-note').textContent=$('#mode').value==='demo'?'Demo mode · no AI or cloud usage':'Your own cloud workspace';});
   $('#mode').dispatchEvent(new Event('change'));
   bindComposer($('#prompt'),$('#task-form'));
   document.querySelectorAll('[data-prompt]').forEach(b=>b.onclick=()=>{$('#prompt').value=b.dataset.prompt;saveDraft();autoSize($('#prompt'));$('#prompt').focus();});
 }
 async function submitTask(e){
   e.preventDefault();const button=$('#task-form button[type="submit"]'); button.disabled=true;
-  try{ const run=await api('/api/runs',{method:'POST',body:JSON.stringify({prompt:$('#prompt').value,repo_url:$('#repo').value,mode:$('#mode').value,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value)})});state.newDraft={};await refreshRuns();await openRun(run.id); }
+  try{ const run=await api('/api/runs',{method:'POST',body:JSON.stringify({prompt:$('#prompt').value,repo_url:$('#repo').value,mode:$('#mode').value,model:$('#new-model').value,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value)})});state.newDraft={};await refreshRuns();await openRun(run.id); }
   catch(error){toast(error.message);button.disabled=false;}
 }
 async function openRun(id){
@@ -101,10 +103,11 @@ function toggleDetails(open){
 function renderChat(run){
   const id=run.id;
   $('#header-actions').innerHTML=`<span id="run-status"></span><button id="toggle-details" class="quiet details-toggle" aria-expanded="false" aria-controls="session-details"><span aria-hidden="true">☷</span> Activity</button>`;
-  $('#content').innerHTML=`<div class="chat-layout"><section class="chat-panel"><div class="conversation" id="conversation" role="log" aria-label="Conversation" aria-live="polite"></div><button id="jump-latest" class="jump-latest" hidden>↓ Latest message</button><div class="chat-bottom"><div id="approvals"></div><div class="chat-working" id="chat-working" role="status"></div><form id="message-form" class="composer reply-composer"><label class="sr-only" for="followup">Message Moyai Devin</label><textarea id="followup" maxlength="16000" required rows="1" placeholder="Ask a follow-up or give the next step…"></textarea><div class="composer-toolbar"><span class="composer-model">${esc(run.mode==='demo'?'Demo session':modelName())}</span><span id="connection-state" class="connection-notice" hidden>Reconnecting…</span><button id="stop-response" class="stop-button" type="button" aria-label="Stop response" title="Stop response"><span aria-hidden="true">■</span></button><button type="submit" class="send-button" aria-label="Send message" title="Send message"><span aria-hidden="true">↑</span></button></div></form><div class="composer-caption"><span id="queue-note">Your conversation and files stay here.</span><span>Shift + Enter for a new line</span></div></div></section>
+  $('#content').innerHTML=`<div class="chat-layout"><section class="chat-panel"><div class="conversation" id="conversation" role="log" aria-label="Conversation" aria-live="polite"></div><button id="jump-latest" class="jump-latest" hidden>↓ Latest message</button><div class="chat-bottom"><div id="approvals"></div><div class="chat-working" id="chat-working" role="status"></div><form id="message-form" class="composer reply-composer"><label class="sr-only" for="followup">Message Moyai Devin</label><textarea id="followup" maxlength="16000" required rows="1" placeholder="Ask a follow-up or give the next step…"></textarea><div class="composer-toolbar">${run.mode==='demo'?'<span class="composer-model">Demo session</span>':modelPicker('chat-model',state.modelDrafts[id]||run.model||state.config.model)}<span id="connection-state" class="connection-notice" hidden>Reconnecting…</span><button id="stop-response" class="stop-button" type="button" aria-label="Stop response" title="Stop response"><span aria-hidden="true">■</span></button><button type="submit" class="send-button" aria-label="Send message" title="Send message"><span aria-hidden="true">↑</span></button></div></form><div class="composer-caption"><span id="queue-note">Your conversation and files stay here.</span><span>Shift + Enter for a new line</span></div></div></section>
   <aside class="session-side" id="session-details" aria-label="Session details" hidden><div class="details-heading"><h2>Session activity</h2><button id="close-details" class="icon-button" aria-label="Close session details">×</button></div><div class="session-facts"><div class="detail-row"><span>Connected apps</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None selected'}</span></div><div class="detail-row"><span>Workspace</span><span id="saved-workspace"></span></div><div id="artifact-area"></div></div><div id="slack-context"></div><section class="activity-panel"><h3>Progress</h3><div class="timeline" id="timeline">${run.events.filter(e=>!['chat','result'].includes(e.kind)).map(eventHTML).join('')}</div></section></aside></div>`;
   $('#toggle-details').onclick=()=>toggleDetails(!state.detailsOpen);$('#close-details').onclick=()=>toggleDetails(false);toggleDetails(state.detailsOpen);
   $('#followup').value=state.drafts[id]||'';
+  if($('#chat-model'))$('#chat-model').onchange=()=>{state.modelDrafts[id]=$('#chat-model').value;};
   $('#followup').oninput=()=>{state.drafts[id]=$('#followup').value;};
   bindComposer($('#followup'),$('#message-form'));
   const bottom=()=>{const box=$('#conversation');box.scrollTop=box.scrollHeight;};
@@ -114,8 +117,9 @@ function renderChat(run){
   $('#message-form').onsubmit=async e=>{
     e.preventDefault();const content=$('#followup').value.trim();if(!content||state.sending.has(id))return;
     const button=$('#message-form [type="submit"]');button.disabled=true;state.sending.add(id);
-    let pending=state.pendingMessages[id];if(!pending||pending.content!==content)pending=state.pendingMessages[id]={content,client_id:crypto.randomUUID()};
-    try{await api(`/api/runs/${id}/messages`,{method:'POST',body:JSON.stringify(pending)});delete state.pendingMessages[id];if(state.drafts[id]?.trim()===content)state.drafts[id]='';if(state.selected===id&&$('#followup')?.value.trim()===content){$('#followup').value='';autoSize($('#followup'));}await refreshChat(id);if(state.selected===id)bottom();}
+    const model=$('#chat-model')?.value||run.model||state.config.model;
+    let pending=state.pendingMessages[id];if(!pending||pending.content!==content||pending.model!==model)pending=state.pendingMessages[id]={content,model,client_id:crypto.randomUUID()};
+    try{await api(`/api/runs/${id}/messages`,{method:'POST',body:JSON.stringify(pending)});delete state.pendingMessages[id];if(state.modelDrafts[id]===model)delete state.modelDrafts[id];if(state.drafts[id]?.trim()===content)state.drafts[id]='';if(state.selected===id&&$('#followup')?.value.trim()===content){$('#followup').value='';autoSize($('#followup'));}await refreshChat(id);if(state.selected===id)bottom();}
     catch(error){toast(error.message);}finally{state.sending.delete(id);if(state.selected===id&&$('#message-form'))$('#message-form [type="submit"]').disabled=false;}
   };
   updateChat(run,true);
@@ -126,12 +130,14 @@ function renderChat(run){
   source.onerror=()=>{if(state.selected===id&&$('#connection-state'))$('#connection-state').hidden=false;};
 }
 function updateChatStatus(run){
+  if(run.model&&$('#chat-model')&&!state.modelDrafts[state.selected])$('#chat-model').value=run.model;
   $('#run-status').innerHTML=statusLabel(run.status);
   const busy=!terminal.has(run.status)||run.active;
   $('#stop-response').hidden=!busy;$('#stop-response').disabled=run.status==='stopping';
   $('#queue-note').textContent=run.slack_mirroring==='active'?'Replies are shared with the connected Slack thread.':run.slack_mirroring==='paused'?'Slack replies are paused for this session.':busy?'Follow-ups queue after this response.':'Your conversation and files stay here.';
   $('#chat-working').classList.toggle('busy',busy);
   $('#chat-working').textContent=({idle:'',queued:'Waiting to start…',provisioning:'Opening your workspace…',running:'Moyai is working…',saving:'Saving your work…',awaiting_approval:'Waiting for administrator approval',stopping:'Stopping…',failed:'Response failed. Send a follow-up to continue.',cancelled:'Response stopped. You can continue from here.',interrupted:'Response interrupted. Send a message to continue.'})[run.status]||'';
+  if(busy&&run.active_model)$('#chat-working').textContent+=' · '+modelName(run.active_model);
   const item=state.runs.find(r=>r.id===state.selected);if(item&&item.status!==run.status){item.status=run.status;renderSidebar();}
 }
 function updateChat(run,initial=false){
@@ -139,7 +145,7 @@ function updateChat(run,initial=false){
   const signature=JSON.stringify(run.messages);
   if(box.dataset.messages!==signature){
     box.dataset.messages=signature;
-    box.innerHTML=`<div class="conversation-inner">${run.messages.map(m=>`<article class="chat-message ${m.role==='user'?'user':'assistant'}"><div class="message-label">${m.role==='user'?'You':'<img src="/static/favicon.svg" alt="">Moyai Devin'}<small>${m.role==='user'&&m.status!=='completed'?esc(m.status):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.content):renderMarkdown(m.content)}</div>${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">⧉</button>`:''}</article>`).join('')}</div>`;
+    box.innerHTML=`<div class="conversation-inner">${run.messages.map(m=>`<article class="chat-message ${m.role==='user'?'user':'assistant'}"><div class="message-label">${m.role==='user'?'You':'<img src="/static/favicon.svg" alt="">Moyai Devin'}<small>${m.role==='user'?(m.status!=='completed'?esc(m.status):''):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.content):renderMarkdown(m.content)}</div>${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">⧉</button>`:''}</article>`).join('')}</div>`;
     box.querySelectorAll('.copy-message').forEach(b=>b.onclick=()=>copyText(run.messages.find(m=>String(m.id)===b.dataset.message).content,b));
     box.querySelectorAll('.copy-code').forEach(b=>b.onclick=()=>copyText(b.closest('.code-block').querySelector('code').textContent,b));
     if(atBottom)box.scrollTop=box.scrollHeight;

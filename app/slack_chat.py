@@ -72,8 +72,18 @@ class SlackChat:
 
     def accept(self, *, team, event_id, channel, ts, root, user, prompt, mentioned, missing_cloud):
         """Reserve the physical Slack message and queue its turn atomically."""
+        original_prompt, selected_model, model_error = prompt, None, ''
         command = prompt.strip().lower().lstrip('/')
         command = command if command in COMMANDS else ''
+        directive = re.fullmatch(r'/?model(?:[ \t]+([^\n]+))?(?:\n([\s\S]*))?', prompt.strip(), re.I)
+        if directive:
+            try:
+                selected_model = self.settings.resolve_model(directive[1] or '')
+            except ValueError:
+                model_error = 'Choose `model astra` or `model opus`, or use the model picker in the web session.'
+            prompt = (directive[2] or '').strip()
+            if not prompt or model_error:
+                command = 'model'
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             if conn.execute('SELECT 1 FROM slack_receipts WHERE event_id=? OR (team_id=? AND channel=? AND message_ts=?)',
@@ -92,7 +102,7 @@ class SlackChat:
                 # messages are never backfilled into Slack on deployment.
                 old = conn.execute('SELECT r.id FROM slack_events s JOIN runs r ON r.id=s.run_id WHERE s.channel=? AND s.thread_ts=? AND r.chat_enabled=1 ORDER BY s.created_at DESC LIMIT 1',
                                    (channel, root)).fetchone()
-                if command and not old:
+                if command and command != 'model' and not old:
                     return None
                 if missing_cloud and not command:
                     raise ValueError('Cloud sessions are not configured.')
@@ -107,8 +117,8 @@ class SlackChat:
                         raise ValueError('The session queue is full.')
                     run_id, stamp = uuid4().hex, now()
                     plugins = [x['id'] for x in self.owner.connectors.list() if x['connected'] and x['enabled']]
-                    conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled) VALUES(?,?,'','modal','queued',?,?,?,1)",
-                                 (run_id, prompt, json.dumps(plugins), stamp, stamp))
+                    conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model) VALUES(?,?,'','modal',?,?,?,?,1,?)",
+                                 (run_id, prompt or original_prompt, 'idle' if command else 'queued', json.dumps(plugins), stamp, stamp, selected_model or self.settings.resolve_model()))
                     conn.execute("INSERT INTO slack_events(event_id,run_id,channel,thread_ts,user_id,created_at,mention_ts,context_status) VALUES(?,?,?,?,?,?,?,'pending')",
                                  (event_id, run_id, channel, root, user, stamp, ts))
                     fresh = True
@@ -127,6 +137,9 @@ class SlackChat:
                 conn.execute('UPDATE slack_threads SET last_message_id=(SELECT COALESCE(MAX(id),0) FROM messages WHERE run_id=?) WHERE run_id=?', (run_id, run_id))
             message_id, submit = None, False
             if command:
+                if command == 'model' and not model_error:
+                    conn.execute('UPDATE runs SET model=?,updated_at=? WHERE id=?', (selected_model, now(), run_id))
+                    conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'chat','Model changed for new messages',?,?)", (run_id, json.dumps({'model':selected_model}), now()))
                 if command == 'sleep':
                     conn.execute('UPDATE slack_threads SET paused=1 WHERE run_id=?', (run_id,))
                     conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status='pending' AND kind IN ('answer','progress','approval')", (run_id,))
@@ -142,23 +155,30 @@ class SlackChat:
                     conn.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (run_id,))
                     conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status='pending' AND kind='progress'", (run_id,))
                 status = conn.execute('SELECT status FROM runs WHERE id=?', (run_id,)).fetchone()[0]
+                model_name = next((item['name'] for item in self.settings.model_choices() if item['id'] == selected_model), selected_model)
                 response = {'sleep': 'Paused this thread and requested a stop. Say `wake` or mention me to resume.',
                             'stop': 'Stopping the current response and clearing queued follow-ups. You can send another message once it has stopped.',
                             'wake': 'I’m listening again. Send your next message here.',
-                            'status': 'This thread is paused.' if binding['paused'] else self.status_text(status)}[command]
+                            'status': 'This thread is paused.' if binding['paused'] else self.status_text(status),
+                            'model': model_error or f'New messages in this session will use *{model_name}*. Running and already queued replies keep their original model.'}[command]
                 self.queue(conn, run_id, 'command:' + event_id, 'control', response + '\n' + self.link(run_id))
             else:
                 if missing_cloud:
                     raise ValueError('Cloud sessions are not configured.')
                 try:
                     content = prompt if fresh else f'Slack reply from {user}:\n{prompt}'
-                    message, submit = self.store.enqueue_message_in(conn, run_id, content, 'slack:' + digest(team + channel + ts))
+                    if selected_model is None:
+                        current = conn.execute('SELECT model FROM runs WHERE id=?', (run_id,)).fetchone()[0]
+                        self.settings.resolve_model(fallback=current)
+                    message, submit = self.store.enqueue_message_in(conn, run_id, content, 'slack:' + digest(team + channel + ts), selected_model)
                     message_id = message['id']
                     conn.execute('UPDATE slack_threads SET paused=0,last_progress=? WHERE run_id=?', (time.time(), run_id))
                     followup_hint = ('You can keep chatting in this thread.' if self.owner.status()['thread_reply_ready'] else
                                      'Mention me again in this thread to continue until the bot’s thread access is enabled.')
                     response = ('On it — I’ll read the context and reply here. ' + followup_hint if fresh else
                                 'Got it — I’ll continue in this session. Your message is queued if I’m still working.')
+                    if selected_model:
+                        response += '\nModel: ' + next(item['name'] for item in self.settings.model_choices() if item['id'] == selected_model)
                     self.queue(conn, run_id, 'received:' + str(message_id), 'ack' if fresh else 'control', response + '\n' + self.link(run_id))
                     conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'chat','Message received from Slack',?,?)",
                                  (run_id, json.dumps({'message_id': message_id, 'user_id': user}), now()))
