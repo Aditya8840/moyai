@@ -11,6 +11,7 @@ dependencies = [
   "pydantic-settings>=2.8,<3",
   "modal>=1.4,<2",
   "itsdangerous>=2.2,<3",
+  "PyJWT[crypto]>=2.10,<3",
 ]
 
 [dependency-groups]

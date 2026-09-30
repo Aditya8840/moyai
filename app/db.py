@@ -76,6 +76,11 @@ class Store:
                     state_hash TEXT PRIMARY KEY, provider TEXT NOT NULL,
                     session_id TEXT NOT NULL, expires REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS login_states (
+                    state_hash TEXT PRIMARY KEY, browser_hash TEXT NOT NULL,
+                    nonce TEXT NOT NULL, verifier TEXT NOT NULL,
+                    return_path TEXT NOT NULL, expires REAL NOT NULL
+                );
                 PRAGMA optimize;
             """)
             if "model_calls" not in {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}:

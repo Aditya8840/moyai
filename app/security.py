@@ -34,7 +34,14 @@ class Security:
         self.signer = URLSafeTimedSerializer(self.secret, salt="workspace-session-v1")
         self.origin = settings.public_url.rstrip("/")
         self.local = urlparse(self.origin).hostname in {"localhost", "127.0.0.1", "::1"}
-        if not self.local and (not settings.workspace_password or len(settings.workspace_password) < 16):
+        if bool(settings.google_client_id) != bool(settings.google_client_secret):
+            raise ValueError("Set both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.")
+        if settings.google_enabled() and (not settings.google_domains() or not settings.google_admins()
+                or any(email.rpartition("@")[2] not in settings.google_domains() for email in settings.google_admins())):
+            raise ValueError("Configure GOOGLE_ALLOWED_DOMAINS and GOOGLE_ADMIN_EMAILS in those domains.")
+        if not self.local and not settings.google_enabled() and (not settings.password_login_enabled or not settings.workspace_password):
+            raise ValueError("Configure Google sign-in or WORKSPACE_PASSWORD before exposing the workspace.")
+        if settings.workspace_password and len(settings.workspace_password) < 16:
             raise ValueError("Set WORKSPACE_PASSWORD to at least 16 characters before exposing the workspace.")
         if not self.local and not self.origin.startswith("https://"):
             raise ValueError("PUBLIC_URL must use HTTPS for a remote workspace.")
@@ -53,14 +60,31 @@ class Security:
             role = info.get("role", "admin")
             if role not in {"admin", "member"} or not isinstance(info.get("sid"), str):
                 return None
-            if role == "member" and (
+            method = info.get("method", "password")
+            if method == "google":
+                identity = info.get("identity", {})
+                email, domain = identity.get("email", ""), identity.get("domain", "")
+                if (not self.settings.google_enabled() or domain not in self.settings.google_domains()
+                        or email.rpartition("@")[2] != domain or not identity.get("sub")
+                        or info.get("client_id") != self.settings.google_client_id):
+                    return None
+                role = "admin" if email in self.settings.google_admins() else "member"
+            elif method == "local":
+                if not self.local_preview():
+                    return None
+            elif method != "password" or not self.settings.password_login_enabled:
+                return None
+            elif role == "member" and (
                 not self.settings.workspace_member_password or not hmac.compare_digest(
                     info.get("password_tag", ""), digest(self.settings.workspace_member_password))
             ):
                 return None
             return {**info, "role": role}
-        except (BadSignature, SignatureExpired, KeyError, TypeError):
+        except (BadSignature, SignatureExpired, KeyError, TypeError, AttributeError):
             return None
+
+    def local_preview(self) -> bool:
+        return self.local and not self.settings.workspace_password and not self.settings.google_enabled()
 
     def session(self, request: Request) -> str | None:
         info = self.session_info(request)
@@ -89,10 +113,12 @@ class Security:
         if request.headers.get("origin") != self.origin:
             raise HTTPException(403, "This request must come from the workspace.")
 
-    def new_session(self, response, role: str = "admin") -> str:
+    def new_session(self, response, role: str = "admin", *, identity: dict | None = None, local: bool = False) -> str:
         sid = secrets.token_urlsafe(32)
-        info = {"sid": sid, "role": role}
-        if role == "member":
+        info = {"sid": sid, "role": role, "method": "google" if identity else "local" if local else "password"}
+        if identity:
+            info.update(identity=identity, client_id=self.settings.google_client_id)
+        elif role == "member":
             info["password_tag"] = digest(self.settings.workspace_member_password)
         response.set_cookie("workspace_session", self.signer.dumps(info), max_age=43200,
                             httponly=True, secure=not self.local, samesite="lax", path="/")

@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     public_url: str = "http://127.0.0.1:8787"
     workspace_password: str = ""
     workspace_member_password: str = ""
+    password_login_enabled: bool = True
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_allowed_domains: str = "berri.ai"
+    google_admin_emails: str = ""
     organization_name: str = Field(default="Internal team", min_length=1, max_length=80)
     session_secret: str = ""
     encryption_key: str = ""
@@ -45,6 +50,15 @@ class Settings(BaseSettings):
     slack_session_users: str = ""
     notion_client_id: str = ""
     notion_client_secret: str = ""
+
+    def google_enabled(self) -> bool:
+        return bool(self.google_client_id and self.google_client_secret)
+
+    def google_domains(self) -> set[str]:
+        return {value.strip().lower() for value in self.google_allowed_domains.split(",") if value.strip()}
+
+    def google_admins(self) -> set[str]:
+        return {value.strip().lower() for value in self.google_admin_emails.split(",") if value.strip()}
 
     def missing_cloud(self) -> list[str]:
         required = {

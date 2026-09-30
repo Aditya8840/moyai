@@ -46,6 +46,14 @@ Values explicitly present in this project's `.env` take precedence over shell en
 
 Use exactly **one server process**. The MVP owns its job queue and runner in that process. Do not use multiple Uvicorn workers, multiple containers sharing the database, or development auto-reload while real runs are active.
 
+## Google Workspace sign-in
+
+Moyai supports Google OpenID Connect login restricted to configured Google Workspace domains. Create an **Internal** OAuth app in BerriAI’s Google Cloud organization, then a **Web application** client with the exact redirect URI `https://moyai-devin.onrender.com/auth/google/callback`. Configure `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_ALLOWED_DOMAINS=berri.ai`, and `GOOGLE_ADMIN_EMAILS=tin@berri.ai` privately on Render. Additional administrator emails are comma-separated. Other verified BerriAI identities become members and use the existing shared connections without individual provider authorization.
+
+Keep `PASSWORD_LOGIN_ENABLED=true` for initial setup. After a real Google administrator login succeeds, set it to `false` and redeploy; this disables password login and invalidates existing password sessions. Preserve `SESSION_SECRET` and `ENCRYPTION_KEY` and existing data during the change. Domain, OAuth client, and administrator-policy changes are checked on subsequent requests. Google sessions last at most 12 hours; Google account suspension is checked on the next Google authentication, not through directory synchronization.
+
+The server verifies Google’s signature, issuer, audience, expiry, nonce, verified email, and hosted-domain claim. Login state is single-use, expires in ten minutes, is bound to the initiating browser, and uses PKCE. Return destinations are restricted to known local app routes. Google login requests only `openid email profile`; Google API access and refresh tokens are not stored. Passwords, authorization codes, and identity tokens must not appear in logs or screenshots. Existing app permissions and administrator-only external write approvals are unchanged.
+
 ## Chat interface
 
 The browser opens into a conversation workspace with searchable sessions in the sidebar, a centered new-session composer, and a full-height chat with the composer fixed below the conversation. Enter sends; Shift + Enter adds a line. Unsent follow-up drafts remain with their session while switching chats. Activity opens the session's progress, Slack source context, and file download in a collapsible panel. Pending write approvals remain visible beside the composer.

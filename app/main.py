@@ -23,6 +23,7 @@ from .db import Store, now
 from .runner import RunManager, TERMINAL
 from .persistence import Checkpoints, restore_checkpoint
 from .security import Security, digest
+from .google_sso import GoogleSignIn
 from .slack import SlackSessions
 
 STATIC = Path(__file__).parent / "static"
@@ -118,6 +119,9 @@ def create_app(settings: Settings | None = None):
             await checkpoints.flush()
 
     app = FastAPI(title="Moyai Devin", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    google = GoogleSignIn(settings, security, store)
+    app.state.google_signin = google
+    app.include_router(google.routes())
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlparse(settings.public_url).hostname])
     for key, value in {"store": store, "settings": settings, "security": security, "connectors": connectors, "manager": manager, "slack": slack}.items():
         setattr(app.state, key, value)
@@ -131,7 +135,7 @@ def create_app(settings: Settings | None = None):
             if request.headers.get("x-forwarded-host") != expected:
                 return JSONResponse({"detail": "Invalid workspace host"}, status_code=400)
             request.scope["headers"] = [(key, value) for key, value in request.scope["headers"] if key != b"host"] + [(b"host", expected.encode())]
-        if security.local and not settings.workspace_password and request.client and request.client.host not in {"127.0.0.1", "::1"}:
+        if security.local_preview() and request.client and request.client.host not in {"127.0.0.1", "::1"}:
             return JSONResponse({"detail": "Local preview only. Configure WORKSPACE_PASSWORD and PUBLIC_URL for remote access."}, status_code=403)
         try:
             length = int(request.headers.get("content-length", "0"))
@@ -140,7 +144,7 @@ def create_app(settings: Settings | None = None):
         if length > 5 * 1024 * 1024:
             return JSONResponse({"detail": "Request too large"}, status_code=413)
         response = await call_next(request)
-        if request.method in {"POST", "DELETE", "PUT", "PATCH"} or request.url.path.startswith("/oauth/"):
+        if request.method in {"POST", "DELETE", "PUT", "PATCH"} or request.url.path.startswith(("/oauth/", "/auth/")):
             try:
                 await checkpoints.flush()
             except Exception:
@@ -148,7 +152,7 @@ def create_app(settings: Settings | None = None):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
-        if request.url.path.startswith(("/api/", "/oauth/", "/broker/")):
+        if request.url.path.startswith(("/api/", "/oauth/", "/auth/", "/broker/")):
             response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -164,16 +168,22 @@ def create_app(settings: Settings | None = None):
     async def session(request: Request):
         sid = security.session(request)
         response = JSONResponse({})
-        if not sid and security.local and not settings.workspace_password:
-            sid = security.new_session(response)
+        if not sid and security.local_preview():
+            sid = security.new_session(response, local=True)
         role = security.role(request) or ("admin" if sid else None)
-        response.body = json.dumps({"authenticated": bool(sid), "csrf": security.csrf(sid) if sid else "", "local": security.local, "role": role}).encode()
+        info = security.session_info(request) or {}
+        response.body = json.dumps({"authenticated": bool(sid), "csrf": security.csrf(sid) if sid else "", "local": security.local, "role": role,
+                                   "identity": info.get("identity"), "google_enabled": settings.google_enabled(),
+                                   "google_domains": sorted(settings.google_domains()) if settings.google_enabled() else [],
+                                   "password_enabled": settings.password_login_enabled and bool(settings.workspace_password or settings.workspace_member_password)}).encode()
         response.headers["content-length"] = str(len(response.body))
         return response
 
     @app.post("/api/login")
     async def login(body: Login, request: Request):
         security.check_origin(request)
+        if not settings.password_login_enabled:
+            raise HTTPException(403, "Use Google to sign in to this workspace.")
         login_attempts[:] = [stamp for stamp in login_attempts if stamp > time.monotonic() - 60]
         if len(login_attempts) >= 10:
             raise HTTPException(429, "Too many sign-in attempts. Wait a minute.")
@@ -208,13 +218,14 @@ def create_app(settings: Settings | None = None):
         return {"cloud_ready": not missing, "missing": missing, "model": settings.agent_model,
                 "public_url": settings.public_url, "max_concurrent_runs": settings.max_concurrent_runs,
                 "run_timeout_seconds": settings.run_timeout_seconds, "max_agent_iterations": settings.max_agent_iterations,
-                "hermes_revision": settings.hermes_revision, "auth": "Workspace password" if settings.workspace_password else "Local access only"}
+                "hermes_revision": settings.hermes_revision, "auth": "Google Workspace" if settings.google_enabled() else "Workspace password" if settings.workspace_password else "Local access only"}
 
     @app.get("/api/organization")
     async def organization(request: Request):
         security.require(request)
         return {"name": store.rows("SELECT name FROM organization WHERE id=1")[0]["name"],
-                "role": security.role(request), "member_access_configured": bool(settings.workspace_member_password),
+                "role": security.role(request), "member_access_configured": bool(settings.workspace_member_password) or settings.google_enabled(),
+                "google_signin": settings.google_enabled(),
                 "slack_sessions": slack.status(),
                 "activity": store.rows("SELECT provider,action,actor,created_at FROM connection_audit ORDER BY id DESC LIMIT 15")}
 
