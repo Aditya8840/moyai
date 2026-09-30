@@ -22,7 +22,13 @@ function renderSidebar(){
   $('#task-count').textContent=state.runs.length;
   $('#workspace-name').textContent=state.organization.name||'Workspace';
   $('.avatar').textContent=(state.organization.name||'W')[0];
-  $('#session-list').innerHTML=runs.length?runs.map(r=>`<button class="session-link ${state.selected===r.id?'selected':''}" data-run="${r.id}" ${state.selected===r.id?'aria-current="page"':''} title="${esc(sessionTitle(r))}"><span class="session-dot ${esc(r.status)}" aria-label="${esc(r.status==='idle'?'Ready':r.status)}"></span><span class="session-link-body"><span class="session-link-title">${esc(sessionTitle(r))}</span><small>${relative(r.updated_at||r.created_at)}${r.mode==='demo'?' · Demo':''}</small></span></button>`).join(''):`<p class="sidebar-empty">${search?'No matching sessions.':'Your conversations will appear here.'}</p>`;
+  const signature=JSON.stringify([state.selected,search,runs.map(r=>[r.id,r.prompt,r.status,r.mode,r.updated_at,r.created_at])]);
+  if(state.sidebarSignature===signature){
+    document.querySelectorAll('[data-session-time]').forEach(label=>{const r=runs.find(r=>r.id===label.dataset.sessionTime);if(r)label.textContent=relative(r.updated_at||r.created_at)+(r.mode==='demo'?' · Demo':'');});
+    return;
+  }
+  state.sidebarSignature=signature;
+  $('#session-list').innerHTML=runs.length?runs.map(r=>`<button class="session-link ${state.selected===r.id?'selected':''}" data-run="${r.id}" ${state.selected===r.id?'aria-current="page"':''} title="${esc(sessionTitle(r))}"><span class="session-dot ${esc(r.status)}" aria-label="${esc(r.status==='idle'?'Ready':r.status)}"></span><span class="session-link-body"><span class="session-link-title">${esc(sessionTitle(r))}</span><small data-session-time="${r.id}">${relative(r.updated_at||r.created_at)}${r.mode==='demo'?' · Demo':''}</small></span></button>`).join(''):`<p class="sidebar-empty">${search?'No matching sessions.':'Your conversations will appear here.'}</p>`;
 }
 function setView(view,title){
   document.body.classList.toggle('chat-view',view==='chat');
