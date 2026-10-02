@@ -10,6 +10,8 @@ import json
 import time
 
 import modal
+from fastapi import HTTPException
+from .environments import EnvironmentPending
 
 from .runner import RunManager, SANDBOX_FILES, SAVE_WARNING, TERMINAL, safe_error_detail
 from .security import digest
@@ -95,6 +97,12 @@ class DurableRunner(RunManager):
                 self.fail(run_id, state, 'The response was stopped. The last saved workspace is preserved.', 'cancelled')
             try:
                 return await self.step(run_id, state)
+            except EnvironmentPending as pending:
+                if state.get('environment_build') != pending.build_id:
+                    self.store.event(run_id, 'status', str(pending), {'activity_version': 1, 'phase': 'environment'})
+                state.update(phase='waiting_environment', environment_build=pending.build_id)
+                self.save(run_id, state)
+                return {'retry_seconds': 5}
             except LostExecution:
                 if ((state.get('reused_machine') and state['phase'] in {'prepare', 'install'})
                         or (state.get('startup_attempt') and state['phase'] == 'install'
@@ -110,6 +118,11 @@ class DurableRunner(RunManager):
             except ValueError:
                 self.fail(run_id, state, 'This response cannot run with the current workspace configuration. '
                           'An administrator must check the selected model and runtime settings.')
+                return True
+            except HTTPException as exc:
+                # A disabled/deleted selection is a configuration failure, not
+                # a transient provider error for Temporal to retry indefinitely.
+                self.fail(run_id, state, str(exc.detail))
                 return True
 
     def begin_turn(self, run_id, row, warm=None):
@@ -189,7 +202,7 @@ class DurableRunner(RunManager):
         return self.has_capacity()
 
     def has_capacity(self):
-        active = sum(json.loads(r['state']).get('phase', 'idle') not in {'idle', 'waiting_children', 'waiting_credential'}
+        active = sum(json.loads(r['state']).get('phase', 'idle') not in {'idle', 'waiting_children', 'waiting_credential', 'waiting_environment'}
                      for r in self.store.rows('SELECT state FROM durable_sessions'))
         return active < self.settings.max_concurrent_runs
 
@@ -216,13 +229,25 @@ class DurableRunner(RunManager):
         return sandbox
 
     async def provision(self, run_id, state):
+        project = await self.environments.prepare(run_id) if self.environments else {}
+        if self.store.run(run_id)['status'] == 'stopping':
+            return True
+        if state['phase'] == 'waiting_environment':
+            async with self.admission_lock:
+                if not await self.make_capacity(run_id):
+                    return 'capacity'
+                if self.store.run(run_id)['status'] == 'stopping':
+                    return True
+                state['phase'] = 'provision'
+                self.save(run_id, state)
         client = await self.client()
         name = f"moyai-{run_id}-{state['message_id']}-{state['segment']}"
         try:
             sandbox = await modal.Sandbox.from_name.aio(self.settings.modal_app_name, name, client=client)
         except modal.exception.NotFoundError:
             app = await modal.App.lookup.aio(self.settings.modal_app_name, create_if_missing=True, client=client)
-            image = modal.Image.from_id(state['snapshot_id'], client=client) if state['snapshot_id'] else self.image()
+            snapshot_id = state['snapshot_id'] or project.get('snapshot_id')
+            image = modal.Image.from_id(snapshot_id, client=client) if snapshot_id else self.image()
             try:
                 sandbox = await modal.Sandbox.create.aio(
                     app=app, client=client, name=name, image=image,
@@ -322,8 +347,10 @@ class DurableRunner(RunManager):
                 state['phase'] = 'install' if state.get('sandbox_id') else 'provision'
                 self.running_status(run_id, 'running' if state.get('sandbox_id') else 'provisioning')
             self.save(run_id, state)
-        elif phase == 'provision':
-            await self.provision(run_id, state)
+        elif phase in {'provision', 'waiting_environment'}:
+            result = await self.provision(run_id, state)
+            if result == 'capacity':
+                return 'capacity'
         elif phase == 'install':
             sandbox = await self.sandbox(state)
             # Refresh protocol adapters on snapshots from older releases.
