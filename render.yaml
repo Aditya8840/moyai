@@ -24,6 +24,10 @@ services:
         value: https://gateway-dev.litellm-sandbox.ai/v1/traces
       - key: LITELLM_TRACE_API_KEY
         sync: false
+      - key: RAINDROP_WRITE_KEY
+        sync: false
+      - key: RAINDROP_PROJECT_ID
+        sync: false
       - key: RENDER_MIGRATION_STAGE
         value: "false"
       - key: BOOTSTRAP_MODAL_VOLUME
