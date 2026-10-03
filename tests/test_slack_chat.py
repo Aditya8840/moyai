@@ -211,6 +211,22 @@ def test_results_are_only_sent_to_original_thread_and_never_ping_users(slack_app
     assert sent['blocks'][0]['text']['verbatim'] is True
 
 
+def test_answers_render_mentions_only_for_users_already_mentioned_in_the_thread(slack_app):
+    app, client, runs, sent = slack_app
+    client.post('/hooks/slack/events', **signed(event('EvKudos', text='<@U99999999> big kudos to <@U0B1TDTHL4Q> on it')))
+    run_id = runs[0]['id']
+    app.state.store.execute('UPDATE slack_events SET context_json=? WHERE run_id=?',
+                            (json.dumps({'messages': [{'text': 'thanks <@U0C59A1GHPD|bot-name>'}]}), run_id))
+    wait_for(lambda: bool(app.state.store.rows("SELECT 1 FROM slack_activity WHERE refreshed_at>0")))
+    finish(app, run_id, 'Credit to <@U0B1TDTHL4Q> and <@U0C59A1GHPD>. Not <@U00000001>, <@U99999999>, <!channel> or `<@U0B1TDTHL4Q>`')
+    app.state.slack.chat.last_post.clear()
+    asyncio.run(app.state.slack.chat.deliver_one())
+    text = sent[-1]['text']
+    assert 'Credit to <@U0B1TDTHL4Q> and <@U0C59A1GHPD>.' in text
+    assert 'Not &lt;@U00000001&gt;, &lt;@U99999999&gt;, &lt;!channel&gt; or `&lt;@U0B1TDTHL4Q&gt;`' in text
+    assert sent[-1]['blocks'][0]['text']['text'].startswith('Credit to <@U0B1TDTHL4Q>')
+
+
 def test_uncertain_outbox_delivery_survives_restart_without_resending(slack_app, monkeypatch):
     app, client, run_id = start(slack_app)
     wait_for(lambda: bool(app.state.store.rows("SELECT 1 FROM slack_activity WHERE refreshed_at>0")))
