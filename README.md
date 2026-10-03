@@ -65,6 +65,25 @@ is only needed for automated investigations. After deployment, run a short task
 that uses a file or terminal tool, open **Logs → Agent Traces**, and look for
 `moyai-devin`; verify the task, tool result and final answer in the trace tree.
 
+## Agent Traces in Raindrop
+
+The same spans can also go to [Raindrop](https://www.raindrop.ai/docs/platform/issues/), so its
+issue detection runs over Moyai conversations next to LiteLLM Lens. Set `RAINDROP_WRITE_KEY`
+in Render's private environment to turn it on, and optionally `RAINDROP_PROJECT_ID` to route
+into a specific Raindrop project. Spans are sent as OTLP/HTTP protobuf to
+`https://api.raindrop.ai/v1/traces`. Override it with `RAINDROP_TRACE_ENDPOINT` if needed.
+
+LiteLLM and Raindrop each have their own outbox table on the same disk, `trace_outbox` and
+`trace_outbox_raindrop`, with independent retries and receipts. If Raindrop is down, LiteLLM
+delivery keeps going and is never resent, and the other way around. Either destination works
+on its own. Every span carries `traceloop.association.properties.convo_id` (the Moyai session)
+and `traceloop.association.properties.event_id` (the turn's trace ID), which Raindrop uses to
+group spans into conversations. The same redaction rules apply, and the write key is redacted
+from trace text like the other credentials.
+
+After deploying, run a short task, then open Raindrop and look for the `moyai-devin` service
+in Events. Issues show up once Raindrop has enough conversations to cluster.
+
 ## Personal memory across sessions
 
 **Settings → Memory** holds personal preferences, corrections, project context,

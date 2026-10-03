@@ -113,7 +113,7 @@ def test_disabled_and_broken_capture_cannot_break_agent_work(tmp_path):
     tracing.tool(run['id'], {'invalid': 'payload'})
     disabled = AgentTracing(store, Settings(_env_file=None))
     disabled.finish_turn('does-not-exist', 0, '', 'failed')
-    assert disabled.processor is None
+    assert disabled.processor is None and disabled.outboxes == []
 
 
 @pytest.mark.parametrize('endpoint', ['http://example.com/v1/traces', 'https://key@example.com/v1/traces',

@@ -40,7 +40,8 @@ def context(trace_id, span_id):
 class AgentTracing:
     def __init__(self, store, settings, processor=None):
         self.store, self.settings = store, settings
-        self.enabled = bool(settings.litellm_trace_endpoint and settings.litellm_trace_api_key)
+        destinations = settings.trace_destinations()
+        self.enabled = bool(destinations)
         self.resource = Resource({'service.name': 'moyai-devin', 'deployment.environment.name': 'dev'})
         self.processor = processor
         with store.connect() as conn:
@@ -49,8 +50,7 @@ class AgentTracing:
                 trace_id TEXT NOT NULL, span_id TEXT NOT NULL, parent_id TEXT,
                 session_id TEXT NOT NULL, agent_name TEXT NOT NULL,
                 PRIMARY KEY(run_id,message_id))''')
-        if self.enabled and processor is None:
-            self.processor = TraceOutbox(store, settings)
+        self.outboxes = [TraceOutbox(store, *destination) for destination in destinations] if processor is None else []
 
     def identity(self, run, message_id, connection=None):
         if connection is None:
@@ -82,8 +82,8 @@ class AgentTracing:
         return trace_id, span_id, parent, session, name
 
     def content(self, value):
-        return trace_content(value, secrets=(self.settings.litellm_api_key,
-            self.settings.litellm_trace_api_key, self.settings.modal_token_secret))
+        return trace_content(value, secrets=(self.settings.litellm_api_key, self.settings.litellm_trace_api_key,
+            self.settings.raindrop_write_key, self.settings.modal_token_secret))
 
     def emit(self, run, message_id, name, span_id, start, end, attrs, *, root=False, failed=False, connection=None):
         trace_id, agent_id, parent_id, session, agent_name = self.identity(run, message_id, connection)
@@ -91,7 +91,10 @@ class AgentTracing:
         attributes = {'session.id': session, 'agent.name': agent_name, 'gen_ai.agent.name': agent_name,
                       'moyai.run_id': run['id'],
                       'moyai.turn_id': str(message_id or 0),
-                      'moyai.session_url': self.settings.public_url.rstrip('/') + '/#run=' + run['id'], **attrs}
+                      'moyai.session_url': self.settings.public_url.rstrip('/') + '/#run=' + run['id'],
+                      # Raindrop groups spans into conversations and turns by these keys.
+                      'traceloop.association.properties.convo_id': session,
+                      'traceloop.association.properties.event_id': format(trace_id, '032x'), **attrs}
         span = ReadableSpan(
             name=agent_name if root else name, context=context(trace_id, agent_id if root else identifier(span_id, 8)),
             parent=context(trace_id, parent_id) if parent_id else None,
@@ -99,10 +102,10 @@ class AgentTracing:
             start_time=int(start), end_time=max(int(start), int(end)),
             status=Status(StatusCode.ERROR if failed else StatusCode.OK),
         )
-        if isinstance(self.processor, TraceOutbox):
-            self.processor.enqueue(span, connection)
-        else:
+        if self.processor is not None:
             self.processor.on_end(span)
+        for outbox in self.outboxes:
+            outbox.enqueue(span, connection)
 
     @best_effort
     def finish_turn(self, run_id, message_id, output, status, connection=None):
@@ -168,11 +171,10 @@ class AgentTracing:
                   request_id, start, time.time_ns(), attrs, failed=status != 'completed')
 
     def start(self):
-        if isinstance(self.processor, TraceOutbox):
-            self.processor.start()
+        for outbox in self.outboxes:
+            outbox.start()
 
     async def close(self):
-        if isinstance(self.processor, TraceOutbox):
-            await self.processor.close()
-        elif self.processor:
+        await asyncio.gather(*(outbox.close() for outbox in self.outboxes))
+        if self.processor:
             await asyncio.to_thread(self.processor.shutdown)

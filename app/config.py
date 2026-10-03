@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # Separate destination/key; enabling traces never reroutes inference.
     litellm_trace_endpoint: str = ""
     litellm_trace_api_key: str = ""
+    raindrop_trace_endpoint: str = "https://api.raindrop.ai/v1/traces"
+    raindrop_write_key: str = ""
+    raindrop_project_id: str = ""
     agent_model: str = ""
     modal_token_id: str = ""
     modal_token_secret: str = ""
@@ -88,7 +91,7 @@ class Settings(BaseSettings):
     # Explicit allowlist; empty preserves the original single-repository setting.
     github_repositories: str = ""
 
-    @field_validator('litellm_trace_endpoint')
+    @field_validator('litellm_trace_endpoint', 'raindrop_trace_endpoint')
     @classmethod
     def validate_trace_endpoint(cls, value):
         from urllib.parse import urlsplit
@@ -106,6 +109,18 @@ class Settings(BaseSettings):
                 or len({repo.split('/')[0].lower() for repo in repositories}) > 1):
             raise ValueError('Choose at most 20 GitHub owner/repository names from one organization.')
         return ','.join(dict((repo.lower(), repo) for repo in repositories).values())
+
+    def trace_destinations(self) -> list[tuple[str, str, dict[str, str]]]:
+        """(outbox table, endpoint, headers) for each configured trace receiver."""
+        destinations = []
+        if self.litellm_trace_endpoint and self.litellm_trace_api_key:
+            destinations.append(('trace_outbox', self.litellm_trace_endpoint,
+                                 {'Authorization': 'Bearer ' + self.litellm_trace_api_key}))
+        if self.raindrop_trace_endpoint and self.raindrop_write_key:
+            project = {'X-Raindrop-Project-Id': self.raindrop_project_id} if self.raindrop_project_id else {}
+            destinations.append(('trace_outbox_raindrop', self.raindrop_trace_endpoint,
+                                 {'Authorization': 'Bearer ' + self.raindrop_write_key, **project}))
+        return destinations
 
     def allowed_github_repositories(self) -> list[str]:
         return self.github_repositories.split(',') if self.github_repositories else [self.github_repository]
