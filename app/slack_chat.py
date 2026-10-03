@@ -19,9 +19,18 @@ COMMANDS = {'stop', 'sleep', 'wake', 'status'}
 logger = logging.getLogger(__name__)
 
 
-def slack_text(text):
-    """Format replies without letting model text trigger Slack mentions/unfurls."""
+USER_MENTION = re.compile(r'<@([UW][A-Z0-9]{7,30})(?:\|[^>\n]*)?>')
+
+
+def slack_text(text, mentions=frozenset()):
+    """Format replies without letting model text trigger Slack mentions/unfurls.
+
+    Only user IDs in ``mentions`` (already mentioned by people in the thread)
+    may render as mentions; broadcasts and every other ID stay literal text.
+    """
     text = html.escape(text, quote=False)
+    def mention(match):
+        return f'<@{match[1]}>' if match[1] in mentions else match[0]
     def link(match):
         label, url = match.groups()
         if len(url) > 1500:
@@ -31,6 +40,7 @@ def slack_text(text):
     pieces = re.split(r'(```[\s\S]*?```|`[^`\n]+`)', text)
     for i in range(0, len(pieces), 2):
         value = re.sub(r'!?\[([^\]\n]+)\]\((https?://[^\s)<>]+)\)', link, pieces[i])
+        value = re.sub(r'&lt;@([UW][A-Z0-9]{7,30})&gt;', mention, value)
         value = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', value, flags=re.M)
         pieces[i] = re.sub(r'\*\*(.+?)\*\*', r'*\1*', value)
     return ''.join(pieces)
@@ -279,6 +289,15 @@ class SlackChat:
         text = re.sub(r'\b(?:xox[baprs]-[A-Za-z0-9-]{12,}|sk-[A-Za-z0-9_-]{16,}|GOCSPX-[A-Za-z0-9_-]+)', '[credential redacted]', text)
         return text
 
+    def mentionable_in(self, conn, run_id):
+        """Users people already mentioned in this run's Slack text; never the bot."""
+        texts = [m.get('text', '') for row in conn.execute('SELECT context_json FROM slack_events WHERE run_id=?', (run_id,))
+                 for m in json.loads(row['context_json'] or '{}').get('messages', [])]
+        texts += [row['content'] for row in conn.execute(
+            'SELECT m.content FROM slack_receipts r JOIN messages m ON m.id=r.message_id WHERE r.run_id=?', (run_id,))]
+        found = {match[1] for text in texts if isinstance(text, str) for match in USER_MENTION.finditer(text)}
+        return frozenset(found - {self.owner.connectors.slack_installation().get('user_id')})
+
     def collect_answers_in(self, conn, binding, allowed):
         run_id = binding['run_id']
         messages = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='assistant' AND id>? ORDER BY id", (run_id, binding['last_message_id'])).fetchall()
@@ -292,7 +311,7 @@ class SlackChat:
                 if binding['channel'].startswith('D') and not conn.execute(
                     "SELECT 1 FROM slack_outbox WHERE run_id=? AND kind='answer' LIMIT 1", (run_id,)).fetchone():
                     value += '\n\nThis conversation also appears in Moyai, where signed-in BerriAI teammates can view it.'
-                chunks = split_reply(slack_text(value))
+                chunks = split_reply(slack_text(value, self.mentionable_in(conn, run_id)))
                 for index, chunk in enumerate(chunks):
                     suffix = '\n\n' + self.link(run_id) if index == len(chunks) - 1 else ''
                     self.queue(conn, run_id, f"answer:{message['id']}:{index}", 'answer', chunk + suffix)
