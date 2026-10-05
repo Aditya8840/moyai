@@ -7,7 +7,7 @@ import pytest
 from app.attachments import attachment_context
 from app.db import Store
 from app.message_queue import MessageQueue
-from app.slack_audio import audio_files
+from app.slack_files import file_ids
 from test_attachments import upload, start
 from test_slack import slack_app, signed, event
 from test_spend import sign_in
@@ -25,6 +25,39 @@ def wav():
 def gateway(monkeypatch, handler):
     actual = httpx.AsyncClient
     monkeypatch.setattr('app.audio.httpx.AsyncClient', lambda **kw: actual(transport=httpx.MockTransport(handler), **kw))
+
+
+def slack_download(monkeypatch, handler):
+    """Mock only the SDK's HTTP transport, preserving its download validation."""
+    class Stream:
+        def __init__(self, response):
+            self.response, self.status, self.content = response, response.status_code, self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def iter_chunked(self, size):
+            for chunk in self.response.iter_bytes(size):
+                yield chunk
+
+    class Session:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def get(self, url, *, headers, allow_redirects):
+            assert allow_redirects is False
+            return Stream(handler(httpx.Request('GET', url, headers=headers)))
+
+    monkeypatch.setattr('agentchat.channels.slack_files.aiohttp.ClientSession', Session)
 
 
 def configured(app):
@@ -110,10 +143,10 @@ def test_slack_audio_only_is_durable_deduplicated_and_off_ack_path(slack_app, mo
         read.append(file_id)
         assert team == 'T12345678'
         return 'voice.wav', wav(), ('audio/wav', b'', 'Investigate the deployment logs.')
-    monkeypatch.setattr(app.state.slack.audio, 'read', recording)
+    monkeypatch.setattr(app.state.slack.files, 'read', recording)
     message = app.state.store.claim_message(run_id)
-    asyncio.run(app.state.slack.audio.prepare(run_id))
-    asyncio.run(app.state.slack.audio.prepare(run_id))
+    asyncio.run(app.state.slack.files.prepare(run_id))
+    asyncio.run(app.state.slack.files.prepare(run_id))
     assert read == ['F12345678']
     stored = app.state.store.messages(run_id)[0]
     assert stored['user_id'] == message['user_id']
@@ -132,14 +165,14 @@ def test_slack_followup_audio_requires_handoff_without_leaking(slack_app, monkey
     client.post('/hooks/slack/events', **signed(payload))
     second = app.state.store.messages(run_id)[1]
     assert MessageQueue(app.state.store).live_control(run_id, first['id'], []) == {'steer_message_id':second['id'], 'handoff':True}
-    asyncio.run(app.state.slack.audio.prepare(run_id))
+    asyncio.run(app.state.slack.files.prepare(run_id))
     assert not app.state.store.rows('SELECT id FROM attachments')
     app.state.store.finish_message(run_id, first['id'], '', 'steered')
     app.state.store.claim_message(run_id)
     async def unavailable(*args):
         raise ValueError('Reconnect Slack with files:read permission, then resend the audio.')
-    monkeypatch.setattr(app.state.slack.audio, 'read', unavailable)
-    asyncio.run(app.state.slack.audio.prepare(run_id))
+    monkeypatch.setattr(app.state.slack.files, 'read', unavailable)
+    asyncio.run(app.state.slack.files.prepare(run_id))
     text = app.state.store.rows('SELECT content FROM messages WHERE id=?', (second['id'],))[0]['content']
     assert 'files:read' in text and 'Do not guess' in text
 
@@ -169,10 +202,10 @@ def test_slack_never_sends_bot_token_to_untrusted_file_urls(slack_app, monkeypat
     app, *_ = slack_app
     grant_files(app)
     async def info(*args, **kwargs):
-        return {'file':{'id':'F12345678','name':'voice.wav','size':len(wav()),'url_private':url}}
+        return {'ok':True, 'file':{'id':'F12345678','name':'voice.wav','size':len(wav()),'url_private':url}}
     monkeypatch.setattr(app.state.connectors, 'request', info)
     with pytest.raises(ValueError, match='unsupported file location'):
-        asyncio.run(app.state.slack.audio.read('F12345678','T12345678'))
+        asyncio.run(app.state.slack.files.read('F12345678','T12345678'))
 
 
 def test_slack_download_and_transcription_use_separate_credentials(slack_app, monkeypatch):
@@ -180,7 +213,7 @@ def test_slack_download_and_transcription_use_separate_credentials(slack_app, mo
     grant_files(app)
     async def info(*args, **kwargs):
         assert kwargs['headers']['Authorization'] == 'Bearer bot-token'
-        return {'file':{'id':'F12345678','name':'voice.wav','size':len(wav()),'url_private':'https://files.slack.com/files-pri/voice'}}
+        return {'ok':True, 'file':{'id':'F12345678','name':'voice.wav','size':len(wav()),'url_private':'https://files.slack.com/files-pri/voice'}}
     def response(request):
         if request.method == 'GET':
             assert request.headers['Authorization'] == 'Bearer bot-token'
@@ -189,14 +222,15 @@ def test_slack_download_and_transcription_use_separate_credentials(slack_app, mo
         return httpx.Response(200, json={'text':'Read this voice message.'})
     monkeypatch.setattr(app.state.connectors, 'request', info)
     gateway(monkeypatch, response)
-    name, raw, inspected = asyncio.run(app.state.slack.audio.read('F12345678','T12345678'))
+    slack_download(monkeypatch, response)
+    name, raw, inspected = asyncio.run(app.state.slack.files.read('F12345678','T12345678'))
     assert inspected[2] == 'Read this voice message.' and raw == wav()
 
 
-def test_audio_candidate_filter_ignores_unrelated_files_and_urls():
-    assert audio_files([{'id':'F12345678','name':'voice.m4a','url_private':'https://evil.example'}]) == ['F12345678']
-    assert audio_files([{'id':'F12345678','name':'image.png','mimetype':'image/png'}]) == []
-    assert audio_files([{'id':'not-a-slack-id','mimetype':'audio/mp3'}]) == []
+def test_slack_file_candidates_include_images_and_ignore_untrusted_urls():
+    assert file_ids([{'id':'F12345678','name':'voice.m4a','url_private':'https://evil.example'}]) == ['F12345678']
+    assert file_ids([{'id':'F12345678','name':'image.png','mimetype':'image/png'}]) == ['F12345678']
+    assert file_ids([{'id':'not-a-slack-id','mimetype':'audio/mp3'}]) == []
 
 
 def test_audio_only_api_inputs_are_valid_but_empty_messages_are_not(workspace, monkeypatch):
