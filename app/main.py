@@ -36,6 +36,7 @@ from .github_setup import routes as github_routes
 from .credentials import Credentials, Invoke, Materialize, TOOLS as CREDENTIAL_TOOLS
 from .skills import Skills
 from .memory import Memory, TOOL_NAMES as MEMORY_TOOLS
+from .session_folders import SessionFolders
 from sandbox.memory_history import scrub_memory_history
 from .environments import Environments
 from .tracing import AgentTracing
@@ -223,6 +224,9 @@ def create_app(settings: Settings | None = None):
     app.include_router(skills.routes())
     app.include_router(memory.routes())
     app.state.memory = memory
+    session_folders = SessionFolders(store, security, checkpoints)
+    app.state.session_folders = session_folders
+    app.include_router(session_folders.routes())
     app.include_router(store.attachments.routes(security, settings))
     app.include_router(artifact_file_routes(settings, store, security))
     computer = Computer(settings, store, security, manager, credentials.same_requester)
@@ -377,13 +381,16 @@ def create_app(settings: Settings | None = None):
 
     @app.get("/api/runs")
     async def runs(request: Request, focus: str = ''):
-        security.require(request)
+        owner = session_folders.actor(request)
+        memberships = session_folders.memberships(owner)
         ids = [row['id'] for row in store.rows("SELECT id FROM runs WHERE parent_run_id='' ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 100")]
+        # Filed sessions remain reachable even after leaving the recent 100.
+        ids = list(dict.fromkeys([*ids, *memberships]))
         selected = store.run(focus) if re.fullmatch(r'[0-9a-f]{32}', focus) else None
         parent_id = (selected['parent_run_id'] or selected['id']) if selected else ''
         if parent_id and parent_id not in ids and store.run(parent_id):
             ids.append(parent_id)
-        runs = {run_id: {**public_run(store.run(run_id)), 'children': []} for run_id in ids}
+        runs = {run_id: {**public_run(store.run(run_id)), 'folder_id': memberships.get(run_id), 'children': []} for run_id in ids}
         if ids:
             children = store.rows('SELECT id,parent_run_id,agent_label,status,mode,created_at,updated_at FROM runs WHERE parent_run_id IN (' + ','.join('?' for _ in ids) + ') ORDER BY created_at,id', ids)
             for child in children:
@@ -567,8 +574,7 @@ def create_app(settings: Settings | None = None):
             connectors.expire_approvals(provider)
         action = ("Paused for all sessions" if not body.enabled else "Enabled: read only" if body.read_only
                   else "Enabled: create and maintain session-owned pull requests" if provider == 'github'
-                  else "Enabled: create Linear tickets directly; parent updates and comments require admin approval" if provider == 'linear'
-                  else "Enabled: writes require admin approval")
+                  else "Enabled: read and write without approval")
         connectors.audit(provider, action)
         return connectors.policy(provider)
 
@@ -727,55 +733,19 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(403, "This operation is disabled by the organization's connection policy.")
         if provider == 'github':
             run = {**run, 'github_connection_version': connectors.github.connection_version()}
-        approval_id = None
-        if connectors.requires_approval(body.name):
-            approval_id = uuid4().hex
-            store.execute("INSERT INTO approvals(id,run_id,tool,arguments,status,created_at) VALUES(?,?,?,?,?,?)",
-                          (approval_id, run_id, body.name, json.dumps(arguments), "pending", now()))
-            store.update_run(run_id, status="awaiting_approval")
-            store.event(run_id, "approval", f"Approval needed: {body.name}", {"approval_id": approval_id})
-            deadline = time.monotonic() + 900
-            while time.monotonic() < deadline:
-                if await request.is_disconnected():
-                    store.execute("UPDATE approvals SET status='expired' WHERE id=? AND status IN ('pending','approved')", (approval_id,))
-                    store.execute("UPDATE runs SET status='running' WHERE id=? AND status='awaiting_approval' AND NOT EXISTS(SELECT 1 FROM approvals WHERE run_id=? AND status='pending')", (run_id, run_id))
-                    return {"error": "Tool connection closed. Action was not sent."}
-                current = store.run(run_id)
-                row = store.rows("SELECT status FROM approvals WHERE id=?", (approval_id,))[0]
-                if current["status"] not in {"running", "reconnecting", "awaiting_approval"}:
-                    return {"error": "Run stopped. Action was not sent."}
-                if row["status"] in {"approved", "denied", "expired"}:
-                    break
-                await asyncio.sleep(0.25)
-            else:
-                store.execute("UPDATE approvals SET status='expired' WHERE id=? AND status='pending'", (approval_id,))
-            claim = store.execute("UPDATE approvals SET status='executing' WHERE id=? AND status='approved' AND EXISTS(SELECT 1 FROM runs WHERE runs.id=approvals.run_id AND runs.status IN ('running','reconnecting','awaiting_approval'))", (approval_id,))
-            remaining = store.rows("SELECT COUNT(*) AS n FROM approvals WHERE run_id=? AND status='pending'", (run_id,))[0]["n"]
-            store.execute("UPDATE runs SET status='running' WHERE id=? AND status='awaiting_approval' AND ?=0", (run_id, remaining))
-            if not claim:
-                store.event(run_id, "tool", f"{body.name} was not approved; no action sent")
-                return {"error": "Action denied, expired, or cancelled."}
+        # Enabled tools, including newly registered writes, execute directly.
+        # Connection policies and the live session capability still apply.
         require_run(run_id, request)
         if not connectors.allowed(body.name):
-            if approval_id:
-                store.execute("UPDATE approvals SET status='expired' WHERE id=?", (approval_id,))
             return {"error": "The organization connection changed. No action was sent."}
-        # A durable executing record prevents an uncertain external write being
-        # mistaken for a pending approval after a container restart.
-        if approval_id:
-            await checkpoints.flush()
         try:
             result = (await connectors.github.call(run, body.name, arguments) if provider == 'github'
                       else await connectors.my_linear_issues(run) if body.name == 'linear_my_issues'
                       else await connectors.call(body.name, arguments))
-            if approval_id:
-                store.execute("UPDATE approvals SET status='completed',result=? WHERE id=?", (json.dumps(result)[:12000], approval_id))
             store.event(run_id, "tool", f"{body.name} completed")
             return result
         except Exception as exc:
             message = str(exc) if isinstance(exc, ConnectorError) else f"App operation could not be confirmed ({type(exc).__name__})."
-            if approval_id:
-                store.execute("UPDATE approvals SET status='uncertain',result=? WHERE id=?", (message, approval_id))
             store.event(run_id, "error", f"{body.name}: {message}")
             return {"error": message, "outcome_uncertain": write, "instruction": "Verify the destination before retrying a write."}
 
