@@ -2,6 +2,8 @@
 
 A working MVP of an internal Devin-style workspace: assign tasks in a browser, run Nous Research's Hermes Agent in an isolated Modal sandbox, and connect Linear, Slack, and Notion.
 
+**Goal mode:** start a cloud chat request with `/goal <objective>` to keep working across normal response boundaries until evidence-backed completion. Use `/goal status`, `/goal pause`, `/goal resume`, or `/goal clear`; Stop, blockers, and safety limits still apply. See [goal mode and implementation research](docs/goals.md).
+
 **Cloud workspace:** [Open Moyai Devin](https://moyai-devin-litellm.onrender.com), hosted in **Organization for Litellm → Litellm** on Render; Hermes sandboxes and filesystem snapshots run under **hermes-workspace** in the **litellm** Modal workspace. Sign in with your **@berri.ai Google Workspace account**. Shared-password login is disabled. Secrets remain private in Render and ignored local environment files. Historical links below use the old origin; their session IDs are preserved on the new origin.
 
 **Initial Slack verification:** a real @Moyai Devin mention in [#bot-spam](https://berriaillm.slack.com/archives/C0B302ZJU05/p1790720764864289) created exactly one cloud run and returned a protected link on the original Modal deployment. The agent answered `Ready`, used no connected-app tools, and its sandbox was terminated. The new chat continuation path is described below.
