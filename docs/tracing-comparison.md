@@ -104,7 +104,10 @@ All five receive bounded, sanitized content. System prompts, private reasoning,
 images, loaded skills, credential tools, and personal memory tool payloads are
 excluded. Model inputs include the last five user messages rather than the full
 raw conversation; tool arguments/results have their own spans. Secret fields
-and configured tracing keys are redacted, and user IDs are hashed. Model JSON
+and configured tracing keys are redacted. Trace user IDs use the turn author's
+SSO email, including Slack accounts linked to Google sign-in. Internal account
+IDs and authorization are unchanged. Accounts without an SSO email retain a
+stable hashed fallback; previously exported traces are not rewritten. Model JSON
 is bounded without cutting its syntax. Timing currently measures full requests,
 not time to first token. Cache/reasoning-token breakdowns, gateway billing,
 feedback, online evaluators, and automated investigations are not configured by
