@@ -119,7 +119,7 @@
       function visibility(){if(!document.hidden&&enabled)poll();}document.addEventListener('visibilitychange',visibility);t.dispose=()=>{t.deactivate();document.removeEventListener('visibilitychange',visibility);};
       form.onsubmit=async e=>{
         e.preventDefault();const text=input.value.trim();if(!text||send.disabled)return;send.disabled=true;input.disabled=true;status.textContent='Sending…';
-        const body={...(t.chatId?{content:text}:{prompt:text,mode:run.mode,repo_url:run.repo_url,environment_id:run.environment_id||'auto',plugins:run.plugins,side_chat_of:run.id}),model:model.value||run.model};
+        const body={...(t.chatId?{content:text}:{prompt:text,mode:run.mode,repo_url:run.repo_url,environment_id:run.environment_id||'auto',harness:run.harness||'hermes',plugins:run.plugins,side_chat_of:run.id}),model:model.value||run.model};
         const submission=JSON.stringify(body);if(t.submission!==submission||!t.clientId){t.clientId=crypto.randomUUID();t.submission=submission;}save();
         try{
           if(!t.chatId){const created=await api('/api/runs',{method:'POST',body:JSON.stringify({...body,client_id:t.clientId})});t.chatId=created.id;t.title=text.length>28?text.slice(0,28)+'…':text;draw();sideChats.push(created);onCreated?.();}
