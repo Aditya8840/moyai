@@ -76,7 +76,7 @@ def test_sealed_tool_writes_execute_directly_without_approval(workspace, monkeyp
     app, client = workspace
     run_id, headers = cloud_capability(app, ['slack'])
     calls = []
-    async def send(name, arguments):
+    async def send(name, arguments, **kwargs):
         calls.append((name,arguments))
         return {'ok': True}
     monkeypatch.setattr(app.state.connectors,'call',send)

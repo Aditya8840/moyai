@@ -763,6 +763,7 @@ def create_app(settings: Settings | None = None):
         try:
             result = (await connectors.github.call(run, body.name, arguments) if provider == 'github'
                       else await connectors.my_linear_issues(run) if body.name == 'linear_my_issues'
+                      else await connectors.call(body.name, arguments, run=run) if body.name == 'slack_send'
                       else await connectors.call(body.name, arguments))
             store.event(run_id, "tool", f"{body.name} completed")
             return result
