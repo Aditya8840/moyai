@@ -9,6 +9,26 @@
       return {visible:!!data.visible,active:String(data.active||''),width:Math.max(30,Math.min(70,Number(data.width)||52)),tabs};
     }catch{return {visible:false,active:'',width:52,tabs:[]};}
   }
+  function fileTree(files){
+    const root={directories:new Map(),files:[],path:''};
+    files.forEach((file,index)=>{
+      const parts=file.path.split('/');let node=root;
+      for(const name of parts.slice(0,-1)){
+        if(!node.directories.has(name))node.directories.set(name,{name,path:node.path?node.path+'/'+name:name,directories:new Map(),files:[]});
+        node=node.directories.get(name);
+      }
+      node.files.push({file,index});
+    });
+    return root;
+  }
+  function renderFileTree(files,{escape:esc,size,expanded=new Set(),search=false}){
+    function render(node){
+      const folders=[...node.directories.values()].sort((a,b)=>a.name.localeCompare(b.name));
+      const leaves=[...node.files].sort((a,b)=>a.file.name.localeCompare(b.file.name));
+      return folders.map(folder=>`<details class="panel-file-folder" data-folder="${esc(folder.path)}" ${search||expanded.has(folder.path)?'open':''}><summary title="${esc(folder.path)}"><span aria-hidden="true">▱</span> ${esc(folder.name)}</summary><div class="panel-file-children">${render(folder)}</div></details>`).join('')+leaves.map(({file:f,index})=>`<button type="button" class="panel-file-choice" data-file="${index}" title="${esc(f.path)}"><span aria-hidden="true">${f.kind==='video'?'▷':f.kind==='image'?'▧':'▤'}</span><span><strong>${esc(f.name)}</strong><small>${size(f.size)}</small></span><span aria-hidden="true">↗</span></button>`).join('');
+    }
+    return render(fileTree(files))||'<p class="panel-empty">No matching saved files.</p>';
+  }
   function create({run,layout,api,computer,markdown,escape:esc,size,user,models,toast,onCreated}){
     const key='moyai-panel:'+user+':'+run.id;
     let initial;try{initial=restore(localStorage.getItem(key));}catch{initial=restore(null);}
@@ -76,7 +96,18 @@
         const catalog=await api(`/api/runs/${run.id}/files`);if(!current())return;
         if(t.kind==='files'){
           t.element.innerHTML='<div class="panel-file-search"><input type="search" aria-label="Find a saved file" placeholder="Find a file…"><button type="button" data-refresh aria-label="Refresh saved files">↻</button></div><div class="panel-file-list"></div><p class="panel-footnote">Latest saved version · Select a file to open it in a tab.</p>';
-          function list(){const term=t.element.querySelector('input').value.toLowerCase(),files=catalog.files.filter(f=>f.path.toLowerCase().includes(term));t.element.querySelector('.panel-file-list').innerHTML=files.map((f,i)=>`<button class="panel-file-choice" data-file="${i}"><span aria-hidden="true">${f.kind==='video'?'▷':f.kind==='image'?'▧':'▤'}</span><span><strong>${esc(f.name)}</strong><small>${esc(f.path)} · ${size(f.size)}</small></span><span aria-hidden="true">↗</span></button>`).join('')||'<p class="panel-empty">No matching saved files.</p>';t.element.querySelectorAll('[data-file]').forEach(b=>b.onclick=()=>openFile(files[Number(b.dataset.file)]));}
+          t.expandedFolders??=new Set();
+          const input=t.element.querySelector('input');input.value=t.fileSearch||'';
+          function list(){
+            t.fileSearch=input.value;const term=input.value.toLowerCase(),files=catalog.files.filter(f=>f.path.toLowerCase().includes(term));
+            t.element.querySelector('.panel-file-list').innerHTML=renderFileTree(files,{escape:esc,size,expanded:t.expandedFolders,search:!!term});
+            t.element.querySelectorAll('[data-folder]').forEach(folder=>folder.ontoggle=()=>{
+              // Search temporarily opens ancestors; don't overwrite browsing state.
+              if(term||!folder.isConnected)return;
+              if(folder.open)t.expandedFolders.add(folder.dataset.folder);else t.expandedFolders.delete(folder.dataset.folder);
+            });
+            t.element.querySelectorAll('[data-file]').forEach(b=>b.onclick=()=>openFile(files[Number(b.dataset.file)]));
+          }
           t.element.querySelector('input').oninput=list;t.element.querySelector('[data-refresh]').onclick=()=>mount(t);list();return;
         }
         const file=catalog.files.find(f=>f.archive_path===t.path);if(!file)throw new Error('This file is no longer in the latest saved workspace. Open Files to choose another.');
@@ -137,5 +168,5 @@
     api(`/api/runs/${run.id}/side-chats`).then(rows=>{if(!disposed)sideChats=rows;}).catch(()=>{});
     return {open,openFile,hide,toggle(){if(visible)hide();else if(tabs.size)select(tabs.has(active)?active:tabs.keys().next().value);else open(run.mode==='modal'?'computer':'files');},dispose(){disposed=true;tabs.forEach(t=>{t.deactivate?.();t.dispose?.();});document.removeEventListener('pointerdown',outside);panel.remove();layout.classList.remove('panel-open','panel-expanded');}};
   }
-  return {create,restore};
+  return {create,restore,fileTree,renderFileTree};
 });
