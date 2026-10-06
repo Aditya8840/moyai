@@ -1241,8 +1241,12 @@ For an initial request, the bounded conversation read can recover files missing
 from an `app_mention` event and include files from the explicitly invoked thread.
 Nearby channel messages' files and future replies are excluded. Direct-message
 history is not imported. Files queued during a response wait for their own turn;
-failures explicitly tell the agent that content is missing. Existing installations
-without `files:read` must reconnect Slack. The durable intake table keeps its
+failures explicitly tell the agent that content is missing. Slack's live
+`files.info` response determines file access, not the saved OAuth scope list,
+which can be stale. A `missing_scope` response asks the user to reconnect Slack
+with `files:read`; other API errors do not incorrectly claim that scope is missing.
+Workspace and connection-policy checks still run before external steps and after
+reading the file. The durable intake table keeps its
 legacy `slack_audio_inputs` name to preserve pending recordings across upgrades.
 
 ## Prepared project environments
