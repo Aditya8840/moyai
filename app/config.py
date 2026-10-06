@@ -1,4 +1,5 @@
 from pathlib import Path
+import base64
 import re
 
 from pydantic import Field, field_validator
@@ -48,6 +49,20 @@ class Settings(BaseSettings):
     raindrop_trace_endpoint: str = "https://api.raindrop.ai/v1/traces"
     raindrop_write_key: str = ""
     raindrop_project_id: str = ""
+    langfuse_base_url: str = "https://us.cloud.langfuse.com"
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_tracing_environment: str = Field(default="development", min_length=1, max_length=40,
+                                             pattern=r"^[a-z0-9_-]+$")
+    trace_environment: str = Field(default="development", min_length=1, max_length=40,
+                                   pattern=r"^[a-z0-9_-]+$")
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+    langsmith_api_key: str = ""
+    langsmith_project: str = "moyai-devin"
+    langsmith_workspace_id: str = ""
+    braintrust_api_url: str = "https://api.braintrust.dev"
+    braintrust_api_key: str = ""
+    braintrust_parent: str = "project_name:moyai-devin"
     agent_model: str = ""
     modal_token_id: str = ""
     modal_token_secret: str = ""
@@ -118,6 +133,30 @@ class Settings(BaseSettings):
             raise ValueError('Use an HTTPS trace endpoint ending in /v1/traces, without credentials or query parameters.')
         return value
 
+    @field_validator('langfuse_base_url', 'langsmith_endpoint', 'braintrust_api_url')
+    @classmethod
+    def validate_langfuse_base_url(cls, value):
+        from urllib.parse import urlsplit
+        parsed = urlsplit(value)
+        if value and (parsed.scheme != 'https' or not parsed.hostname or parsed.username or
+                      parsed.password or parsed.query or parsed.fragment):
+            raise ValueError('Use an HTTPS tracing base URL without credentials or query parameters.')
+        return value.rstrip('/')
+
+    @field_validator('langsmith_project', 'langsmith_workspace_id', 'braintrust_parent')
+    @classmethod
+    def validate_trace_header(cls, value):
+        if len(value) > 200 or any(ord(c) < 32 or ord(c) > 126 for c in value):
+            raise ValueError('Trace routing headers must be at most 200 printable ASCII characters.')
+        return value.strip()
+
+    @field_validator('braintrust_parent')
+    @classmethod
+    def validate_braintrust_parent(cls, value):
+        if value and not re.fullmatch(r'(project_id|project_name):\S[^\r\n]*', value):
+            raise ValueError('Use project_id:<id> or project_name:<name> for Braintrust traces.')
+        return value
+
     @field_validator('github_repositories')
     @classmethod
     def validate_github_repositories(cls, value):
@@ -137,6 +176,19 @@ class Settings(BaseSettings):
             project = {'X-Raindrop-Project-Id': self.raindrop_project_id} if self.raindrop_project_id else {}
             destinations.append(('trace_outbox_raindrop', self.raindrop_trace_endpoint,
                                  {'Authorization': 'Bearer ' + self.raindrop_write_key, **project}))
+        if self.langfuse_base_url and self.langfuse_public_key and self.langfuse_secret_key:
+            credentials = base64.b64encode(f'{self.langfuse_public_key}:{self.langfuse_secret_key}'.encode()).decode()
+            destinations.append(('trace_outbox_langfuse', self.langfuse_base_url + '/api/public/otel/v1/traces',
+                                 {'Authorization': 'Basic ' + credentials, 'x-langfuse-ingestion-version': '4'}))
+        if self.langsmith_endpoint and self.langsmith_api_key and self.langsmith_project:
+            headers = {'x-api-key': self.langsmith_api_key, 'Langsmith-Project': self.langsmith_project}
+            if self.langsmith_workspace_id:
+                headers['X-Tenant-Id'] = self.langsmith_workspace_id
+            destinations.append(('trace_outbox_langsmith', self.langsmith_endpoint + '/otel/v1/traces', headers))
+        if self.braintrust_api_url and self.braintrust_api_key and self.braintrust_parent:
+            destinations.append(('trace_outbox_braintrust', self.braintrust_api_url + '/otel/v1/traces',
+                                 {'Authorization': 'Bearer ' + self.braintrust_api_key,
+                                  'x-bt-parent': self.braintrust_parent}))
         return destinations
 
     def allowed_github_repositories(self) -> list[str]:

@@ -28,6 +28,30 @@ services:
         sync: false
       - key: RAINDROP_PROJECT_ID
         sync: false
+      - key: LANGFUSE_BASE_URL
+        value: https://us.cloud.langfuse.com
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+      - key: LANGFUSE_TRACING_ENVIRONMENT
+        value: production
+      - key: TRACE_ENVIRONMENT
+        value: production
+      - key: LANGSMITH_ENDPOINT
+        value: https://api.smith.langchain.com
+      - key: LANGSMITH_PROJECT
+        value: moyai-devin
+      - key: LANGSMITH_API_KEY
+        sync: false
+      - key: LANGSMITH_WORKSPACE_ID
+        sync: false
+      - key: BRAINTRUST_API_URL
+        value: https://api.braintrust.dev
+      - key: BRAINTRUST_PARENT
+        value: project_id:03def8d1-b4cf-431e-8907-828a0ae42f97
+      - key: BRAINTRUST_API_KEY
+        sync: false
       - key: RENDER_MIGRATION_STAGE
         value: "false"
       - key: BOOTSTRAP_MODAL_VOLUME
