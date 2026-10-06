@@ -52,7 +52,8 @@ function fixture({kind='skill',admin=true,saved=[],skill=null,rootId='root-one',
       return skill;
     },toast(){},refreshChat:async()=>{},showError(){},
   };
-  vm.createContext(ctx);vm.runInContext(readFileSync('app/static/'+(kind==='skill'?'skills.js':'credentials.js'),'utf8'),ctx);
+  const app=readFileSync('app/static/app.js','utf8');
+  vm.createContext(ctx);vm.runInContext(app.slice(app.indexOf('function sessionTitle('),app.indexOf('function modelName('))+readFileSync('app/static/'+(kind==='skill'?'skills.js':'credentials.js'),'utf8'),ctx);
   return {ctx,element,posts,gets,submit,elements};
 }
 
@@ -314,7 +315,7 @@ test('missing or unsafe setup URLs never navigate to Moyai or leave a stale form
 });
 
 test('standalone session-only saving requires an explicit eligible root and preserves the draft until chosen',async()=>{
-  const runs=[{id:'my-root',prompt:'Investigate outage',chat_enabled:true,active_user_id:'google:owner'},
+  const runs=[{id:'my-root',prompt:'raw outage prompt',display_title:'Investigate outage',chat_enabled:true,active_user_id:'google:owner'},
     {id:'other-root',prompt:'Other requester',chat_enabled:true,active_user_id:'google:other'},
     {id:'slack-root',prompt:'Slack request',chat_enabled:true,active_user_id:'slack:T:U'},
     {id:'legacy-root',prompt:'Older chat'},
@@ -326,6 +327,7 @@ test('standalone session-only saving requires an explicit eligible root and pres
   await f.element('secret-lifetime').onchange();
   const picker=f.element('secret-root');assert.equal(picker.required,true);assert.equal(picker.disabled,false);assert.equal(picker.value,'');
   assert.deepEqual(Array.from(picker.options,o=>o.value),['','my-root','slack-root','legacy-root']);
+  assert.equal(picker.options[1].text,'Investigate outage · my-root');
   f.element('secret-value').value='synthetic-provider-key';
   await f.element('credential-form').onsubmit({preventDefault(){}});
   assert.equal(f.posts.length,0);assert.equal(f.element('secret-value').value,'synthetic-provider-key');

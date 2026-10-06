@@ -4,7 +4,7 @@ const {test} = require('node:test');
 const vm = require('node:vm');
 const script = readFileSync('app/static/app.js','utf8');
 function helpers(){
-  const context={state:{selected:'worker-b'},relative:()=> '2m ago'};
+  const context={URL,state:{selected:'worker-b'},relative:()=> '2m ago'};
   vm.createContext(context);
   vm.runInContext(script.slice(script.indexOf('const esc ='),script.indexOf('const state ='))+
     script.slice(script.indexOf('function sessionTitle('),script.indexOf('function modelName('))+
@@ -30,7 +30,8 @@ test('child rows use their assignment label and expose selection and live status
   assert.match(html,/aria-current="page"/);
   assert.match(html,/Cases 21–40/);
   assert.match(html,/data-run="worker-b"/);
-  assert.match(html,/2m ago · Ready/);
+  assert.match(html,/aria-label="Cases 21–40 · Ready · Agent"/);
+  assert.match(html,/session-state/);
   assert.match(h.sidebarRow(runs[0].children[0],true),/session-dot running/);
 });
 test('assignment labels cannot inject sidebar markup',()=>{

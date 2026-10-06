@@ -9,7 +9,7 @@
       return {visible:!!data.visible,active:String(data.active||''),width:Math.max(30,Math.min(70,Number(data.width)||52)),tabs};
     }catch{return {visible:false,active:'',width:52,tabs:[]};}
   }
-  function create({run,layout,api,computer,markdown,escape:esc,size,user,models,toast,onCreated}){
+  function create({run,layout,api,computer,markdown,escape:esc,size,titleFor,matchesSession,user,models,toast,onCreated}){
     const key='moyai-panel:'+user+':'+run.id;
     let initial;try{initial=restore(localStorage.getItem(key));}catch{initial=restore(null);}
     const tabs=new Map();let active='',visible=false,width=initial.width,disposed=false,expanded=false,sideChats=[],restoring=true;
@@ -38,7 +38,7 @@
     function menu(open){q('.panel-menu').hidden=!open;q('[data-add]').setAttribute('aria-expanded',String(open));if(open){q('.panel-menu input').value='';drawMenu();q('.panel-menu input').focus();}}
     function drawMenu(){
       const search=q('.panel-menu input').value.toLowerCase();
-      const items=[...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox browser'}]:[]),{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.map(c=>({kind:'chat',title:c.prompt,detail:'Saved side chat',chatId:c.id}))].filter(i=>i.title.toLowerCase().includes(search));
+      const items=[...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox browser'}]:[]),{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.filter(c=>matchesSession(c,search)).map(c=>({kind:'chat',title:titleFor(c),detail:'Saved side chat',chatId:c.id}))].filter(i=>i.chatId||i.title.toLowerCase().includes(search));
       q('[data-menu-items]').innerHTML=items.map((item,i)=>`<button type="button" data-item="${i}"><span aria-hidden="true">${{computer:'▧',files:'▤',chat:'◌',activity:'☷'}[item.kind]}</span><span><strong>${esc(item.title)}</strong><small>${esc(item.detail)}</small></span></button>`).join('')||'<p class="panel-empty">No matching tabs.</p>';
       q('[data-menu-items]').querySelectorAll('button').forEach(b=>b.onclick=()=>{const item=items[Number(b.dataset.item)];open(item.kind,item.chatId?{chatId:item.chatId,title:item.title}:{});menu(false);});
     }
@@ -100,7 +100,7 @@
       input.value=t.draft||'';input.oninput=()=>{t.draft=input.value;save();};
       function showEmpty(){if(!t.chatId)log.innerHTML='<div class="side-chat-empty"><span aria-hidden="true">◌</span><h3>Ask about this session</h3><p>Ask a question, explore another idea, or discuss the work without interrupting Moyai.</p></div>';}
       function drawChat(data){
-        current=data;const transcript=MoyaiQueue.presentation(data).transcript,next=JSON.stringify(transcript);const bottom=log.scrollHeight-log.scrollTop-log.clientHeight<100;
+        current=data;syncTitles([data]);const transcript=MoyaiQueue.presentation(data).transcript,next=JSON.stringify(transcript);const bottom=log.scrollHeight-log.scrollTop-log.clientHeight<100;
         if(signature!==next){
           signature=next;const slots=new Map([...log.querySelectorAll('[data-activity-slot]')].map(slot=>[slot.dataset.activitySlot,slot]));
           log.innerHTML=transcript.map(m=>`<article class="side-message ${m.role==='user'?'from-user':''}"><div>${m.role==='user'?'You':'Moyai Devin'}</div><div class="${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.display_content??m.content):markdown(m.content)}</div></article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`).join('');
@@ -122,7 +122,7 @@
         const body={...(t.chatId?{content:text}:{prompt:text,mode:run.mode,repo_url:run.repo_url,environment_id:run.environment_id||'auto',plugins:run.plugins,side_chat_of:run.id}),model:model.value||run.model};
         const submission=JSON.stringify(body);if(t.submission!==submission||!t.clientId){t.clientId=crypto.randomUUID();t.submission=submission;}save();
         try{
-          if(!t.chatId){const created=await api('/api/runs',{method:'POST',body:JSON.stringify({...body,client_id:t.clientId})});t.chatId=created.id;t.title=text.length>28?text.slice(0,28)+'…':text;draw();sideChats.push(created);onCreated?.();}
+          if(!t.chatId){const created=await api('/api/runs',{method:'POST',body:JSON.stringify({...body,client_id:t.clientId})});t.chatId=created.id;sideChats.push(created);syncTitles([created]);onCreated?.();}
           else await api(`/api/runs/${t.chatId}/messages`,{method:'POST',body:JSON.stringify({...body,client_id:t.clientId})});
           t.draft='';t.clientId='';t.submission='';input.value='';save();if(good(t)){await poll();input.disabled=false;input.focus();}
         }catch(e){if(good(t))status.textContent=e.message;}finally{send.disabled=false;input.disabled=false;}
@@ -131,11 +131,23 @@
       stop.onclick=async()=>{stop.disabled=true;try{await api(`/api/runs/${t.chatId}/cancel`,{method:'POST'});await poll();}catch(e){status.textContent=e.message;}finally{stop.disabled=false;}};
       showEmpty();
     }
+    function syncTitles(rows){
+      if(disposed)return;
+      const byId=new Map(rows.map(row=>[row.id,row]));
+      sideChats=sideChats.map(chat=>byId.has(chat.id)?{...chat,...byId.get(chat.id)}:chat);
+      let changed=false;
+      for(const tab of tabs.values()){
+        const row=byId.get(tab.chatId);if(!row)continue;
+        const title=titleFor(row);if(tab.title!==title){tab.title=title;changed=true;}
+      }
+      if(changed){draw();save();}
+      if(!q('.panel-menu').hidden)drawMenu();
+    }
     initial.tabs.forEach(t=>{if(t.kind!=='computer'||run.mode==='modal')make(t.kind,t);});
     if(initial.visible&&tabs.size)select(tabs.has(initial.active)?initial.active:tabs.keys().next().value);else{active=initial.active;draw();}
     restoring=false;save();
-    api(`/api/runs/${run.id}/side-chats`).then(rows=>{if(!disposed)sideChats=rows;}).catch(()=>{});
-    return {open,openFile,hide,toggle(){if(visible)hide();else if(tabs.size)select(tabs.has(active)?active:tabs.keys().next().value);else open(run.mode==='modal'?'computer':'files');},dispose(){disposed=true;tabs.forEach(t=>{t.deactivate?.();t.dispose?.();});document.removeEventListener('pointerdown',outside);panel.remove();layout.classList.remove('panel-open','panel-expanded');}};
+    api(`/api/runs/${run.id}/side-chats`).then(rows=>{if(!disposed){sideChats=rows;syncTitles(rows);}}).catch(()=>{});
+    return {open,openFile,hide,syncTitles,toggle(){if(visible)hide();else if(tabs.size)select(tabs.has(active)?active:tabs.keys().next().value);else open(run.mode==='modal'?'computer':'files');},dispose(){disposed=true;tabs.forEach(t=>{t.deactivate?.();t.dispose?.();});document.removeEventListener('pointerdown',outside);panel.remove();layout.classList.remove('panel-open','panel-expanded');}};
   }
   return {create,restore};
 });

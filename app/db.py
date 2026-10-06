@@ -154,10 +154,11 @@ class Store:
             for name in ("chat_enabled", "turn_model_calls"):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
-            for name in ('model', 'active_model', 'pending_result', 'checkpoint_error', 'parent_run_id', 'agent_group_id', 'agent_label', 'side_chat_of', 'side_chat_context'):
+            for name in ('model', 'active_model', 'pending_result', 'checkpoint_error', 'parent_run_id', 'agent_group_id', 'agent_label', 'side_chat_of', 'side_chat_context', 'display_title', 'title_attempted_at'):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id)')
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_title_backfill ON runs(created_at DESC,id DESC) WHERE chat_enabled=1 AND parent_run_id='' AND agent_label='' AND display_title='' AND title_attempted_at=''")
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_side_chat ON runs(side_chat_of,created_at)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_parent_updated ON runs(parent_run_id,updated_at DESC,created_at DESC,id DESC)')
             if 'model' not in {row['name'] for row in conn.execute('PRAGMA table_info(messages)')}:

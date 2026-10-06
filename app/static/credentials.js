@@ -178,7 +178,7 @@ async function openCredentialDialog(request=null,secret=null,preset=null){
       // A saved root is retained even outside the latest page. Authorization is checked on save.
       if(rootId&&!choices.some(run=>run.id===rootId))choices.unshift({id:rootId,prompt:'Saved session'});
       const chosen=choices.some(run=>run.id===selected)?selected:'';
-      picker.innerHTML='<option value="" disabled'+(chosen?'':' selected')+'>Choose a session</option>'+choices.map(run=>`<option value="${esc(run.id)}" ${run.id===chosen?'selected':''}>${esc((run.agent_label||run.prompt||'Session').split('\n')[0].slice(0,90))} · ${esc(run.id.slice(0,8))}</option>`).join('');
+      picker.innerHTML='<option value="" disabled'+(chosen?'':' selected')+'>Choose a session</option>'+choices.map(run=>`<option value="${esc(run.id)}" ${run.id===chosen?'selected':''}>${esc(sessionTitle(run))} · ${esc(run.id.slice(0,8))}</option>`).join('');
       picker.value=chosen;
       note.textContent=choices.length?(scope==='personal'?'Choose a chat where you are the requester. Access is checked again when you save.':'Access is limited to the chosen session and its subagents.'):'No matching sessions found. Start a chat, then reload sessions.';
     };
