@@ -32,6 +32,11 @@ Update the Slack Events request URL and Slack/Notion OAuth redirect URLs to the 
 
 ## Agent Traces in LiteLLM
 
+Moyai can send the same sanitized spans to **LiteLLM Lens, Raindrop, Langfuse,
+LangSmith, and Braintrust concurrently**. See the [tracing comparison and rollout
+guide](docs/tracing-comparison.md) for configuration, verified dashboard links,
+and the differences found during integration.
+
 Set `LITELLM_TRACE_ENDPOINT=https://gateway-dev.litellm-sandbox.ai/v1/traces` and a
 dedicated `LITELLM_TRACE_API_KEY` in Render's private environment. Both are required;
 leave the key empty to disable export. The inference gateway and its key remain
@@ -81,6 +86,11 @@ and `traceloop.association.properties.event_id` (the turn's trace ID), which Rai
 group spans into conversations. The same redaction rules apply, and the write key is redacted
 from trace text like the other credentials.
 
+Each top-level turn also sends one interaction to `/v1/events/track`, through its
+own durable `trace_outbox_raindrop_events` queue. Its `event_id` matches the turn's
+trace ID. Raindrop needs this interaction for Events, Signals, and Issues; OTLP
+spans alone do not create it. The Query API uses a separate read credential.
+
 After deploying, run a short task, then open Raindrop and look for the `moyai-devin` service
 in Events. Issues show up once Raindrop has enough conversations to cluster.
 
@@ -108,6 +118,28 @@ After deployment, run a short task that uses a terminal/file tool, then find
 **moyai-devin** in Langfuse and verify the task, generation, tool output and final
 answer. Check the session view for follow-up turns. Existing completed turns are
 not backfilled.
+
+## Agent Traces in LangSmith and Braintrust
+
+Set `LANGSMITH_API_KEY` and `LANGSMITH_PROJECT=moyai-devin` to enable LangSmith.
+`LANGSMITH_ENDPOINT` defaults to `https://api.smith.langchain.com`; set
+`LANGSMITH_WORKSPACE_ID` if the key needs explicit workspace routing.
+
+Set `BRAINTRUST_API_KEY` and `BRAINTRUST_PARENT=project_id:<project-id>` to enable
+Braintrust. `project_name:moyai-devin` also works, but an ID survives project
+renames. `BRAINTRUST_API_URL` defaults to `https://api.braintrust.dev`.
+
+Both use `/otel/v1/traces`, with independent persistent outboxes. Set
+`TRACE_ENVIRONMENT=production` on Render. Follow-up turns share a session/thread
+identifier, and delegated agents preserve their parent span. No additional
+vendor SDK or global tracer provider is installed. Leaving a destination's key
+empty disables that destination. New destinations do not backfill old turns.
+
+Run `uv run python -m scripts.check_trace_exports --send --live-model` with the
+configured environment to create labeled verification data in every enabled
+backend. This makes two small model requests using a temporary SQLite database;
+it does not start a production chat. Inspect `verification.json` in the reported
+directory for trace IDs and delivery receipts, then check stored dashboard data.
 
 ## Personal memory across sessions
 

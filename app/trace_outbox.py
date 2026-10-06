@@ -1,5 +1,8 @@
 """Persist sanitized OTLP spans before sending them; retry with unchanged IDs."""
 import asyncio
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+import json
 import logging
 import time
 
@@ -12,7 +15,8 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
 log = logging.getLogger(__name__)
 
 
-TABLES = frozenset({'trace_outbox', 'trace_outbox_raindrop', 'trace_outbox_langfuse'})
+TABLES = frozenset({'trace_outbox', 'trace_outbox_raindrop', 'trace_outbox_langfuse',
+                   'trace_outbox_langsmith', 'trace_outbox_braintrust', 'trace_outbox_raindrop_events'})
 
 
 class TraceOutbox:
@@ -43,6 +47,9 @@ class TraceOutbox:
 
     def enqueue(self, span, connection=None):
         payload = encode_spans([span]).SerializeToString()
+        self.enqueue_payload(span, payload, connection)
+
+    def enqueue_payload(self, span, payload, connection=None):
         values = (format(span.context.trace_id, '032x'), format(span.context.span_id, '016x'),
                   payload, time.time())
         sql = f'''INSERT OR IGNORE INTO {self.table}(trace_id,span_id,payload,created_at)
@@ -53,6 +60,26 @@ class TraceOutbox:
             with self.store.connect() as conn:
                 conn.execute(sql, values)
         self.wake.set()
+
+    def encode_batch(self, rows):
+        request = ExportTraceServiceRequest()
+        for row in rows:
+            request.MergeFrom(ExportTraceServiceRequest.FromString(row['payload']))
+        return request.SerializeToString()
+
+    def response_error(self, response):
+        if response.status_code != 200:
+            return 'HTTP ' + str(response.status_code)
+        if response.content:
+            if 'application/json' in response.headers.get('content-type', ''):
+                result = response.json()
+                partial = result.get('partialSuccess', result.get('partial_success', {}))
+                rejected = int(partial.get('rejectedSpans', partial.get('rejected_spans', 0)))
+            else:
+                rejected = ExportTraceServiceResponse.FromString(response.content).partial_success.rejected_spans
+            if rejected:
+                return 'OTLP partial rejection'
+        return ''
 
     def start(self):
         if self.task is None:
@@ -78,31 +105,26 @@ class TraceOutbox:
                 AND next_attempt_at<=? ORDER BY created_at LIMIT 64''', (time.time(),))
             if not rows:
                 return False
-            request = ExportTraceServiceRequest()
-            for row in rows:
-                request.MergeFrom(ExportTraceServiceRequest.FromString(row['payload']))
             error = ''
+            retry_after = 0
             try:
                 response = await self.client.post(self.endpoint, headers=self.headers,
-                                                  content=request.SerializeToString())
-                if response.status_code != 200:
-                    error = 'HTTP ' + str(response.status_code)
-                elif response.content:
-                    if 'application/json' in response.headers.get('content-type', ''):
-                        result = response.json()
-                        partial = result.get('partialSuccess', result.get('partial_success', {}))
-                        rejected = int(partial.get('rejectedSpans', partial.get('rejected_spans', 0)))
-                    else:
-                        rejected = ExportTraceServiceResponse.FromString(response.content).partial_success.rejected_spans
-                    if rejected:
-                        error = 'OTLP partial rejection'
+                                                  content=self.encode_batch(rows))
+                error = self.response_error(response)
+                hint = response.headers.get('retry-after', '')
+                if error and hint:
+                    try:
+                        retry_after = float(hint) if hint.isdigit() else (parsedate_to_datetime(hint) - datetime.now(timezone.utc)).total_seconds()
+                        retry_after = max(0, min(86400, retry_after))
+                    except (ValueError, TypeError, OverflowError):
+                        pass
             except Exception as exc:
                 error = type(exc).__name__
             stamp = time.time()
             with self.store.connect() as conn:
                 for row in rows:
                     if error:
-                        delay = min(300, 2 ** min(row['attempts'] + 1, 9))
+                        delay = max(retry_after, min(300, 2 ** min(row['attempts'] + 1, 9)))
                         conn.execute(f'''UPDATE {self.table} SET attempts=attempts+1,
                             next_attempt_at=?,last_error=? WHERE trace_id=? AND span_id=?''',
                             (stamp + delay, error, row['trace_id'], row['span_id']))
@@ -122,3 +144,36 @@ class TraceOutbox:
             await asyncio.gather(self.task, return_exceptions=True)
         # Undelivered spans stay on disk; shutdown does not wait on the gateway.
         await self.client.aclose()
+
+
+class RaindropEventOutbox(TraceOutbox):
+    """Raindrop interactions power Events/Signals; OTLP spans alone do not."""
+
+    def __init__(self, store, endpoint, headers):
+        super().__init__(store, 'trace_outbox_raindrop_events', endpoint, headers)
+        self.headers['Content-Type'] = 'application/json'
+
+    def enqueue(self, span, connection=None):
+        # One event per top-level turn. Delegated spans share that event ID.
+        if span.parent is not None:
+            return
+        attrs = span.attributes
+        event = {
+            'event_id': format(span.context.trace_id, '032x'),
+            'user_id': attrs.get('user.id', 'moyai-devin'),
+            'event': 'moyai-devin',
+            'properties': {'agent': 'moyai-devin', 'run_id': attrs['moyai.run_id'],
+                           'turn_id': attrs['moyai.turn_id'], 'session_url': attrs['moyai.session_url'],
+                           'status': attrs['moyai.status'], 'environment': attrs['moyai.environment']},
+            'ai_data': {'input': attrs['input.value'], 'output': attrs['output.value'],
+                        'convo_id': attrs['session.id']},
+        }
+        self.enqueue_payload(span, json.dumps(event).encode(), connection)
+
+    def encode_batch(self, rows):
+        return json.dumps([json.loads(row['payload']) for row in rows]).encode()
+
+    def response_error(self, response):
+        # The documented API returns 204; the current hosted API returns 200
+        # with the accepted event IDs. Both acknowledge the batch.
+        return '' if response.status_code in {200, 204} else 'HTTP ' + str(response.status_code)

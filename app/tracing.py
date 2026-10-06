@@ -3,16 +3,17 @@ import asyncio
 from datetime import datetime
 from functools import wraps
 import hashlib
+import json
 import logging
 import time
 
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.trace import SpanContext, SpanKind, Status, StatusCode, TraceFlags
 
 from sandbox.trace_content import trace_content
 from sandbox.memory_history import private_memory as is_memory_tool
-from .trace_outbox import TraceOutbox
+from .trace_outbox import RaindropEventOutbox, TraceOutbox
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +43,8 @@ class AgentTracing:
         self.store, self.settings = store, settings
         destinations = settings.trace_destinations()
         self.enabled = bool(destinations)
-        self.resource = Resource({'service.name': 'moyai-devin', 'deployment.environment.name': 'dev'})
+        self.resource = Resource({'service.name': 'moyai-devin',
+                                  'deployment.environment.name': settings.trace_environment})
         self.processor = processor
         with store.connect() as conn:
             conn.execute('''CREATE TABLE IF NOT EXISTS trace_contexts (
@@ -51,6 +53,9 @@ class AgentTracing:
                 session_id TEXT NOT NULL, agent_name TEXT NOT NULL,
                 PRIMARY KEY(run_id,message_id))''')
         self.outboxes = [TraceOutbox(store, *destination) for destination in destinations] if processor is None else []
+        raindrop = next((d for d in destinations if d[0] == 'trace_outbox_raindrop'), None)
+        self.events = (RaindropEventOutbox(store, raindrop[1].removesuffix('/traces') + '/events/track', raindrop[2])
+                       if raindrop and processor is None else None)
 
     def identity(self, run, message_id, connection=None):
         if connection is None:
@@ -84,7 +89,32 @@ class AgentTracing:
     def content(self, value):
         return trace_content(value, secrets=(self.settings.litellm_api_key, self.settings.litellm_trace_api_key,
             self.settings.raindrop_write_key, self.settings.langfuse_secret_key,
-            self.settings.langfuse_public_key, self.settings.modal_token_secret))
+            self.settings.langfuse_public_key, self.settings.langsmith_api_key,
+            self.settings.braintrust_api_key, self.settings.modal_token_secret))
+
+    def model_content(self, messages):
+        """Bound whole JSON messages without cutting JSON syntax or private data.
+
+        Raindrop accepts legacy content; LangSmith's GenAI mapper requires
+        parts. Keep both representations of the same sanitized text.
+        """
+        cleaned = [{'role': m['role'], 'content': self.content(m['content']) if m.get('content') is not None else None,
+                    **({'tool_names': [self.content(n)[:120] for n in m['tool_names'][:100]]}
+                       if 'tool_names' in m else {})} for m in messages]
+        while True:
+            legacy = json.dumps(cleaned, ensure_ascii=False)
+            genai = json.dumps([{**m, 'parts': [{'type': 'text', 'content': m['content']}] if m['content'] is not None else []}
+                                for m in cleaned],
+                               ensure_ascii=False)
+            if max(len(legacy), len(genai)) <= 16000:
+                return legacy, genai
+            # Shrink values, never the encoded JSON. Output choices are bounded
+            # below, and tool names are capped, so content reduction terminates.
+            for message in cleaned:
+                if isinstance(message['content'], str):
+                    message['content'] = message['content'][:len(message['content']) // 2] + ' [truncated]'
+                if 'tool_names' in message:
+                    message['tool_names'] = message['tool_names'][:min(10, len(message['tool_names']) // 2)]
 
     def emit(self, run, message_id, name, span_id, start, end, attrs, *, root=False, failed=False, connection=None):
         trace_id, agent_id, parent_id, session, agent_name = self.identity(run, message_id, connection)
@@ -92,10 +122,34 @@ class AgentTracing:
         attributes = {'session.id': session, 'agent.name': agent_name, 'gen_ai.agent.name': agent_name,
                       'moyai.run_id': run['id'],
                       'moyai.turn_id': str(message_id or 0),
+                      'moyai.environment': self.settings.trace_environment,
                       'moyai.session_url': self.settings.public_url.rstrip('/') + '/#run=' + run['id'],
                       # Raindrop groups spans into conversations and turns by these keys.
                       'traceloop.association.properties.convo_id': session,
                       'traceloop.association.properties.event_id': format(trace_id, '032x'), **attrs}
+        user = run.get('active_user_id') or run.get('owner_id')
+        if user:
+            # Stable grouping without exporting Google/Slack identity strings.
+            attributes['user.id'] = format(identifier('user:' + user, 16), '032x')
+            attributes['traceloop.association.properties.user_id'] = attributes['user.id']
+        kind = attrs.get('openinference.span.kind')
+        if kind == 'TOOL':
+            # Lens renders tool content from GenAI attributes; OpenInference
+            # input/output remains available to the other backends.
+            attributes['gen_ai.tool.call.arguments'] = attrs.get('input.value', '')
+            attributes['gen_ai.tool.call.result'] = attrs.get('output.value', '')
+        elif kind == 'AGENT':
+            _, attributes['gen_ai.input.messages'] = self.model_content([
+                {'role': 'user', 'content': attrs.get('input.value', '')}])
+            _, attributes['gen_ai.output.messages'] = self.model_content([
+                {'role': 'assistant', 'content': attrs.get('output.value', '')}])
+        attributes.update({
+            'traceloop.span.kind': {'AGENT': 'workflow', 'LLM': 'task', 'TOOL': 'tool'}.get(kind, 'task'),
+            'traceloop.entity.name': agent_name if root else name,
+            'traceloop.entity.input': attrs.get('input.value', ''),
+            'traceloop.entity.output': attrs.get('output.value', ''),
+            'traceloop.association.properties.event': 'moyai-devin',
+        })
         if self.settings.langfuse_public_key and self.settings.langfuse_secret_key:
             # Propagate filterable context to every observation (Langfuse v4).
             attributes.update({
@@ -108,17 +162,43 @@ class AgentTracing:
                 'langfuse.observation.metadata.turn_id': str(message_id or 0),
                 'langfuse.observation.metadata.session_url': attributes['moyai.session_url'],
             })
+        if self.settings.langsmith_api_key:
+            attributes.update({
+                'langsmith.span.kind': {'AGENT': 'chain', 'LLM': 'llm', 'TOOL': 'tool'}.get(kind, 'chain'),
+                'langsmith.span.tags': 'moyai-devin,' + self.settings.trace_environment,
+                'langsmith.metadata.thread_id': session,
+                'langsmith.metadata.session_id': session,
+                'langsmith.metadata.run_id': run['id'],
+                'langsmith.metadata.turn_id': str(message_id or 0),
+                'langsmith.metadata.session_url': attributes['moyai.session_url'],
+                'langsmith.metadata.environment': self.settings.trace_environment,
+            })
+        if self.settings.braintrust_api_key:
+            attributes.update({
+                'braintrust.span_attributes.type': {'AGENT': 'task', 'LLM': 'llm', 'TOOL': 'tool'}.get(kind, 'task'),
+                'braintrust.metadata.session_id': session,
+                'braintrust.metadata.run_id': run['id'],
+                'braintrust.metadata.turn_id': str(message_id or 0),
+                'braintrust.metadata.session_url': attributes['moyai.session_url'],
+                'braintrust.metadata.environment': self.settings.trace_environment,
+                'braintrust.tags': ['moyai-devin', self.settings.trace_environment],
+            })
+        error = self.content(attrs.get('output.value') or attrs.get('moyai.status') or 'Operation failed') if failed else None
         span = ReadableSpan(
             name=agent_name if root else name, context=context(trace_id, agent_id if root else identifier(span_id, 8)),
             parent=context(trace_id, parent_id) if parent_id else None,
             resource=self.resource, attributes=attributes, kind=SpanKind.INTERNAL,
             start_time=int(start), end_time=max(int(start), int(end)),
-            status=Status(StatusCode.ERROR if failed else StatusCode.OK),
+            status=Status(StatusCode.ERROR, error) if failed else Status(StatusCode.OK),
+            # LangSmith maps exception events to errors; status alone is lost.
+            events=[Event('exception', {'exception.message': error}, timestamp=int(end))] if failed else [],
         )
         if self.processor is not None:
             self.processor.on_end(span)
         for outbox in self.outboxes:
             outbox.enqueue(span, connection)
+        if root and self.events:
+            self.events.enqueue(span, connection)
 
     @best_effort
     def finish_turn(self, run_id, message_id, output, status, connection=None):
@@ -153,6 +233,7 @@ class AgentTracing:
         private_memory = is_memory_tool(name)
         self.emit(run, run.get('active_message_id'), name, str(data['call_id']), start, end,
                   {'gen_ai.operation.name': 'execute_tool', 'openinference.span.kind': 'TOOL',
+                   'gen_ai.tool.name': name, 'gen_ai.tool.call.id': str(data['call_id']),
                    'tool.name': name, 'input.value': self.content('[private tool payload omitted]' if private_memory else data.get('input')),
                    'output.value': self.content('[private tool payload omitted]' if private_memory else data.get('output')),
                    'moyai.status': str(data.get('status', 'completed'))}, failed=data.get('status') == 'error')
@@ -163,31 +244,47 @@ class AgentTracing:
         inputs = [{'role': 'user', 'content': m.get('content')}
                   for m in messages if isinstance(m, dict) and m.get('role') == 'user'][-5:]
         outputs = []
-        for choice in response.get('choices', []):
+        for choice in response.get('choices', [])[:5]:
             message = choice.get('message') if isinstance(choice, dict) else None
             if not isinstance(message, dict):
                 continue
             # Tool arguments/results have their own spans and privacy policy.
-            outputs.append({'content': message.get('content'), 'tool_names': [
+            outputs.append({'role': 'assistant', 'content': message.get('content'), 'tool_names': [
                 call.get('function', {}).get('name') for call in message.get('tool_calls', []) or []
                 if isinstance(call, dict)]})
+        input_value, input_messages = self.model_content(inputs)
+        output_value, output_messages = self.model_content(outputs)
         attrs = {'gen_ai.operation.name': 'chat', 'openinference.span.kind': 'LLM',
                  'gen_ai.request.model': run.get('active_model') or run.get('model', ''),
                  'llm.model_name': run.get('active_model') or run.get('model', ''),
-                 'gen_ai.response.id': request_id, 'input.value': self.content(inputs),
-                 'output.value': self.content(outputs), 'moyai.status': status}
+                 'gen_ai.response.id': request_id, 'input.value': input_value,
+                 'output.value': output_value, 'moyai.status': status}
+        model = attrs['gen_ai.request.model']
+        provider = model.partition('/')[0] if '/' in model else 'openai'
+        attrs.update({'gen_ai.system': provider, 'gen_ai.provider.name': provider,
+                      'gen_ai.response.model': self.content(response.get('model') or model),
+                      'gen_ai.input.messages': input_messages,
+                      'gen_ai.output.messages': output_messages,
+                      'input.mime_type': 'application/json', 'output.mime_type': 'application/json'})
         for source, target in [('prompt_tokens', 'input_tokens'), ('completion_tokens', 'output_tokens')]:
             value = response.get('usage', {}).get(source)
             if isinstance(value, int):
                 attrs['gen_ai.usage.' + target] = value
+        if all('gen_ai.usage.' + key in attrs for key in ('input_tokens', 'output_tokens')):
+            attrs['gen_ai.usage.total_tokens'] = attrs['gen_ai.usage.input_tokens'] + attrs['gen_ai.usage.output_tokens']
+        # Let Langfuse map GenAI usage to its canonical input/output pricing
+        # keys; overriding usage_details with *_tokens breaks inferred costs.
         self.emit(run, run.get('active_message_id'), 'chat ' + attrs['gen_ai.request.model'],
                   request_id, start, time.time_ns(), attrs, failed=status != 'completed')
 
     def start(self):
-        for outbox in self.outboxes:
+        for outbox in self.exporters():
             outbox.start()
 
+    def exporters(self):
+        return [*self.outboxes, *([self.events] if self.events else [])]
+
     async def close(self):
-        await asyncio.gather(*(outbox.close() for outbox in self.outboxes))
+        await asyncio.gather(*(outbox.close() for outbox in self.exporters()))
         if self.processor:
             await asyncio.to_thread(self.processor.shutdown)
