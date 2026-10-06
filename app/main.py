@@ -34,7 +34,7 @@ from .identities import SlackIdentities
 from .agents import AgentCoordinator, TOOLS as AGENT_TOOLS
 from .github_setup import routes as github_routes
 from .credentials import Credentials, Invoke, Materialize, TOOLS as CREDENTIAL_TOOLS
-from .skills import Skills
+from .skills import Skills, TOOL_NAMES as SKILL_TOOLS
 from .memory import Memory, TOOL_NAMES as MEMORY_TOOLS
 from .session_folders import SessionFolders
 from sandbox.memory_history import scrub_memory_history
@@ -712,7 +712,7 @@ def create_app(settings: Settings | None = None):
                 raise HTTPException(422, 'Invalid item key.') from None
             await checkpoints.flush()
             return result
-        if body.name in {'skills_load','skills_save','skills_read_file'}:
+        if body.name in SKILL_TOOLS:
             try:
                 result = skills.call(run,body.name,body.arguments)
             except ValidationError:
