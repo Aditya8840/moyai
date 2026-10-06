@@ -109,8 +109,12 @@ def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
         def close(self): calls.append('closed')
         def run_conversation(self, *args, **kwargs):
             assert any(e[2].get('phase') == 'execution_started' for e in events)
+            instructions = kwargs['system_message']
+            assert 'before the first tool call' in instructions
+            assert 'Do not send only a status tag as the opening' in instructions
+            assert 'Before delegating to agents' in instructions
             calls.append('inference')
-            self.commentary('<status>Auditing UI and schema changes</status>')
+            self.commentary('<status>Auditing UI and schema changes</status>I’m checking the UI and schema before making changes.')
             self.commentary('<status>Verifying the corrected behavior</status>One public milestone.',
                             already_streamed=False)
             return {'final_response': '<status>Finishing the task</status>Done',
@@ -152,7 +156,8 @@ def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
     assert not any(e[3].get('startup_retry') for e in events)
     assert [(kind, message) for kind, message, data, _ in events if data.get('phase') == 'focus'] == [
         ('status', 'Auditing UI and schema changes'), ('status', 'Verifying the corrected behavior')]
-    assert [message for kind, message, _, _ in events if kind == 'message'] == ['One public milestone.']
+    assert [message for kind, message, _, _ in events if kind == 'message'] == [
+        'I’m checking the UI and schema before making changes.', 'One public milestone.']
     assert [message for kind, message, _, _ in events if kind == 'final'] == ['Done']
     assert (tmp_path / 'artifacts/result.md').read_text() == 'Done'
 
