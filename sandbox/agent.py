@@ -19,6 +19,7 @@ try:
     from .startup import StartupUnavailable
     from .project_environment import prepare_project
     from .memory_history import scrub_memory_history
+    from .goals import GoalLoop, run_goal_conversation
 except ImportError:
     from broker_relay import BrokerRelay
     from artifacts import collect_archive
@@ -30,6 +31,7 @@ except ImportError:
     from startup import StartupUnavailable
     from project_environment import prepare_project
     from memory_history import scrub_memory_history
+    from goals import GoalLoop, run_goal_conversation
 LOCK = threading.Lock()
 ACTIVITY_INPUT_ID = None
 
@@ -131,15 +133,26 @@ def run_agent(spec, relay):
     print("Discovered workspace tools:", discovered, file=sys.stderr, flush=True)
     rotation = RotationDeadline(spec.get("rotation_seconds", 0))
     waiting = AgentWait(relay)
+    goal = GoalLoop(Path('/session/goal.json'), spec['run_id'],
+                    restore=not (spec.get('fresh_child') or spec.get('workspace_warning')),
+                    continuation=bool(spec.get('continuation')))
+    if not spec.get('continuation'):
+        goal.accept(spec['prompt'])
     steering = ActiveTurnSteering(relay, lambda item: prepare_attachments(
-        {**spec, 'attachments': item.get('attachments', [])}, os.environ['WORKSPACE_RUN_TOKEN']))
+        {**spec, 'attachments': item.get('attachments', [])}, os.environ['WORKSPACE_RUN_TOKEN']),
+        on_input=lambda item: goal.steer(item['content']))
     activity = ActivityReporter(emit, tracing=bool(spec.get('tracing_enabled')))
+    def tool_complete(call_id, name, args, result):
+        activity.complete(call_id, name, args, result)
+        goal.tool_complete(call_id, name, args, result)
     def step(*args):
         waiting.step(agent)
         if not waiting.requested:
             steering.step(agent)
             if not steering.requested:
                 rotation.step(agent)
+        if not waiting.requested and not rotation.requested and not steering.requested:
+            goal.step(agent)
         if not waiting.requested and not rotation.requested and not steering.requested:
             emit('status', 'Preparing the next step', {'activity_version': 1, 'phase': 'processing'})
     agent = AIAgent(
@@ -149,7 +162,7 @@ def run_agent(spec, relay):
         max_iterations=spec["max_iterations"] or sys.maxsize, run_budget_seconds=spec["timeout"],
         skip_memory=True, skip_background_review=True, quiet_mode=True, cwd=str(workspace),
         tool_start_callback=activity.start,
-        tool_complete_callback=activity.complete,
+        tool_complete_callback=tool_complete,
         interim_assistant_callback=activity.commentary,
         step_callback=step,
         clarify_callback=lambda *args, **kwargs: "Ask the user for the missing information in your final response, then wait for their next chat message.",
@@ -320,13 +333,11 @@ def run_agent(spec, relay):
         if spec.get("project_environment"):
             project = spec["project_environment"]
             system_message += "\nPrepared project environment (admin configuration):\n" + project.get("instructions", "")
-        while True:
-            result = agent.run_conversation(prompt, conversation_history=history, system_message=system_message)
-            # A correction can race with the last response boundary. Hermes
-            # returns any undrained input; continue it within this same app turn.
-            if not result.get('pending_steer') or result.get('interrupted') or result.get('failed'):
-                break
-            prompt, history = result['pending_steer'], result['messages']
+        result = run_goal_conversation(agent, prompt, history, system_message, goal,
+            suspended=lambda: bool(waiting.requested or rotation.requested or steering.requested or
+                                   relay.last_error or relay.wait_group or getattr(relay, 'wait_credential', '')),
+            notify=lambda: emit('status', 'Continuing toward the goal',
+                                {'activity_version': 1, 'phase': 'processing'}))
         steering.close()
         completed = result.get("completed") is True and not result.get("interrupted") and not result.get("partial")
         wait_group = waiting.group if waiting.can_continue(result) else ''
@@ -343,6 +354,7 @@ def run_agent(spec, relay):
         emit("final", summary, completed=completed, continuation=bool(continuing), wait_group=wait_group, wait_credential=wait_credential, steer_message_id=steered,
              steering_applied=steering.receipts())
         (artifacts / "result.md").write_text(summary)
+        goal.save()
         if spec.get("chat_enabled"):
             if not isinstance(result.get("messages"), list):
                 raise RuntimeError("Hermes did not return conversation history")

@@ -133,7 +133,7 @@ def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'test-token')
     monkeypatch.setenv('HERMES_HOME', '/home')
     monkeypatch.chdir(tmp_path)
-    spec = {'broker_url':'https://example.test','repo_url':'','model':'test','max_iterations':0,'timeout':None,'prompt':'Question'}
+    spec = {'run_id':'startup-test','broker_url':'https://example.test','repo_url':'','model':'test','max_iterations':0,'timeout':None,'prompt':'Question'}
     assert agent.run(spec) == 75
     assert calls == ['closed']
     assert events[-1][3]['startup_retry'] == {'version':1,'stage':'workspace_tools','reason':'HTTP 503'}

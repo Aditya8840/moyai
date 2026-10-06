@@ -56,7 +56,7 @@ def requested_skills(content, available):
     for name in re.findall(r'(?<!\S)/(?:skills?[ \t]+)?(' + reference + r')(?![\w:/.-])', prose):
         # A bare /tmp or /help is not automatically a missing skill. Explicit
         # scoped choices still report revoked/archived skills to the requester.
-        if ':' in name or name in names:
+        if name != 'goal' and (':' in name or name in names):
             references.append(name)
     return list(dict.fromkeys(references))[:10]
 
