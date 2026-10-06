@@ -34,7 +34,7 @@ from .identities import SlackIdentities
 from .agents import AgentCoordinator, TOOLS as AGENT_TOOLS
 from .github_setup import routes as github_routes
 from .credentials import Credentials, Invoke, Materialize, TOOLS as CREDENTIAL_TOOLS
-from .skills import Skills
+from .skills import Skills, TOOL_NAMES as SKILL_TOOLS
 from .memory import Memory, TOOL_NAMES as MEMORY_TOOLS
 from .session_folders import SessionFolders
 from sandbox.memory_history import scrub_memory_history
@@ -184,6 +184,8 @@ def create_app(settings: Settings | None = None):
     automations = Automations(store, settings, security, manager, connectors, environments, checkpoints)
     from .automation_tools import AutomationTools, TOOL_NAMES as AUTOMATION_TOOLS
     automation_tools = AutomationTools(automations, credentials.same_requester)
+    from .model_tools import ModelTools, TOOL_NAMES as MODEL_TOOLS
+    model_tools = ModelTools(store, settings)
     manager.automations = automations
     slack.automation_events = automations.events
     login_attempts = []
@@ -221,6 +223,7 @@ def create_app(settings: Settings | None = None):
     google = GoogleSignIn(settings, security, store)
     app.state.google_signin = google
     app.state.session_titles = session_titles
+    app.include_router(session_titles.routes(security))
     app.include_router(google.routes())
     app.include_router(user_roles.routes(security))
     app.state.user_roles = user_roles
@@ -243,6 +246,7 @@ def create_app(settings: Settings | None = None):
     app.include_router(computer.routes())
     app.state.automations = automations
     app.state.automation_tools = automation_tools
+    app.state.model_tools = model_tools
     app.include_router(automations.routes())
     app.state.skills = skills
     app.state.environments = environments
@@ -389,16 +393,16 @@ def create_app(settings: Settings | None = None):
         return {"name": body.name}
 
     @app.get("/api/runs")
-    async def runs(request: Request, focus: str = ''):
+    async def runs(request: Request, focus: str = '', scope: Literal['all', 'mine'] | None = None):
         owner = session_folders.actor(request)
+        if scope == 'all':
+            security.require(request, admin=True)
+        if scope is None:
+            scope = 'all' if security.role(request) == 'admin' else 'mine'
         memberships = session_folders.memberships(owner)
-        ids = [row['id'] for row in store.rows("SELECT id FROM runs WHERE parent_run_id='' ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 100")]
-        # Filed sessions remain reachable even after leaving the recent 100.
-        ids = list(dict.fromkeys([*ids, *memberships]))
         selected = store.run(focus) if re.fullmatch(r'[0-9a-f]{32}', focus) else None
         parent_id = (selected['parent_run_id'] or selected['id']) if selected else ''
-        if parent_id and parent_id not in ids and store.run(parent_id):
-            ids.append(parent_id)
+        ids = store.sidebar_run_ids(owner if scope == 'mine' else None, [*memberships, parent_id])
         runs = {run_id: {**public_run(store.run(run_id)), 'folder_id': memberships.get(run_id), 'children': []} for run_id in ids}
         if ids:
             children = store.rows('SELECT id,parent_run_id,agent_label,status,mode,created_at,updated_at FROM runs WHERE parent_run_id IN (' + ','.join('?' for _ in ids) + ') ORDER BY created_at,id', ids)
@@ -670,9 +674,13 @@ def create_app(settings: Settings | None = None):
         run = require_run(run_id, request)
         body = await broker_body(request, '/control')
         if isinstance(body, dict) and body.get('version') == 2:
-            result = message_queue.live_control(run_id, run['active_message_id'], body.get('applied', []))
+            if body.get('receipt_only') is True:
+                message_queue.acknowledge(run_id, run['active_message_id'], body.get('applied', []))
+                result = {'steer_message_id': None}
+            else:
+                result = message_queue.live_control(run_id, run['active_message_id'], body.get('applied', []))
             await checkpoints.flush()
-            return result
+            return {**result, 'receipt_only_supported': True}
         target = message_queue.accept_steer(run_id, run['active_message_id'])
         if target:
             await checkpoints.flush()
@@ -681,7 +689,7 @@ def create_app(settings: Settings | None = None):
     @app.get("/broker/{run_id}/tools")
     async def tool_list(run_id: str, request: Request):
         run = require_run(run_id, request)
-        return automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
+        return model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.post("/broker/{run_id}/tools/call")
@@ -691,6 +699,15 @@ def create_app(settings: Settings | None = None):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.name in MODEL_TOOLS:
+            try:
+                result = model_tools.call(run, body.name, body.arguments)
+            except ValidationError:
+                raise HTTPException(422, 'Invalid model arguments. Use model_list and the current tool schema.') from None
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from None
+            await checkpoints.flush()
+            return result
         if body.name in AUTOMATION_TOOLS:
             try:
                 return await automation_tools.call(run, body.name, body.arguments)
@@ -712,7 +729,7 @@ def create_app(settings: Settings | None = None):
                 raise HTTPException(422, 'Invalid item key.') from None
             await checkpoints.flush()
             return result
-        if body.name in {'skills_load','skills_save','skills_read_file'}:
+        if body.name in SKILL_TOOLS:
             try:
                 result = skills.call(run,body.name,body.arguments)
             except ValidationError:
@@ -759,6 +776,7 @@ def create_app(settings: Settings | None = None):
         try:
             result = (await connectors.github.call(run, body.name, arguments) if provider == 'github'
                       else await connectors.my_linear_issues(run) if body.name == 'linear_my_issues'
+                      else await connectors.call(body.name, arguments, run=run) if body.name == 'slack_send'
                       else await connectors.call(body.name, arguments))
             store.event(run_id, "tool", f"{body.name} completed")
             return result

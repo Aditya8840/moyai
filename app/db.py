@@ -157,6 +157,9 @@ class Store:
             for name in ('model', 'active_model', 'pending_result', 'checkpoint_error', 'parent_run_id', 'agent_group_id', 'agent_label', 'side_chat_of', 'side_chat_context', 'display_title', 'title_attempted_at'):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_owner ON runs(owner_id,id)')
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_participant ON messages(user_id,run_id) WHERE role='user'")
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_users_linked ON users(linked_user_id)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id)')
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_title_backfill ON runs(created_at DESC,id DESC) WHERE chat_enabled=1 AND parent_run_id='' AND agent_label='' AND display_title='' AND title_attempted_at=''")
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_side_chat ON runs(side_chat_of,created_at)')
@@ -205,6 +208,36 @@ class Store:
     def rows(self, sql, params=()):
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(sql, params)]
+
+    def sidebar_run_ids(self, user_id=None, extra_ids=()):
+        """Filter before the recent limit and apply the same scope to filed/focused runs.
+
+        Identity links affect this shared-workspace view only, never authorization.
+        A submission remains participation even when subsequently soft-deleted.
+        """
+        prefix, params, predicate = '', [], "parent_run_id=''"
+        if user_id is not None:
+            prefix = """WITH identities AS (
+                SELECT ? AS id WHERE ? != ''
+                UNION SELECT id FROM users WHERE kind='slack' AND linked_user_id=?
+            ), contributed AS (
+                SELECT id FROM runs WHERE owner_id IN (SELECT id FROM identities)
+                UNION SELECT run_id FROM messages
+                    WHERE role='user' AND user_id IN (SELECT id FROM identities)
+            ), mine AS (
+                SELECT CASE WHEN parent_run_id='' THEN id ELSE parent_run_id END AS id
+                FROM runs WHERE id IN (SELECT id FROM contributed)
+            ) """
+            params = [user_id, user_id, user_id]
+            predicate += ' AND id IN (SELECT id FROM mine)'
+        query = prefix + 'SELECT id FROM runs WHERE ' + predicate
+        ids = [row['id'] for row in self.rows(query + ' ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 100', params)]
+        # Bound placeholders even for accounts with many personally filed sessions.
+        extras = list(dict.fromkeys(extra_ids))
+        for offset in range(0, len(extras), 500):
+            batch = extras[offset:offset + 500]
+            ids.extend(row['id'] for row in self.rows(query + ' AND id IN (' + ','.join('?' for _ in batch) + ')', [*params, *batch]))
+        return list(dict.fromkeys(ids))
 
     def run(self, run_id: str):
         rows = self.rows("SELECT * FROM runs WHERE id=?", (run_id,))
@@ -400,7 +433,12 @@ class Store:
                 conn.execute("UPDATE messages SET status=? WHERE run_id=? AND steering_parent_id=? AND status='injected'", (status, run_id, message_id))
                 conn.execute("UPDATE messages SET steering_parent_id=NULL,queue_locked=0 WHERE run_id=? AND steering_parent_id=? AND status='queued'", (run_id, message_id))
                 if status != 'steered':
-                    conn.execute("INSERT INTO messages(run_id,role,content,status,created_at,model,user_id) SELECT ?,'assistant',?,?,?,model,user_id FROM messages WHERE id=?", (run_id, content, status, now(), message_id))
+                    # Input models remain the original admission receipt. The
+                    # answer records the final model after a conversational switch.
+                    conn.execute("""INSERT INTO messages(run_id,role,content,status,created_at,model,user_id)
+                        SELECT ?,'assistant',?,?,?,CASE WHEN r.active_message_id=m.id AND r.active_model!=''
+                        THEN r.active_model ELSE m.model END,m.user_id FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.id=?""",
+                                 (run_id, content, status, now(), message_id))
                 if self.tracing:
                     # Commit the answer and its pending span together. A crash
                     # after saving the answer must not lose its root trace.

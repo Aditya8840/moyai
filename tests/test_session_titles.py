@@ -96,9 +96,9 @@ async def test_real_sdk_persistence_and_original_content(tmp_path,monkeypatch):
     await drain(service)
     body=json.loads(requests[0].content)
     assert str(requests[0].url)=='https://gateway.example/v1/chat/completions'
-    assert body['model']=='fireworks_ai/deepseek-v4-pro'
+    assert body['model']=='openai/gpt-4.1-nano'
     assert body['stream'] is False and body['max_tokens']==96
-    assert not body.get('tools') and body['tool_choice']=='none'
+    assert not body.get('tools') and 'tool_choice' not in body and 'parallel_tool_calls' not in body
     assert len(body['messages'][1]['content'])==4000
     saved=Store(tmp_path).run(run['id'])
     assert saved['display_title']=='Improve session navigation'

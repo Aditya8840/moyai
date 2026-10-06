@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     litellm_api_base: str = ""
     litellm_api_key: str = ""
     session_titles_enabled: bool = True
-    session_title_model: str = Field(default="fireworks_ai/deepseek-v4-pro", min_length=1, max_length=200)
+    session_title_model: str = Field(default="openai/gpt-4.1-nano", min_length=1, max_length=200)
     session_title_timeout_seconds: float = Field(default=8, ge=0.1, le=60)
     session_title_concurrency: int = Field(default=2, ge=1, le=8)
     session_title_backfill_limit: int = Field(default=50, ge=0, le=128)
@@ -228,7 +228,9 @@ class Settings(BaseSettings):
             'claude/opus-5-5': 'anthropic/claude-opus-5-5', 'claude-opus-5-5': 'anthropic/claude-opus-5-5',
             'glm': 'fireworks_ai/glm-5p3', 'glm-5.3': 'fireworks_ai/glm-5p3',
             'glm-5p3': 'fireworks_ai/glm-5p3',
+            'glm 5.3': 'fireworks_ai/glm-5p3', 'glm 5p3': 'fireworks_ai/glm-5p3',
         }
+        aliases.update({item['name'].lower(): item['id'] for item in self.model_choices()})
         selected = value if value is not None else fallback or self.agent_model or (self.allowed_models() or [''])[0]
         selected = aliases.get(selected.strip().lower(), selected.strip())
         if selected not in self.allowed_models():

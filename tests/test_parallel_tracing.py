@@ -34,11 +34,18 @@ def test_reject_invalid_routing(field, value):
         settings(**{field: value})
 
 
-async def test_five_receivers_get_identical_tree_and_raindrop_gets_interaction(tmp_path):
+@pytest.mark.parametrize('linked_slack', [False, True])
+async def test_five_receivers_get_identical_tree_and_raindrop_gets_interaction(tmp_path, linked_slack):
     store = Store(tmp_path)
     tracing = store.tracing = AgentTracing(store, settings(langsmith_workspace_id='workspace-id'))
+    actor = store.identity({'method': 'google', 'identity': {'sub': 'private-user', 'email': 'alice@example.com'}})
+    if linked_slack:
+        with store.connect() as conn:
+            slack = store.slack_identity_in(conn, 'T12345678', 'U12345678')
+            conn.execute("UPDATE users SET linked_user_id=?,email='outdated@example.com' WHERE id=?", (actor, slack))
+        actor = slack
     run = store.create_run('Read probe.txt ls-secret', '', 'modal', [], chat_enabled=True,
-                           model='openai/gpt-6-astra', user_id='google:private-user')
+                           model='openai/gpt-6-astra', user_id=actor)
     message = store.claim_message(run['id'])
     run = store.run(run['id'])
     stamp = time.time_ns()
@@ -90,11 +97,13 @@ async def test_five_receivers_get_identical_tree_and_raindrop_gets_interaction(t
     assert event['event_id'] == root.trace_id.hex()
     assert event['ai_data']['convo_id'] == run['id']
     assert event['ai_data']['output'] == '15 [redacted]'
-    assert event['user_id'] != 'google:private-user'
+    assert event['user_id'] == 'alice@example.com'
     for s in exported:
+        assert attrs(s)['user.id'] == 'alice@example.com'
+        assert attrs(s)['traceloop.association.properties.user_id'] == event['user_id']
         assert attrs(s)['traceloop.association.properties.event_id'] == event['event_id']
         assert attrs(s)['langsmith.metadata.thread_id'] == run['id']
-    for private in (b'ls-secret', b'bt-secret', b'rain-secret', b'lf-secret', b'private-system', b'private-reasoning', b'google:private-user'):
+    for private in (b'ls-secret', b'bt-secret', b'rain-secret', b'lf-secret', b'private-system', b'private-reasoning', b'google:private-user', b'slack:T12345678:U12345678', b'outdated@example.com'):
         assert private not in ls.content + event_request.content
     assert not any(await asyncio.gather(*(box.export_once() for box in tracing.exporters())))
     await tracing.close()

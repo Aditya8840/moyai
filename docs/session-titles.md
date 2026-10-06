@@ -10,8 +10,12 @@ their hierarchy. The original prompt and transcript are never rewritten.
 
 `app/session_titles.py` uses the OpenAI Agents SDK with an explicit
 `OpenAIChatCompletionsModel`, pointed to `LITELLM_API_BASE` and
-`LITELLM_API_KEY`. Its default model is exactly
-`fireworks_ai/deepseek-v4-pro`, independent of the main chat model.
+`LITELLM_API_KEY`. Its default model is `openai/gpt-4.1-nano`, independent
+of the main chat model. Administrators can change the exact gateway model ID
+under **Settings → Session title model**. The saved workspace-wide value
+survives restarts and overrides `SESSION_TITLE_MODEL`. Changes apply to new
+title attempts without restarting; existing titles and attempts are preserved.
+The setting never changes gateway credentials or the main conversation model.
 
 The agent has no tools or handoffs. SDK tracing is disabled, requests do not
 stream, and both SDK and HTTP retries are disabled. The first 4,000 characters
@@ -25,7 +29,7 @@ Configuration defaults:
 | Variable | Default |
 | --- | --- |
 | `SESSION_TITLES_ENABLED` | `true` |
-| `SESSION_TITLE_MODEL` | `fireworks_ai/deepseek-v4-pro` |
+| `SESSION_TITLE_MODEL` | `openai/gpt-4.1-nano` |
 | `SESSION_TITLE_TIMEOUT_SECONDS` | `8` |
 | `SESSION_TITLE_CONCURRENCY` | `2` |
 | `SESSION_TITLE_BACKFILL_LIMIT` | `50` |
@@ -46,12 +50,19 @@ the real SDK through a mocked HTTP transport to detect usage-schema changes.
 - Python tests cover actual SDK request construction, persistence, unchanged
   history, gateway errors/timeouts, migration, backfill, shutdown, web and Slack.
 - CJS tests cover safe titles, original-prompt search, hierarchy and live refresh.
-- The local browser demo uses the real app in explicitly labeled demo mode;
-  it verifies cleaned fallback names and searching the original request, not
-  live generated title quality.
-- Live verification against the authorized providers gateway could not obtain
-  a title. Its authenticated model catalog did not list the requested model.
-  The exact requested model is preserved; no substitute is silently selected.
+- The browser demo saved `openai/gpt-4.1-nano` in Settings and created a local
+  demo chat. A foreground process ran the actual title service against the
+  authorized LiteLLM gateway, using that saved model and the same database.
+  Gateway credentials were injected only into that process, not the browser
+  server. The main chat reply was simulated; the title inference was real.
+- Input: “Can you help us fix the sidebar so that chat sessions have short
+  readable task names?” Live output: “Improve sidebar task name display”.
+  Browser polling displayed that title in the sidebar and header without
+  changing the original request.
+- Live testing exposed an HTTP 400 when tool-choice options were sent without
+  tools. Those options are now omitted; the agent still has no tools/handoffs.
+- The original `fireworks_ai/deepseek-v4-pro` remains selectable by exact ID
+  on gateways that serve it. No fallback model is silently substituted.
 
 For live verification with a gateway enabling the requested model, supply
 `LITELLM_API_BASE` and `LITELLM_API_KEY` securely and run
