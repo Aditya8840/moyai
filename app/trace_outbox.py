@@ -12,7 +12,7 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
 log = logging.getLogger(__name__)
 
 
-TABLES = frozenset({'trace_outbox', 'trace_outbox_raindrop'})
+TABLES = frozenset({'trace_outbox', 'trace_outbox_raindrop', 'trace_outbox_langfuse'})
 
 
 class TraceOutbox:

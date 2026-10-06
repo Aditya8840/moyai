@@ -84,6 +84,31 @@ from trace text like the other credentials.
 After deploying, run a short task, then open Raindrop and look for the `moyai-devin` service
 in Events. Issues show up once Raindrop has enough conversations to cluster.
 
+## Agent Traces in Langfuse
+
+Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` in Render's private environment,
+with `LANGFUSE_BASE_URL=https://us.cloud.langfuse.com` for the US project. Both keys
+are required; leaving either empty disables Langfuse only. Set
+`LANGFUSE_TRACING_ENVIRONMENT=production` on Render (local default: `development`).
+Other HTTPS Langfuse regions and self-hosted base URLs are supported.
+
+Moyai exports its existing sanitized OpenTelemetry spans directly to
+`/api/public/otel/v1/traces`, using Basic authentication and Langfuse's v4 ingestion
+header. No additional SDK or sandbox credentials are needed. Agent turns appear
+as **agent** observations, model requests as **generations** with model/token usage,
+and tools as **tool** observations. Follow-ups have separate traces grouped by the
+Moyai session ID; delegated agents retain their existing parent/child hierarchy.
+Every observation carries the environment, `moyai-devin` tag, and a link to its chat.
+System prompts, private reasoning, images and private tool payloads remain excluded.
+
+Langfuse has its own persistent `trace_outbox_langfuse` table, retries and receipts.
+An outage does not block LiteLLM/Raindrop delivery or agent responses. Keys are
+redacted from trace text and never committed or passed into agent sandboxes.
+After deployment, run a short task that uses a terminal/file tool, then find
+**moyai-devin** in Langfuse and verify the task, generation, tool output and final
+answer. Check the session view for follow-up turns. Existing completed turns are
+not backfilled.
+
 ## Personal memory across sessions
 
 **Settings → Memory** holds personal preferences, corrections, project context,

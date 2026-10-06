@@ -83,7 +83,8 @@ class AgentTracing:
 
     def content(self, value):
         return trace_content(value, secrets=(self.settings.litellm_api_key, self.settings.litellm_trace_api_key,
-            self.settings.raindrop_write_key, self.settings.modal_token_secret))
+            self.settings.raindrop_write_key, self.settings.langfuse_secret_key,
+            self.settings.langfuse_public_key, self.settings.modal_token_secret))
 
     def emit(self, run, message_id, name, span_id, start, end, attrs, *, root=False, failed=False, connection=None):
         trace_id, agent_id, parent_id, session, agent_name = self.identity(run, message_id, connection)
@@ -95,6 +96,18 @@ class AgentTracing:
                       # Raindrop groups spans into conversations and turns by these keys.
                       'traceloop.association.properties.convo_id': session,
                       'traceloop.association.properties.event_id': format(trace_id, '032x'), **attrs}
+        if self.settings.langfuse_public_key and self.settings.langfuse_secret_key:
+            # Propagate filterable context to every observation (Langfuse v4).
+            attributes.update({
+                'langfuse.observation.type': {'AGENT': 'agent', 'LLM': 'generation', 'TOOL': 'tool'}.get(
+                    attrs.get('openinference.span.kind'), 'span'),
+                'langfuse.trace.name': 'moyai-devin',
+                'langfuse.trace.tags': ['moyai-devin'],
+                'langfuse.environment': self.settings.langfuse_tracing_environment,
+                'langfuse.observation.metadata.run_id': run['id'],
+                'langfuse.observation.metadata.turn_id': str(message_id or 0),
+                'langfuse.observation.metadata.session_url': attributes['moyai.session_url'],
+            })
         span = ReadableSpan(
             name=agent_name if root else name, context=context(trace_id, agent_id if root else identifier(span_id, 8)),
             parent=context(trace_id, parent_id) if parent_id else None,

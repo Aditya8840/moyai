@@ -1,4 +1,5 @@
 from pathlib import Path
+import base64
 import re
 
 from pydantic import Field, field_validator
@@ -48,6 +49,11 @@ class Settings(BaseSettings):
     raindrop_trace_endpoint: str = "https://api.raindrop.ai/v1/traces"
     raindrop_write_key: str = ""
     raindrop_project_id: str = ""
+    langfuse_base_url: str = "https://us.cloud.langfuse.com"
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_tracing_environment: str = Field(default="development", min_length=1, max_length=40,
+                                             pattern=r"^[a-z0-9_-]+$")
     agent_model: str = ""
     modal_token_id: str = ""
     modal_token_secret: str = ""
@@ -118,6 +124,16 @@ class Settings(BaseSettings):
             raise ValueError('Use an HTTPS trace endpoint ending in /v1/traces, without credentials or query parameters.')
         return value
 
+    @field_validator('langfuse_base_url')
+    @classmethod
+    def validate_langfuse_base_url(cls, value):
+        from urllib.parse import urlsplit
+        parsed = urlsplit(value)
+        if value and (parsed.scheme != 'https' or not parsed.hostname or parsed.username or
+                      parsed.password or parsed.query or parsed.fragment):
+            raise ValueError('Use an HTTPS Langfuse base URL without credentials or query parameters.')
+        return value.rstrip('/')
+
     @field_validator('github_repositories')
     @classmethod
     def validate_github_repositories(cls, value):
@@ -137,6 +153,10 @@ class Settings(BaseSettings):
             project = {'X-Raindrop-Project-Id': self.raindrop_project_id} if self.raindrop_project_id else {}
             destinations.append(('trace_outbox_raindrop', self.raindrop_trace_endpoint,
                                  {'Authorization': 'Bearer ' + self.raindrop_write_key, **project}))
+        if self.langfuse_base_url and self.langfuse_public_key and self.langfuse_secret_key:
+            credentials = base64.b64encode(f'{self.langfuse_public_key}:{self.langfuse_secret_key}'.encode()).decode()
+            destinations.append(('trace_outbox_langfuse', self.langfuse_base_url + '/api/public/otel/v1/traces',
+                                 {'Authorization': 'Basic ' + credentials, 'x-langfuse-ingestion-version': '4'}))
         return destinations
 
     def allowed_github_repositories(self) -> list[str]:
