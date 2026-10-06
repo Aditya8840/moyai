@@ -116,6 +116,31 @@ class AgentTracing:
                 if 'tool_names' in message:
                     message['tool_names'] = message['tool_names'][:min(10, len(message['tool_names']) // 2)]
 
+    def user_identity(self, run, message_id, connection=None):
+        """Export SSO email, without changing internal ownership or account IDs."""
+        if connection is None:
+            with self.store.connect() as conn:
+                return self.user_identity(run, message_id, conn)
+        # Late completion/replay must use this turn's author, not the next
+        # active participant in a shared session.
+        message = connection.execute(
+            "SELECT user_id FROM messages WHERE run_id=? AND id=? AND role='user'",
+            (run['id'], message_id)).fetchone() if message_id else None
+        user = message['user_id'] if message else run.get('active_user_id') or run.get('owner_id')
+        if not user:
+            return None
+        account = connection.execute('''SELECT u.kind,u.email,linked.email AS sso_email
+            FROM users u LEFT JOIN users linked ON linked.id=u.linked_user_id AND linked.kind='google'
+            WHERE u.id=?''', (user,)).fetchone()
+        if account:
+            email = account['email'] if account['kind'] == 'google' else account['sso_email']
+            if email:
+                return email
+        # Unlinked Slack and shared-password accounts have no SSO email.
+        # Preserve stable attribution rather than inventing an email or
+        # leaking raw provider IDs. Never substitute the session owner's email.
+        return format(identifier('user:' + user, 16), '032x')
+
     def emit(self, run, message_id, name, span_id, start, end, attrs, *, root=False, failed=False, connection=None):
         trace_id, agent_id, parent_id, session, agent_name = self.identity(run, message_id, connection)
         parent_id = parent_id if root else agent_id
@@ -127,10 +152,9 @@ class AgentTracing:
                       # Raindrop groups spans into conversations and turns by these keys.
                       'traceloop.association.properties.convo_id': session,
                       'traceloop.association.properties.event_id': format(trace_id, '032x'), **attrs}
-        user = run.get('active_user_id') or run.get('owner_id')
+        user = self.user_identity(run, message_id, connection)
         if user:
-            # Stable grouping without exporting Google/Slack identity strings.
-            attributes['user.id'] = format(identifier('user:' + user, 16), '032x')
+            attributes['user.id'] = user
             attributes['traceloop.association.properties.user_id'] = attributes['user.id']
         kind = attrs.get('openinference.span.kind')
         if kind == 'TOOL':
