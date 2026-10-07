@@ -75,7 +75,7 @@ recipe over a newer one. Named build sandboxes, a detached supervisor, and the
 SQLite journal allow the web worker to reattach after deployment without rerunning
 installation steps. Lost machines require a new build. Cleanup is retried.
 
-Discovered environments are selectable under **Context & tools** before their
+Discovered environments are selectable under **Session setup** before their
 first build, and become enabled after validation. Custom manual environments
 must be built and enabled. **Automatic** matches an explicit repository; with no repository,
 it selects the administrator's workspace default. This includes new Slack

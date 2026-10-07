@@ -227,11 +227,11 @@ body { color: var(--text); letter-spacing: -0.006em; }
 .child-sessions { margin-left: 24px; border-left-color: #e6e6e6; }
 .folder-toggle { font-size: 13px; color: #6b6b6b; }
 .unfiled-heading { font-size: 13px; color: #6b6b6b; margin: 16px 8px 4px; }
-.rail-foot { display: flex; align-items: center; gap: 4px; border-top: 1px solid var(--line); margin: 0; padding: 6px 0 0; }
+.rail-foot { display: flex; flex-direction: column; align-items: stretch; flex-shrink: 0; gap: 4px; border-top: 1px solid var(--line); margin: 0; padding: 10px 0 0; }
+.rail-account-actions { display: flex; align-items: center; gap: 4px; }
 .rail-settings { flex: 1; min-width: 0; width: auto; height: auto; padding: 8px; color: #262626; }
-.rail-settings-copy { display: flex; flex-direction: column; min-width: 0; gap: 3px; }
-.rail-foot small { font-size: 11px; line-height: 16px; color: #858585; margin: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rail-foot #logout { margin-left: auto; width: 30px; height: 30px; padding: 0; color: #8a8a8a; }
+.rail-foot small { font-size: 12px; line-height: 17px; color: var(--muted); margin: 0; padding: 0 8px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+.rail-foot #logout { display: flex; align-items: center; gap: 6px; flex-shrink: 0; margin-left: auto; min-height: 34px; padding: 6px 8px; color: #666; font-size: 13px; white-space: nowrap; }
 
 /* Header */
 .workspace { grid-template-rows: 44px minmax(0, 1fr); }
@@ -309,6 +309,7 @@ body { color: var(--text); letter-spacing: -0.006em; }
 .composer textarea::placeholder { color: #9a9a9a; }
 .composer-toolbar, .reply-composer .composer-toolbar { padding: 6px 10px 10px 10px; min-height: 48px; gap: 4px; }
 .attach-button, .record-button.is-idle, .skill-picker-button { width: 32px; height: 32px; padding: 0 !important; display: grid; place-items: center; border-radius: 8px; color: #5f5f5f; font-size: 13px; }
+.composer-toolbar .attach-button { display: flex; gap: 5px; width: auto; padding: 0 7px !important; }
 .attach-button:hover, .record-button.is-idle:hover, .skill-picker-button:hover { background: #f1f1f1; color: #1f1f1f; }
 .composer-toolbar .model-picker, .reply-composer .model-picker, .reply-composer .composer-model { margin-left: auto; margin-right: 0; }
 .composer-model { font-size: 14px; color: #6b6b6b; padding-right: 6px; }

@@ -533,7 +533,9 @@ async function boot(){
     }
     document.querySelectorAll('.rail button').forEach(b=>b.disabled=false);
     [state.config,state.organization]=await Promise.all([api('/api/config'),api('/api/organization')]);await refreshRuns();
-    if(!session.local){$('.rail-foot small').textContent=session.identity?session.identity.email:state.role==='admin'?'Organization admin':'Organization member';$('.rail-foot small').title=state.role==='admin'?'Organization admin':'Organization member';$('#logout')?.remove();$('.rail-foot').insertAdjacentHTML('beforeend','<button id="logout" class="quiet" aria-label="Sign out">⏻</button>');$('#logout').onclick=async()=>{await api('/api/logout',{method:'POST'});location.reload();};}
+    $('#logout').hidden=!!session.local;
+    if(!session.local){$('.rail-foot small').textContent=session.identity?session.identity.email:state.role==='admin'?'Organization admin':'Organization member';$('.rail-foot small').title=state.role==='admin'?'Organization admin':'Organization member';}
+    $('#logout').onclick=async()=>{const button=$('#logout');button.disabled=true;try{await api('/api/logout',{method:'POST'});location.reload();}catch(error){button.disabled=false;showError(error);}};
     const linkedRun=location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]; if(linkedRun)await openRun(linkedRun);else await navigate(settingsViews.has(location.hash.slice(1))?location.hash.slice(1):'tasks');
     if(new URLSearchParams(location.search).get('connection')){toast(location.search.includes('success')?'App connected.':'Connection cancelled.');history.replaceState(null,'','/#connections');}
     registerWebMCP();
