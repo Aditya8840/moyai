@@ -38,16 +38,16 @@ class HarnessDefinition:
 # Keep the persisted Claude ID stable for sessions created before this refactor.
 HARNESSES = {
     'hermes': HarnessDefinition('hermes', 'Hermes', 'hermes_harness', 'HermesAgent', live_steering=True),
-    'claude-agent-sdk': HarnessDefinition('claude-agent-sdk', 'Claude Code · LiteLLM',
+    'claude-agent-sdk': HarnessDefinition('claude-agent-sdk', 'Claude Code',
         'litellm_harness', 'LiteLLMAgent', model_prefix='anthropic/claude-', litellm_harness='CLAUDE_CODE',
         runtime_binding='claude'),
-    'codex': HarnessDefinition('codex', 'Codex · OpenAI', 'litellm_harness', 'LiteLLMAgent',
+    'codex': HarnessDefinition('codex', 'Codex', 'litellm_harness', 'LiteLLMAgent',
         model_prefix='openai/', litellm_harness='CODEX', runtime_binding='codex'),
     'opencode': HarnessDefinition('opencode', 'OpenCode', 'litellm_harness', 'LiteLLMAgent',
         litellm_harness='OPENCODE', runtime_binding='opencode'),
     'deepagents': HarnessDefinition('deepagents', 'Deep Agents', 'litellm_harness', 'LiteLLMAgent',
         litellm_harness='DEEPAGENTS', runtime_binding='deepagents'),
-    'tool-loop': HarnessDefinition('tool-loop', 'Tool Loop · LiteLLM', 'litellm_harness', 'LiteLLMAgent',
+    'tool-loop': HarnessDefinition('tool-loop', 'Tool Loop', 'litellm_harness', 'LiteLLMAgent',
         litellm_harness='TOOL_LOOP', runtime_binding='tool-loop'),
 }
 

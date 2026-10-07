@@ -40,14 +40,14 @@ verification. A coverage test detects additions to the pinned upstream enum.
 New sessions have an **Agent harness** picker beside the model picker:
 
 - **Hermes** (default): existing runtime and all configured model choices.
-- **Claude Code · LiteLLM**: `Harness.CLAUDE_CODE`, Claude's native file/shell tools
+- **Claude Code**: `Harness.CLAUDE_CODE`, Claude's native file/shell tools
   and Moyai MCP tools; requires an allowed `anthropic/claude-*` model.
-- **Codex · OpenAI**: `Harness.CODEX`, requires an allowed `openai/*` model.
+- **Codex**: `Harness.CODEX`, requires an allowed `openai/*` model.
   This is the Codex runtime, not the separate OpenAI Agents SDK.
 - **OpenCode**: `Harness.OPENCODE`, native tools and configured Moyai MCP server.
 - **Deep Agents**: `Harness.DEEPAGENTS`, LangChain runtime with LiteLLM's sandbox
   backend and `workspace_tools`/`workspace_call` access to the authorized MCP catalog.
-- **Tool Loop · LiteLLM**: `Harness.TOOL_LOOP`, explicit workspace file/shell tools
+- **Tool Loop**: `Harness.TOOL_LOOP`, explicit workspace file/shell tools
   plus the same authorized MCP catalog wrappers.
 
 The persisted ID `claude-agent-sdk` remains stable for compatibility. New Slack
