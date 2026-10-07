@@ -109,7 +109,7 @@ test('child rows use their assignment label and expose selection and live status
   assert.match(html,/aria-current="page"/);
   assert.match(html,/Cases 21–40/);
   assert.match(html,/data-run="worker-b"/);
-  assert.match(html,/session-state/);assert.match(html,/Ready/);
+  assert.match(html,/session-indicator/);assert.match(html,/Ready/);
   assert.match(h.sidebarRow(runs[0].children[0],true),/session-spinner/);
   assert.match(h.sidebarRow(runs[0].children[0],true),/Working now/);
 });

@@ -260,7 +260,7 @@ test('the composer follows live SSE focus, reconnects and lifecycle state withou
     return nodes.get(selector);
   };
   const data=run(),state={selected:'chat',chatRun:data,modelDrafts:{},runs:[]};
-  const context={state,$:node,MoyaiActivity,MoyaiGoal:require('../app/static/goal-status.js'),terminal:new Set(['completed','failed','cancelled','interrupted','idle']),savedFiles:{decorate(){}},
+  const context={state,document:{hidden:false},$:node,MoyaiActivity,MoyaiGoal:require('../app/static/goal-status.js'),terminal:new Set(['completed','failed','cancelled','interrupted','idle']),savedFiles:{decorate(){}},
     renderMarkdown:text=>text,esc:text=>text,copyText(){},modelName:()=>'',statusLabel:text=>text,renderSidebar(){},
     refreshChat:async id=>refreshes.push(id),showError:error=>{throw error;},clearTimeout(){},setTimeout(){},
     EventSource:class{constructor(){sources.push(this);this.handlers={};}addEventListener(name,handler){this.handlers[name]=handler;}close(){}}};
