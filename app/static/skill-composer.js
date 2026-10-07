@@ -24,7 +24,16 @@ function matchingSkills(skills, query) {
 }
 
 function skillCompletion(value, range, skill) {
-  return value.slice(0, range.start) + skillToken(skill) + ' ' + value.slice(range.end).replace(/^ /, '');
+  return value.slice(0, range.start) + completionToken(skill) + ' ' + value.slice(range.end).replace(/^ /, '');
+}
+
+function completionToken(item) {return item.builtin ? '/goal' : skillToken(item);}
+
+function goalCompletions(range, value) {
+  return !value.slice(0, range.start).trim() && 'goal'.startsWith(range.query) ? [{
+    name:'goal', reference:'goal', scope:'builtin', builtin:true,
+    description:'Keep working until verified completion. Set an objective, or use status, pause, resume, clear.',
+  }] : [];
 }
 
 function bindInlineSkillPicker(input, form) {
@@ -32,6 +41,16 @@ function bindInlineSkillPicker(input, form) {
   popup.className = 'skill-inline';
   popup.hidden = true;
   form.append(popup);
+  const goalHint = document.createElement('div');
+  goalHint.className = 'goal-draft';
+  goalHint.setAttribute('role', 'status');
+  form.prepend(goalHint);
+  function updateGoalHint() {
+    const text = globalThis.MoyaiGoal?.draft(input.value);
+    goalHint.hidden = !text;
+    goalHint.textContent = text || '';
+  }
+  updateGoalHint();
   const listId = input.id + '-skill-options';
   input.setAttribute('aria-autocomplete', 'list');
   input.setAttribute('aria-controls', listId);
@@ -61,13 +80,13 @@ function bindInlineSkillPicker(input, form) {
     if (!range || dismissed === signature()) {close(); return;}
     if (range.query !== lastQuery) selected = 0;
     lastQuery = range.query;
-    matches = matchingSkills(skills || [], range.query);
+    matches = [...goalCompletions(range, input.value), ...matchingSkills(skills || [], range.query)];
     selected = Math.min(selected, Math.max(0, matches.length - 1));
     const empty = loading ? 'Loading your skills…' : error || (skills?.length ? 'No matching skills. Try another name.' : 'No skills yet. Add one in your Skills library.');
-    popup.innerHTML = `<div class="skill-inline-heading"><span>✦ Skills</span><small>Personal & organization</small></div>
-      <div id="${listId}" class="skill-inline-list" role="listbox" aria-label="Available skills">${matches.map((skill, index) =>
-        `<button type="button" role="option" tabindex="-1" id="${listId}-${index}" aria-selected="${index === selected}" data-skill-index="${index}" class="skill-inline-option"><span class="skill-inline-icon" aria-hidden="true">✦</span><span class="skill-inline-copy"><span class="skill-inline-name">/${esc(skill.name)}<small>${skill.scope === 'personal' ? 'Personal' : 'Organization'}</small></span><span class="skill-inline-description">${esc(skill.description)}</span></span></button>`
-      ).join('')}</div>${!matches.length ? `<p class="skill-inline-empty" role="status">${esc(empty)}</p>` : ''}
+    popup.innerHTML = `<div class="skill-inline-heading"><span>✦ Commands & skills</span><small>Built-in · Personal · Organization</small></div>
+      <div id="${listId}" class="skill-inline-list" role="listbox" aria-label="Available commands and skills">${matches.map((skill, index) =>
+        `<button type="button" role="option" tabindex="-1" id="${listId}-${index}" aria-selected="${index === selected}" data-skill-index="${index}" class="skill-inline-option"><span class="skill-inline-icon" aria-hidden="true">✦</span><span class="skill-inline-copy"><span class="skill-inline-name">/${esc(skill.name)}<small>${skill.builtin ? 'Built-in' : skill.scope === 'personal' ? 'Personal' : 'Organization'}</small></span><span class="skill-inline-description">${esc(skill.description)}</span></span></button>`
+      ).join('')}</div>${!matches.length || error ? `<p class="skill-inline-empty" role="status">${esc(empty)}</p>` : ''}
       <div class="skill-inline-footer"><span>${matches.length ? '↑ ↓ navigate · Enter select · Esc close' : 'Type / followed by a skill name'}</span><button type="button" class="quiet" data-skill-library>${error ? 'Retry' : 'Skills library ↗'}</button></div>`;
     popup.hidden = false;
     if (matches.length) input.setAttribute('aria-activedescendant', listId + '-' + selected);
@@ -84,6 +103,7 @@ function bindInlineSkillPicker(input, form) {
 
   function refresh() {
     if (destroyed) return;
+    updateGoalHint();
     const query = slashSkillQuery(input.value, input.selectionStart, input.selectionEnd);
     if (query && dismissed !== signature() && !loading && !error && (!skills || Date.now() - loadedAt > 30000)) {
       loading = true;
@@ -97,10 +117,10 @@ function bindInlineSkillPicker(input, form) {
   function choose(index) {
     const current = slashSkillQuery(input.value, input.selectionStart, input.selectionEnd);
     const skill = matches[index];
-    if (!current || !skill || loading) return;
+    if (!current || !skill || (loading && !skill.builtin)) return;
     const value = skillCompletion(input.value, current, skill);
     if (input.maxLength > 0 && value.length > input.maxLength) {toast('Shorten your message before adding this skill.'); return;}
-    const caret = current.start + skillToken(skill).length + 1;
+    const caret = current.start + completionToken(skill).length + 1;
     input.value = value;
     input.focus();
     input.setSelectionRange(caret, caret);
@@ -129,7 +149,7 @@ function bindInlineSkillPicker(input, form) {
   return {
     destroy() {
       destroyed = true;
-      close(); popup.remove();
+      close(); popup.remove(); goalHint.remove();
       window.removeEventListener('resize', position);
       window.visualViewport?.removeEventListener('resize', position);
       window.visualViewport?.removeEventListener('scroll', position);

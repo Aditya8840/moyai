@@ -6,25 +6,46 @@
     try{
       const data=JSON.parse(value);
       const tabs=(Array.isArray(data.tabs)?data.tabs:[]).filter(t=>t&&['computer','files','file','activity','chat'].includes(t.kind)&&typeof t.id==='string'&&t.id.length<1200&&(!t.chatId||/^[a-f0-9]{32}$/.test(t.chatId))).slice(0,16).map(t=>({...t,title:String(t.title||'Tab').slice(0,200),draft:String(t.draft||'').slice(0,16000)}));
-      return {visible:!!data.visible,active:String(data.active||''),width:Math.max(30,Math.min(70,Number(data.width)||52)),tabs};
-    }catch{return {visible:false,active:'',width:52,tabs:[]};}
+      return {visible:!!data.visible,active:String(data.active||''),width:Math.max(30,Math.min(70,Number(data.width)||60)),tabs};
+    }catch{return {visible:false,active:'',width:60,tabs:[]};}
+  }
+  function fileTree(files){
+    const root={directories:new Map(),files:[],path:''};
+    files.forEach((file,index)=>{
+      const parts=file.path.split('/');let node=root;
+      for(const name of parts.slice(0,-1)){
+        if(!node.directories.has(name))node.directories.set(name,{name,path:node.path?node.path+'/'+name:name,directories:new Map(),files:[]});
+        node=node.directories.get(name);
+      }
+      node.files.push({file,index});
+    });
+    return root;
+  }
+  function renderFileTree(files,{escape:esc,size,expanded=new Set(),search=false}){
+    function render(node){
+      const folders=[...node.directories.values()].sort((a,b)=>a.name.localeCompare(b.name));
+      const leaves=[...node.files].sort((a,b)=>a.file.name.localeCompare(b.file.name));
+      return folders.map(folder=>`<details class="panel-file-folder" data-folder="${esc(folder.path)}" ${search||expanded.has(folder.path)?'open':''}><summary title="${esc(folder.path)}"><span aria-hidden="true">▱</span> ${esc(folder.name)}</summary><div class="panel-file-children">${render(folder)}</div></details>`).join('')+leaves.map(({file:f,index})=>`<button type="button" class="panel-file-choice" data-file="${index}" title="${esc(f.path)}"><span aria-hidden="true">${f.kind==='video'?'▷':f.kind==='image'?'▧':'▤'}</span><span><strong>${esc(f.name)}</strong><small>${size(f.size)}</small></span><span aria-hidden="true">↗</span></button>`).join('');
+    }
+    return render(fileTree(files))||'<p class="panel-empty">No matching saved files.</p>';
   }
   function create({run,layout,api,computer,markdown,escape:esc,size,user,models,toast,onCreated}){
     const key='moyai-panel:'+user+':'+run.id;
     let initial;try{initial=restore(localStorage.getItem(key));}catch{initial=restore(null);}
     const tabs=new Map();let active='',visible=false,width=initial.width,disposed=false,expanded=false,sideChats=[],restoring=true;
     const activity=layout.querySelector('#session-details');
+    const ico=(name,size=16)=>globalThis.MoyaiIcon?.(name,size)||'';const glyph={computer:'monitor',files:'file',file:'file',chat:'chat',activity:'list'};
     const panel=document.createElement('aside');panel.className='workspace-panel';panel.id='workspace-panel';panel.setAttribute('aria-label','Session workspace');panel.hidden=true;
-    panel.innerHTML=`<div class="panel-resize" role="separator" aria-label="Resize workspace panel" aria-orientation="vertical" tabindex="0"></div><header class="panel-header"><div class="panel-tabs" role="tablist" aria-label="Workspace tabs"></div><div class="panel-tools"><button type="button" class="panel-icon" data-add aria-label="Add tab" aria-expanded="false">＋</button><button type="button" class="panel-icon" data-expand aria-label="Expand workspace panel">⤢</button><button type="button" class="panel-icon" data-hide aria-label="Hide workspace panel">◫</button></div></header><div class="panel-menu" hidden><label><span aria-hidden="true">⌕</span><input type="search" placeholder="Search tabs…" aria-label="Search workspace tabs"></label><div data-menu-items></div></div><div class="panel-views"></div><div data-parking hidden></div>`;
+    panel.innerHTML=`<div class="panel-resize" role="separator" aria-label="Resize workspace panel" aria-orientation="vertical" tabindex="0"></div><header class="panel-header"><div class="panel-tabs" role="tablist" aria-label="Workspace tabs"></div><div class="panel-tools"><button type="button" class="panel-icon" data-add aria-label="Add tab" title="Add tab" aria-expanded="false">${ico('plus',18)}</button><span class="panel-spacer"></span><button type="button" class="panel-icon" data-expand aria-label="Expand workspace panel" title="Expand">${ico('expand',17)}</button><button type="button" class="panel-icon" data-hide aria-label="Hide workspace panel" title="Hide panel">${ico('panel',18)}</button></div></header><div class="panel-menu" hidden><label><span aria-hidden="true">⌕</span><input type="search" placeholder="Search tabs…" aria-label="Search workspace tabs"></label><div data-menu-items></div></div><div class="panel-views"></div><div data-parking hidden></div>`;
     layout.append(panel);const q=s=>panel.querySelector(s),views=q('.panel-views'),parking=q('[data-parking]');
     if(activity){parking.append(activity);activity.hidden=false;}
     function save(){if(restoring)return;try{localStorage.setItem(key,JSON.stringify({visible,active,width,tabs:[...tabs.values()].map(t=>({id:t.id,kind:t.kind,title:t.title,path:t.path,chatId:t.chatId,draft:t.draft||'',clientId:t.clientId,submission:t.submission,model:t.model}))}));}catch{}}
-    function resize(next){width=Math.max(30,Math.min(70,next));layout.style.setProperty('--panel-width',width+'%');q('.panel-resize').setAttribute('aria-valuenow',String(Math.round(width)));save();}
+    function resize(next){width=Math.max(30,Math.min(70,next));layout.style.setProperty('--panel-width',width+'%');layout.closest('.workspace')?.style.setProperty('--workspace-panel-width',width+'%');q('.panel-resize').setAttribute('aria-valuenow',String(Math.round(width)));save();}
     resize(width);q('.panel-resize').setAttribute('aria-valuemin','30');q('.panel-resize').setAttribute('aria-valuemax','70');
     q('.panel-resize').onpointerdown=event=>{event.preventDefault();const grip=event.currentTarget;grip.setPointerCapture(event.pointerId);grip.onpointermove=e=>{const rect=layout.getBoundingClientRect();resize((rect.right-e.clientX)/rect.width*100);};grip.onpointerup=grip.onpointercancel=()=>{grip.onpointermove=null;save();};};
     q('.panel-resize').onkeydown=e=>{if(['ArrowLeft','ArrowRight'].includes(e.key)){e.preventDefault();resize(width+(e.key==='ArrowLeft'?3:-3));}};
     function draw(){
-      q('.panel-tabs').innerHTML=[...tabs.values()].map(t=>`<div class="panel-tab ${t.id===active?'is-active':''}"><button type="button" role="tab" id="tab-${t.uid}" aria-controls="view-${t.uid}" aria-selected="${t.id===active}" tabindex="${t.id===active?'0':'-1'}" data-tab="${esc(t.id)}" title="${esc(t.title)}"><span aria-hidden="true">${{computer:'▧',files:'▤',file:'▤',chat:'◌',activity:'☷'}[t.kind]}</span><span>${esc(t.title)}</span></button><button type="button" data-close="${esc(t.id)}" aria-label="Close ${esc(t.title)} tab">×</button></div>`).join('');
+      q('.panel-tabs').innerHTML=[...tabs.values()].map(t=>`<div class="panel-tab ${t.id===active?'is-active':''}"><button type="button" role="tab" id="tab-${t.uid}" aria-controls="view-${t.uid}" aria-selected="${t.id===active}" tabindex="${t.id===active?'0':'-1'}" data-tab="${esc(t.id)}" title="${esc(t.title)}"><span class="panel-tab-icon">${ico(glyph[t.kind],15)}</span><span>${esc(t.title)}</span></button><button type="button" data-close="${esc(t.id)}" aria-label="Close ${esc(t.title)} tab">${ico('x',13)}</button></div>`).join('');
       q('.panel-tabs').querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>select(b.dataset.tab));
       q('.panel-tabs').querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>remove(b.dataset.close));
       document.querySelector('#toggle-details')?.setAttribute('aria-expanded',String(visible&&tabs.get(active)?.kind==='activity'));
@@ -39,7 +60,7 @@
     function drawMenu(){
       const search=q('.panel-menu input').value.toLowerCase();
       const items=[...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox browser'}]:[]),{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.map(c=>({kind:'chat',title:c.prompt,detail:'Saved side chat',chatId:c.id}))].filter(i=>i.title.toLowerCase().includes(search));
-      q('[data-menu-items]').innerHTML=items.map((item,i)=>`<button type="button" data-item="${i}"><span aria-hidden="true">${{computer:'▧',files:'▤',chat:'◌',activity:'☷'}[item.kind]}</span><span><strong>${esc(item.title)}</strong><small>${esc(item.detail)}</small></span></button>`).join('')||'<p class="panel-empty">No matching tabs.</p>';
+      q('[data-menu-items]').innerHTML=items.map((item,i)=>`<button type="button" data-item="${i}"><span class="panel-tab-icon">${ico(glyph[item.kind],16)}</span><span><strong>${esc(item.title)}</strong><small>${esc(item.detail)}</small></span></button>`).join('')||'<p class="panel-empty">No matching tabs.</p>';
       q('[data-menu-items]').querySelectorAll('button').forEach(b=>b.onclick=()=>{const item=items[Number(b.dataset.item)];open(item.kind,item.chatId?{chatId:item.chatId,title:item.title}:{});menu(false);});
     }
     q('.panel-menu input').oninput=drawMenu;q('[data-add]').onclick=()=>menu(q('.panel-menu').hidden);q('[data-hide]').onclick=hide;
@@ -76,7 +97,18 @@
         const catalog=await api(`/api/runs/${run.id}/files`);if(!current())return;
         if(t.kind==='files'){
           t.element.innerHTML='<div class="panel-file-search"><input type="search" aria-label="Find a saved file" placeholder="Find a file…"><button type="button" data-refresh aria-label="Refresh saved files">↻</button></div><div class="panel-file-list"></div><p class="panel-footnote">Latest saved version · Select a file to open it in a tab.</p>';
-          function list(){const term=t.element.querySelector('input').value.toLowerCase(),files=catalog.files.filter(f=>f.path.toLowerCase().includes(term));t.element.querySelector('.panel-file-list').innerHTML=files.map((f,i)=>`<button class="panel-file-choice" data-file="${i}"><span aria-hidden="true">${f.kind==='video'?'▷':f.kind==='image'?'▧':'▤'}</span><span><strong>${esc(f.name)}</strong><small>${esc(f.path)} · ${size(f.size)}</small></span><span aria-hidden="true">↗</span></button>`).join('')||'<p class="panel-empty">No matching saved files.</p>';t.element.querySelectorAll('[data-file]').forEach(b=>b.onclick=()=>openFile(files[Number(b.dataset.file)]));}
+          t.expandedFolders??=new Set();
+          const input=t.element.querySelector('input');input.value=t.fileSearch||'';
+          function list(){
+            t.fileSearch=input.value;const term=input.value.toLowerCase(),files=catalog.files.filter(f=>f.path.toLowerCase().includes(term));
+            t.element.querySelector('.panel-file-list').innerHTML=renderFileTree(files,{escape:esc,size,expanded:t.expandedFolders,search:!!term});
+            t.element.querySelectorAll('[data-folder]').forEach(folder=>folder.ontoggle=()=>{
+              // Search temporarily opens ancestors; don't overwrite browsing state.
+              if(term||!folder.isConnected)return;
+              if(folder.open)t.expandedFolders.add(folder.dataset.folder);else t.expandedFolders.delete(folder.dataset.folder);
+            });
+            t.element.querySelectorAll('[data-file]').forEach(b=>b.onclick=()=>openFile(files[Number(b.dataset.file)]));
+          }
           t.element.querySelector('input').oninput=list;t.element.querySelector('[data-refresh]').onclick=()=>mount(t);list();return;
         }
         const file=catalog.files.find(f=>f.archive_path===t.path);if(!file)throw new Error('This file is no longer in the latest saved workspace. Open Files to choose another.');
@@ -100,7 +132,7 @@
       input.value=t.draft||'';input.oninput=()=>{t.draft=input.value;save();};
       function showEmpty(){if(!t.chatId)log.innerHTML='<div class="side-chat-empty"><span aria-hidden="true">◌</span><h3>Ask about this session</h3><p>Ask a question, explore another idea, or discuss the work without interrupting Moyai.</p></div>';}
       function drawChat(data){
-        current=data;const transcript=MoyaiQueue.presentation(data).transcript,next=JSON.stringify(transcript);const bottom=log.scrollHeight-log.scrollTop-log.clientHeight<100;
+        current=data;syncTitles([data]);const transcript=MoyaiQueue.presentation(data).transcript,next=JSON.stringify(transcript);const bottom=log.scrollHeight-log.scrollTop-log.clientHeight<100;
         if(signature!==next){
           signature=next;const slots=new Map([...log.querySelectorAll('[data-activity-slot]')].map(slot=>[slot.dataset.activitySlot,slot]));
           log.innerHTML=transcript.map(m=>`<article class="side-message ${m.role==='user'?'from-user':''}"><div>${m.role==='user'?'You':'Moyai Devin'}</div><div class="${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.display_content??m.content):markdown(m.content)}</div></article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`).join('');
@@ -131,11 +163,39 @@
       stop.onclick=async()=>{stop.disabled=true;try{await api(`/api/runs/${t.chatId}/cancel`,{method:'POST'});await poll();}catch(e){status.textContent=e.message;}finally{stop.disabled=false;}};
       showEmpty();
     }
+    const {titleFor=(r)=>r.agent_label||r.display_title||r.prompt,matchesSession=(r,s)=>(r.prompt||'').toLowerCase().includes(s)}=arguments[0];
+    // Extend the upstream tab menu without replacing its file-tree setup.
+    drawMenu=function(){
+      const items=menuItems(q('.panel-menu input').value.toLowerCase());
+      q('[data-menu-items]').innerHTML=renderMenuItems(items);
+      q('[data-menu-items]').querySelectorAll('button').forEach(b=>b.onclick=()=>{const item=items[Number(b.dataset.item)];open(item.kind,item.chatId?{chatId:item.chatId,title:item.title}:{});menu(false);});
+    };
+    q('.panel-menu input').oninput=drawMenu;
+    function renderMenuItems(items){
+      return items.map((item,i)=>`<button type="button" data-item="${i}"><span class="panel-tab-icon">${ico(glyph[item.kind],16)}</span><span><strong>${esc(item.title)}</strong><small>${esc(item.detail)}</small></span></button>`).join('')||'<p class="panel-empty">No matching tabs.</p>';
+    }
+    function menuItems(search){
+      // Search both the saved original request and its display title.
+      return [...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox browser'}]:[]),{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.filter(c=>matchesSession(c,search)).map(c=>({kind:'chat',title:titleFor(c),detail:'Saved side chat',chatId:c.id}))].filter(i=>i.chatId||i.title.toLowerCase().includes(search));
+    }
+    function syncTitles(rows){
+      // Do not replace chat tabs or drafts when a background title arrives.
+      if(disposed)return;
+      const byId=new Map(rows.map(row=>[row.id,row]));
+      sideChats=sideChats.map(chat=>byId.has(chat.id)?{...chat,...byId.get(chat.id)}:chat);
+      let changed=false;
+      for(const tab of tabs.values()){
+        const row=byId.get(tab.chatId);if(!row)continue;
+        const title=titleFor(row);if(tab.title!==title){tab.title=title;changed=true;}
+      }
+      if(changed){draw();save();}
+      if(!q('.panel-menu').hidden)drawMenu();
+    }
     initial.tabs.forEach(t=>{if(t.kind!=='computer'||run.mode==='modal')make(t.kind,t);});
     if(initial.visible&&tabs.size)select(tabs.has(initial.active)?initial.active:tabs.keys().next().value);else{active=initial.active;draw();}
     restoring=false;save();
-    api(`/api/runs/${run.id}/side-chats`).then(rows=>{if(!disposed)sideChats=rows;}).catch(()=>{});
-    return {open,openFile,hide,toggle(){if(visible)hide();else if(tabs.size)select(tabs.has(active)?active:tabs.keys().next().value);else open(run.mode==='modal'?'computer':'files');},dispose(){disposed=true;tabs.forEach(t=>{t.deactivate?.();t.dispose?.();});document.removeEventListener('pointerdown',outside);panel.remove();layout.classList.remove('panel-open','panel-expanded');}};
+    api(`/api/runs/${run.id}/side-chats`).then(rows=>{if(!disposed){sideChats=rows;syncTitles(rows);}}).catch(()=>{});
+    return {open,openFile,hide,syncTitles,toggle(){if(visible)hide();else if(tabs.size)select(tabs.has(active)?active:tabs.keys().next().value);else open(run.mode==='modal'?'computer':'files');},dispose(){disposed=true;tabs.forEach(t=>{t.deactivate?.();t.dispose?.();});document.removeEventListener('pointerdown',outside);panel.remove();layout.classList.remove('panel-open','panel-expanded');}};
   }
-  return {create,restore};
+  return {create,restore,fileTree,renderFileTree};
 });

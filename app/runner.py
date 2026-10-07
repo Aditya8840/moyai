@@ -19,6 +19,12 @@ SAVE_WARNING = ("Your answer is saved, but the latest workspace files could not 
                 "they may be incomplete. Queued follow-ups were stopped, and no actions were replayed.")
 
 
+async def refresh_sandbox_files(sandbox):
+    """Refresh our adapter and runtime patches, preserving workspace/history."""
+    for path in sorted([*SANDBOX_FILES.glob('*.py'), *SANDBOX_FILES.glob('hermes-*.patch')]):
+        await sandbox.filesystem.write_text.aio(path.read_text(), f'/opt/workspace-runner/{path.name}')
+
+
 def safe_error_detail(exc, secrets_to_hide=()):
     """Keep useful provider diagnostics without logging credentials or URLs."""
     value = str(exc)
@@ -274,6 +280,7 @@ class RunManager:
                               "/opt/hermes-env/bin/python -m pip install claude-agent-sdk==0.2.163 'mcp<2'",
                               "cd /opt/hermes && /opt/hermes-env/bin/python -c 'from run_agent import AIAgent; import mcp; from cryptography.fernet import Fernet'")
                 .add_local_dir(SANDBOX_FILES, remote_path="/opt/workspace-runner", copy=True)
+                .run_commands("python /opt/workspace-runner/hermes_compat.py")
                 .run_commands("python /opt/workspace-runner/install_access_tools.py",
                               "/opt/hermes-env/bin/python /opt/workspace-runner/harness_dependencies.py")
                 .env({"PYTHONUNBUFFERED": "1", "PYTHONPATH": "/opt/hermes", "HERMES_PYTHON": "/opt/hermes-env/bin/python", "HERMES_HOME": "/tmp/hermes-home", "GIT_TERMINAL_PROMPT": "0"}))
@@ -370,8 +377,7 @@ class RunManager:
         # Restored snapshots can contain an older adapter; refresh only our own
         # runner files, preserving all user workspace files and agent history.
         if snapshot_id:
-            for path in SANDBOX_FILES.glob("*.py"):
-                await sandbox.filesystem.write_text.aio(path.read_text(), f"/opt/workspace-runner/{path.name}")
+            await refresh_sandbox_files(sandbox)
         await sandbox.filesystem.write_text.aio(json.dumps(spec), "/tmp/task.json")
         self.store.update_run(run_id, status="running")
         self.store.event(run_id, "status", "Sandbox ready. Starting Hermes Agent.")

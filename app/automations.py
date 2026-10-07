@@ -258,7 +258,14 @@ class Automations:
             r.status FROM automation_runs a LEFT JOIN runs r ON r.id=a.run_id
             WHERE a.automation_id=? ORDER BY a.created_at DESC LIMIT 20''', (row['id'],))
         result['trigger'] = self.events.public(row, actor)
+        try:
+            result['environment_blocker'] = self.environment_blocker(definition)
+        except HTTPException as exc:
+            result['environment_blocker'] = str(exc.detail)
         return result
+
+    def environment_blocker(self, definition):
+        return self.environments.setup_blocker(definition.environment_id, definition.repo_url) if definition.mode != 'demo' else ''
 
     def save(self, body, owner_id, automation_id=None, *, connection=None):
         definition = body.definition.model_copy(update={'model': self.settings.resolve_model(body.definition.model or None),
@@ -317,6 +324,8 @@ class Automations:
                 if not self.events.ready(row):
                     raise HTTPException(409, 'Configure the webhook or Slack connection before enabling this trigger.')
                 self.validate_execution(Definition.model_validate_json(row['definition']), row['owner_id'])
+                if any(t.event and t.event.provider == 'session' for t in Definition.model_validate_json(row['definition']).triggers):
+                    self.events.seed_session_cursor(conn, automation_id)
             conn.execute("UPDATE automations SET paused=?,revision=revision+1,updated_at=?,sync_error='' WHERE id=?",
                          (body.paused, now(), automation_id))
             result = dict(conn.execute('SELECT * FROM automations WHERE id=?', (automation_id,)).fetchone())
@@ -332,8 +341,10 @@ class Automations:
         if not event and not manual and row['revision'] == revision and not row['paused'] and trigger and trigger.schedule and trigger.schedule.frequency == 'once':
             occurrence = self.once_id(automation_id, trigger)
         error = ''
+        environment_blocker = ''
         try:
             self.validate_execution(definition, row['owner_id'])
+            environment_blocker = self.environment_blocker(definition)
         except (HTTPException, ValueError) as exc:
             error = exc.detail if isinstance(exc, HTTPException) else str(exc)
         with self.store.connect() as conn:
@@ -355,6 +366,10 @@ class Automations:
                     reason = 'Event expired after 24 hours in the inbox.' if event else 'Skipped an occurrence delayed by more than 15 minutes.'
                 elif error:
                     reason = error
+                elif environment_blocker:
+                    if event:
+                        return {'run_id': '', 'outcome': 'waiting', 'detail': environment_blocker}
+                    error = reason = environment_blocker
                 elif conn.execute('''SELECT 1 FROM automation_runs a JOIN runs r ON (r.id=a.run_id OR r.parent_run_id=a.run_id)
                     WHERE a.automation_id=? AND (r.status NOT IN ('idle','completed','failed','cancelled','interrupted')
                     OR EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id AND m.status IN ('queued','running','injected')))''', (automation_id,)).fetchone():

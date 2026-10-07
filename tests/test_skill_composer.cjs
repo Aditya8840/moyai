@@ -21,19 +21,22 @@ function fixture(api = async () => ({skills:catalog})) {
   };
   const popup = {hidden:true,style:{},classList:{toggle(){}},innerHTML:'',
     querySelector:()=>null,addEventListener(){},remove(){this.removed=true;}};
-  const form = {append(){},getBoundingClientRect:()=>({top:400,bottom:500}),addEventListener(){}};
-  const ctx = {api,document:{activeElement:input,createElement:()=>popup,getElementById:()=>null},
+  const hint = {hidden:true,setAttribute(){},remove(){}};
+  let elements=0;
+  const form = {append(){},prepend(){},getBoundingClientRect:()=>({top:400,bottom:500}),addEventListener(){}};
+  const ctx = {api,document:{activeElement:input,createElement:()=>elements++?hint:popup,getElementById:()=>null},
     window:{innerHeight:800,addEventListener:(name,fn)=>globals.set(name,fn),removeEventListener:name=>globals.delete(name)},
     skillToken:skill=>'/'+skill.reference,
     esc:value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;'),
     toast:()=>{},Event:class{constructor(type){this.type=type;}},
   };
   vm.createContext(ctx);
+  vm.runInContext(readFileSync('app/static/goal-status.js','utf8'),ctx);
   vm.runInContext(readFileSync('app/static/skill-composer.js','utf8'),ctx);
   const controller = ctx.bindInlineSkillPicker(input,form);
   const type = (value,caret=value.length) => {input.value=value;input.setSelectionRange(caret,caret);input.dispatchEvent({type:'input'});};
   const key = (key,extra={}) => {const event={key,preventDefault(){this.prevented=true;},...extra};return {handled:controller.keydown(event),event};};
-  return {ctx,input,popup,attrs,controller,type,key,globals};
+  return {ctx,input,popup,hint,attrs,controller,type,key,globals};
 }
 
 test('slash completion ignores URLs, paths, code and selected text',()=>{
@@ -68,9 +71,9 @@ test('Enter selects rather than sends; caret and surrounding draft survive',asyn
 test('loading and empty menus cannot accidentally submit, Escape and IME work',async()=>{
   let resolve;
   const b=fixture(()=>new Promise(r=>{resolve=r;}));
-  b.type('/');
+  b.type('/bench');
   assert.equal(b.key('Enter').handled,true);
-  assert.equal(b.input.value,'/');
+  assert.equal(b.input.value,'/bench');
   assert.equal(b.key('Enter',{isComposing:true}).handled,false);
   assert.equal(b.key('Escape').handled,true);
   resolve({skills:[]});await flush();
@@ -89,6 +92,24 @@ test('slow catalog replies cannot reopen a picker after navigation',async()=>{
   assert.equal(b.popup.hidden,true);
   assert.equal(b.popup.removed,true);
   assert.equal(b.globals.size,0);
+});
+
+test('built-in goal works without skills and only at the start of the request',async()=>{
+  const b=fixture(async()=>{throw new Error('Unavailable');});
+  b.type('/go');
+  assert.equal(b.key('Enter').handled,true);
+  assert.equal(b.input.value,'/goal ');
+  assert.equal(b.hint.hidden,false);
+  assert.match(b.hint.textContent,/Add an objective/);
+  await flush();
+  assert.equal(b.popup.hidden,true);
+  b.type('Please /go');
+  assert.doesNotMatch(b.popup.innerHTML,/Built-in<\/small>/);
+  b.type('/goal verify the suite');
+  assert.equal(b.popup.hidden,true);
+  assert.match(b.hint.textContent,/Not running yet/);
+  b.type('ordinary message');
+  assert.equal(b.hint.hidden,true);
 });
 
 test('provider failure is visible and untrusted descriptions stay text',async()=>{

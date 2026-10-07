@@ -14,7 +14,7 @@ from .db import now
 from .progress import active_turn
 from .pr_delivery import link_captures, select_captures, select_prs
 from .security import digest
-from .slack_activity import SlackActivity, threaded
+from .slack_activity import SlackActivity
 
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted', 'idle'}
 COMMANDS = {'stop', 'sleep', 'wake', 'status'}
@@ -174,7 +174,7 @@ class SlackChat:
             try:
                 selected_model = self.settings.resolve_model(directive[1] or '')
             except ValueError:
-                model_error = 'Choose `model astra` or `model opus`, or use the model picker in the web session.'
+                model_error = 'Choose an enabled model: ' + ', '.join(item['name'] for item in self.settings.model_choices()) + '. Use `model glm-5.3`, for example, or the model picker in the web session.'
             prompt = (directive[2] or '').strip()
             if not prompt or model_error:
                 command = 'model'
@@ -188,11 +188,10 @@ class SlackChat:
                 return None
             actor_id = self.store.slack_identity_in(conn, team, user)
             if direct_message and root == ts:
-                existing = conn.execute('SELECT t.*,e.user_id FROM slack_threads t JOIN slack_events e ON e.run_id=t.run_id WHERE t.team_id=? AND t.channel=? AND t.thread_ts=t.started_ts ORDER BY t.started_ts LIMIT 1', (team, channel)).fetchone()
-                if existing:
-                    if existing['user_id'] != user:
-                        return None
-                    root = existing['thread_ts']
+                # Keep the DM participant guard without adopting an older session.
+                existing = conn.execute('SELECT e.user_id FROM slack_threads t JOIN slack_events e ON e.run_id=t.run_id WHERE t.team_id=? AND t.channel=? AND t.thread_ts=t.started_ts ORDER BY t.started_ts LIMIT 1', (team, channel)).fetchone()
+                if existing and existing['user_id'] != user:
+                    return None
             binding = conn.execute('SELECT * FROM slack_threads WHERE team_id=? AND channel=? AND thread_ts=?',
                                    (team, channel, root)).fetchone()
             fresh = False
@@ -289,11 +288,10 @@ class SlackChat:
                         self.settings.resolve_model(fallback=current)
                     message, submit = self.store.enqueue_message_in(conn, run_id, content, 'slack:' + digest(team + channel + ts), selected_model, actor_id)
                     message_id = message['id']
+                    self.store.slack_mentions.queue_in(conn, message_id, team, prompt)
                     if file_ids:
                         conn.execute('INSERT INTO slack_audio_inputs(message_id,files_json) VALUES(?,?)', (message_id, json.dumps(file_ids)))
                     conn.execute('UPDATE slack_threads SET paused=0,last_progress=? WHERE run_id=?', (time.time(), run_id))
-                    if not threaded(binding):
-                        self.queue(conn, run_id, 'received:' + str(message_id), 'reaction', ts)
                     conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'chat','Message received from Slack',?,?)",
                                  (run_id, json.dumps({'message_id': message_id, 'user_id': user}), now()))
                 except ValueError as exc:

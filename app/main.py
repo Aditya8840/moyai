@@ -34,7 +34,7 @@ from .identities import SlackIdentities
 from .agents import AgentCoordinator, TOOLS as AGENT_TOOLS
 from .github_setup import routes as github_routes
 from .credentials import Credentials, Invoke, Materialize, TOOLS as CREDENTIAL_TOOLS
-from .skills import Skills
+from .skills import Skills, TOOL_NAMES as SKILL_TOOLS
 from .memory import Memory, TOOL_NAMES as MEMORY_TOOLS
 from .session_folders import SessionFolders
 from sandbox.memory_history import scrub_memory_history
@@ -174,6 +174,9 @@ def create_app(settings: Settings | None = None):
     manager.persist = checkpoints.flush
     store.execute("INSERT OR IGNORE INTO organization(id,name) VALUES(1,?)", (settings.organization_name,))
     slack = SlackSessions(store, connectors, manager, checkpoints, settings)
+    from .session_titles import SessionTitles
+    session_titles = SessionTitles(store, settings, checkpoints)
+    slack.session_titles = session_titles
     from .message_queue import MessageQueue
     message_queue = MessageQueue(store, slack.chat.change_queued_in)
     identities = SlackIdentities(store, connectors, settings, security, checkpoints)
@@ -182,6 +185,8 @@ def create_app(settings: Settings | None = None):
     automations = Automations(store, settings, security, manager, connectors, environments, checkpoints)
     from .automation_tools import AutomationTools, TOOL_NAMES as AUTOMATION_TOOLS
     automation_tools = AutomationTools(automations, credentials.same_requester)
+    from .model_tools import ModelTools, TOOL_NAMES as MODEL_TOOLS
+    model_tools = ModelTools(store, settings)
     manager.automations = automations
     slack.automation_events = automations.events
     login_attempts = []
@@ -198,9 +203,11 @@ def create_app(settings: Settings | None = None):
         watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
         tracing.start()
         infrastructure.start()
+        session_titles.start()
         try:
             yield
         finally:
+            await session_titles.close()
             await infrastructure.close()
             await automations.close()
             await environments.close()
@@ -216,6 +223,8 @@ def create_app(settings: Settings | None = None):
     app = FastAPI(title="Moyai Devin", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     google = GoogleSignIn(settings, security, store)
     app.state.google_signin = google
+    app.state.session_titles = session_titles
+    app.include_router(session_titles.routes(security))
     app.include_router(google.routes())
     app.include_router(user_roles.routes(security))
     app.state.user_roles = user_roles
@@ -238,6 +247,7 @@ def create_app(settings: Settings | None = None):
     app.include_router(computer.routes())
     app.state.automations = automations
     app.state.automation_tools = automation_tools
+    app.state.model_tools = model_tools
     app.include_router(automations.routes())
     app.state.skills = skills
     app.state.environments = environments
@@ -385,16 +395,16 @@ def create_app(settings: Settings | None = None):
         return {"name": body.name}
 
     @app.get("/api/runs")
-    async def runs(request: Request, focus: str = ''):
+    async def runs(request: Request, focus: str = '', scope: Literal['all', 'mine'] | None = None):
         owner = session_folders.actor(request)
+        if scope == 'all':
+            security.require(request, admin=True)
+        if scope is None:
+            scope = 'all' if security.role(request) == 'admin' else 'mine'
         memberships = session_folders.memberships(owner)
-        ids = [row['id'] for row in store.rows("SELECT id FROM runs WHERE parent_run_id='' ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 100")]
-        # Filed sessions remain reachable even after leaving the recent 100.
-        ids = list(dict.fromkeys([*ids, *memberships]))
         selected = store.run(focus) if re.fullmatch(r'[0-9a-f]{32}', focus) else None
         parent_id = (selected['parent_run_id'] or selected['id']) if selected else ''
-        if parent_id and parent_id not in ids and store.run(parent_id):
-            ids.append(parent_id)
+        ids = store.sidebar_run_ids(owner if scope == 'mine' else None, [*memberships, parent_id])
         runs = {run_id: {**public_run(store.run(run_id)), 'folder_id': memberships.get(run_id), 'children': []} for run_id in ids}
         if ids:
             children = store.rows('SELECT id,parent_run_id,agent_label,status,mode,created_at,updated_at FROM runs WHERE parent_run_id IN (' + ','.join('?' for _ in ids) + ') ORDER BY created_at,id', ids)
@@ -433,6 +443,7 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()
         manager.submit(run)
+        session_titles.schedule(run['id'])
         return public_run(run)
 
     @app.get('/api/runs/{run_id}/side-chats')
@@ -440,7 +451,7 @@ def create_app(settings: Settings | None = None):
         security.require(request)
         if not store.run(run_id):
             raise HTTPException(404, 'Session not found.')
-        return store.rows('SELECT id,prompt,status,model,created_at,updated_at FROM runs WHERE side_chat_of=? ORDER BY created_at,id', (run_id,))
+        return store.rows('SELECT id,prompt,agent_label,display_title,status,model,created_at,updated_at FROM runs WHERE side_chat_of=? ORDER BY created_at,id', (run_id,))
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str, request: Request):
@@ -450,9 +461,11 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(404, "Task not found")
         owners = store.rows('SELECT id,email,name FROM users WHERE id=?', (run['owner_id'],))
         project = environments.context(run)
-        return {**public_run(run), "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": store.messages(run_id),
+        messages = store.messages(run_id)
+        identities.wake.set()  # Resolve newly discovered mentions in saved Slack history.
+        return {**public_run(run), "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": messages,
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
-                "owner": owners[0] if owners else None,
+                "owner": owners[0] if owners else None, "goal": store.goal(run_id),
                 "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),
                 "credential_requests": credentials.pending(run,store.identity(security.session_info(request)),security.role(request)=='admin'),
                 "slack_mirroring": slack.chat.mirroring(run_id),
@@ -484,6 +497,7 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(409, str(exc))
         await checkpoints.flush()
         # Resume even for a duplicate whose first acknowledgement was lost.
+        session_titles.schedule(run_id)
         if store.has_queued_messages(run_id):
             manager.submit(store.run(run_id))
         return {"id": message["id"], "status": message["status"], "model": message['model'], "created": created}
@@ -531,7 +545,7 @@ def create_app(settings: Settings | None = None):
                 if not row["chat_enabled"] and row["status"] in TERMINAL and not manager.is_active(run_id) and len(batch) < 200:
                     yield "event: settled\ndata: {}\n\n"
                     break
-                yield f"event: run-status\ndata: {json.dumps({'status': row['status'], 'active': manager.is_active(run_id), 'model': row['model'], 'active_model': row['active_model'], 'active_message_id': row['active_message_id'], 'checkpoint_error': row['checkpoint_error'], 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
+                yield f"event: run-status\ndata: {json.dumps({'status': row['status'], 'active': manager.is_active(run_id), 'model': row['model'], 'active_model': row['active_model'], 'updated_at': row['updated_at'], 'active_message_id': row['active_message_id'], 'checkpoint_error': row['checkpoint_error'], 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
                 await asyncio.sleep(0.5)
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -668,9 +682,13 @@ def create_app(settings: Settings | None = None):
         run = require_run(run_id, request)
         body = await broker_body(request, '/control')
         if isinstance(body, dict) and body.get('version') == 2:
-            result = message_queue.live_control(run_id, run['active_message_id'], body.get('applied', []))
+            if body.get('receipt_only') is True:
+                message_queue.acknowledge(run_id, run['active_message_id'], body.get('applied', []))
+                result = {'steer_message_id': None}
+            else:
+                result = message_queue.live_control(run_id, run['active_message_id'], body.get('applied', []))
             await checkpoints.flush()
-            return result
+            return {**result, 'receipt_only_supported': True}
         target = message_queue.accept_steer(run_id, run['active_message_id'])
         if target:
             await checkpoints.flush()
@@ -679,7 +697,7 @@ def create_app(settings: Settings | None = None):
     @app.get("/broker/{run_id}/tools")
     async def tool_list(run_id: str, request: Request):
         run = require_run(run_id, request)
-        return automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
+        return model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.post("/broker/{run_id}/tools/call")
@@ -689,6 +707,15 @@ def create_app(settings: Settings | None = None):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.name in MODEL_TOOLS:
+            try:
+                result = model_tools.call(run, body.name, body.arguments)
+            except ValidationError:
+                raise HTTPException(422, 'Invalid model arguments. Use model_list and the current tool schema.') from None
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from None
+            await checkpoints.flush()
+            return result
         if body.name in AUTOMATION_TOOLS:
             try:
                 return await automation_tools.call(run, body.name, body.arguments)
@@ -710,7 +737,7 @@ def create_app(settings: Settings | None = None):
                 raise HTTPException(422, 'Invalid item key.') from None
             await checkpoints.flush()
             return result
-        if body.name in {'skills_load','skills_save','skills_read_file'}:
+        if body.name in SKILL_TOOLS:
             try:
                 result = skills.call(run,body.name,body.arguments)
             except ValidationError:
@@ -757,6 +784,7 @@ def create_app(settings: Settings | None = None):
         try:
             result = (await connectors.github.call(run, body.name, arguments) if provider == 'github'
                       else await connectors.my_linear_issues(run) if body.name == 'linear_my_issues'
+                      else await connectors.call(body.name, arguments, run=run) if body.name == 'slack_send'
                       else await connectors.call(body.name, arguments))
             store.event(run_id, "tool", f"{body.name} completed")
             return result
@@ -930,7 +958,7 @@ def create_app(settings: Settings | None = None):
 
 
 def public_run(run):
-    return {key: value for key, value in run.items() if key not in {"token_hash", "pending_result", "side_chat_context"}}
+    return {key: value for key, value in run.items() if key not in {"token_hash", "pending_result", "side_chat_context", "title_attempted_at"}}
 
 
 app = create_app()

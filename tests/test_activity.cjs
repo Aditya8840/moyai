@@ -255,15 +255,17 @@ test('manual expansion and collapse survive focus changes and completion with ke
 test('the composer follows live SSE focus, reconnects and lifecycle state without exposing focus history',()=>{
   const script=readFileSync('app/static/app.js','utf8'),nodes=new Map(),sources=[],refreshes=[];
   const node=selector=>{
+    if(selector==='#activity-history'||selector==='#goal-status')return null;
     if(!nodes.has(selector))nodes.set(selector,{dataset:{},textContent:'',classList:{toggle(name,value){this[name]=value;}},setAttribute(){},querySelectorAll:()=>[],insertAdjacentHTML(){}});
     return nodes.get(selector);
   };
   const data=run(),state={selected:'chat',chatRun:data,modelDrafts:{},runs:[]};
-  const context={state,$:node,MoyaiActivity,terminal:new Set(['completed','failed','cancelled','interrupted','idle']),savedFiles:{decorate(){}},
+  const context={state,document:{hidden:false},$:node,MoyaiActivity,MoyaiGoal:require('../app/static/goal-status.js'),terminal:new Set(['completed','failed','cancelled','interrupted','idle']),savedFiles:{decorate(){}},
     renderMarkdown:text=>text,esc:text=>text,copyText(){},modelName:()=>'',statusLabel:text=>text,renderSidebar(){},
     refreshChat:async id=>refreshes.push(id),showError:error=>{throw error;},clearTimeout(){},setTimeout(){},
     EventSource:class{constructor(){sources.push(this);this.handlers={};}addEventListener(name,handler){this.handlers[name]=handler;}close(){}}};
   vm.createContext(context);vm.runInContext(
+    script.slice(script.indexOf('function sessionTitle('),script.indexOf('function modelName('))+
     script.slice(script.indexOf('function connectChatStream('),script.indexOf('function updateChat(run'))+
     script.slice(script.indexOf('function renderLiveWork('),script.indexOf('async function copyText'))+
     script.slice(script.indexOf('function eventHTML('),script.indexOf('function renderApprovals(')),context);
@@ -287,7 +289,7 @@ test('side-chat polls replace focus while retaining expanded activity through st
   const log={slots:[],scrollHeight:1000,scrollTop:50,clientHeight:400,querySelectorAll:()=>log.slots,
     set innerHTML(markup){writes++;this.slots=[...markup.matchAll(/data-activity-slot="(\d+)"/g)].map(([,id])=>({dataset:{activitySlot:id},
       details:{open:false},replaceWith(previous){log.slots[log.slots.indexOf(this)]=previous;}}));}};
-  const context={current:null,signature:'',log,status:{},stop:{},send:{},link:{},t:{chatId:'side-chat'},MoyaiQueue,
+  const context={current:null,signature:'',log,status:{},stop:{},send:{},link:{},t:{chatId:'side-chat'},MoyaiQueue,syncTitles(){},
     MoyaiActivity:{...MoyaiActivity,sync(container,data){syncs++;container.slots[0].headline=current(data).headline;},tick(){}},
     markdown:text=>text,esc:text=>text,toast(){}};
   vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function drawChat(data)'),script.indexOf('async function poll()')),context);

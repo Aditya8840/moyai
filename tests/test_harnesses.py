@@ -163,6 +163,7 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
         def validate(self): pass
     monkeypatch.setattr(litellm_harness, 'LiteLLMAgent', FakeClaude)
     monkeypatch.setattr(agent, 'prepare_attachments', lambda *a, **k: None)
+    monkeypatch.setattr(agent, 'apply_hermes_patches', lambda: None)
     monkeypatch.setattr(agent, 'prepare_project', lambda *a, **k: None)
     monkeypatch.setattr(agent, 'collect_archive', lambda *a: None)
     monkeypatch.setattr(agent, 'computer_request', lambda *a, **k: {})
@@ -171,7 +172,7 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'test-capability')
     monkeypatch.setenv('HERMES_HOME', '/home')
     monkeypatch.chdir(tmp_path)
-    spec = {'harness': 'claude-agent-sdk', 'broker_url': 'http://test', 'repo_url': '', 'model': OPUS,
+    spec = {'run_id': 'harness-test', 'harness': 'claude-agent-sdk', 'broker_url': 'http://test', 'repo_url': '', 'model': OPUS,
             'prompt': 'test request', 'chat_enabled': True, 'max_iterations': 2, 'timeout': None}
     assert agent.run_agent(spec, relay) == 0
     assert next(e for e in events if e[0] == 'final')[1:] == ('SDK result', {

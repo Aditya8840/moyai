@@ -13,7 +13,7 @@ import modal
 from fastapi import HTTPException
 from .environments import EnvironmentPending
 
-from .runner import RunManager, SANDBOX_FILES, SAVE_WARNING, TERMINAL, safe_error_detail
+from .runner import RunManager, SAVE_WARNING, TERMINAL, safe_error_detail, refresh_sandbox_files
 from .security import digest
 
 
@@ -366,8 +366,7 @@ class DurableRunner(RunManager):
         elif phase == 'install':
             sandbox = await self.sandbox(state)
             # Refresh protocol adapters on snapshots from older releases.
-            for path in SANDBOX_FILES.glob('*.py'):
-                await sandbox.filesystem.write_text.aio(path.read_text(), '/opt/workspace-runner/' + path.name)
+            await refresh_sandbox_files(sandbox)
             message = self.store.rows('SELECT content FROM messages WHERE id=?', (state['message_id'],))[0]
             spec = self.spec({**run, 'prompt': message['content'], 'message_id': state['message_id'],
                               'continuation': state['segment'] > 0})

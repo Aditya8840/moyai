@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .attachments import Attachments
+from .slack_mentions import SlackMentions
 
 
 def now() -> str:
@@ -154,10 +155,14 @@ class Store:
             for name in ("chat_enabled", "turn_model_calls"):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
-            for name in ('model', 'active_model', 'pending_result', 'checkpoint_error', 'parent_run_id', 'agent_group_id', 'agent_label', 'side_chat_of', 'side_chat_context'):
+            for name in ('model', 'active_model', 'pending_result', 'checkpoint_error', 'parent_run_id', 'agent_group_id', 'agent_label', 'side_chat_of', 'side_chat_context', 'display_title', 'title_attempted_at'):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_owner ON runs(owner_id,id)')
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_participant ON messages(user_id,run_id) WHERE role='user'")
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_users_linked ON users(linked_user_id)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id)')
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_title_backfill ON runs(created_at DESC,id DESC) WHERE chat_enabled=1 AND parent_run_id='' AND agent_label='' AND display_title='' AND title_attempted_at=''")
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_side_chat ON runs(side_chat_of,created_at)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_parent_updated ON runs(parent_run_id,updated_at DESC,created_at DESC,id DESC)')
             if 'model' not in {row['name'] for row in conn.execute('PRAGMA table_info(messages)')}:
@@ -183,6 +188,7 @@ class Store:
                     conn.execute(f"ALTER TABLE slack_events ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
         self.path.chmod(0o600)
         self.attachments = Attachments(self)
+        self.slack_mentions = SlackMentions(self)
 
     @contextmanager
     def connect(self):
@@ -204,6 +210,36 @@ class Store:
     def rows(self, sql, params=()):
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(sql, params)]
+
+    def sidebar_run_ids(self, user_id=None, extra_ids=()):
+        """Filter before the recent limit and apply the same scope to filed/focused runs.
+
+        Identity links affect this shared-workspace view only, never authorization.
+        A submission remains participation even when subsequently soft-deleted.
+        """
+        prefix, params, predicate = '', [], "parent_run_id=''"
+        if user_id is not None:
+            prefix = """WITH identities AS (
+                SELECT ? AS id WHERE ? != ''
+                UNION SELECT id FROM users WHERE kind='slack' AND linked_user_id=?
+            ), contributed AS (
+                SELECT id FROM runs WHERE owner_id IN (SELECT id FROM identities)
+                UNION SELECT run_id FROM messages
+                    WHERE role='user' AND user_id IN (SELECT id FROM identities)
+            ), mine AS (
+                SELECT CASE WHEN parent_run_id='' THEN id ELSE parent_run_id END AS id
+                FROM runs WHERE id IN (SELECT id FROM contributed)
+            ) """
+            params = [user_id, user_id, user_id]
+            predicate += ' AND id IN (SELECT id FROM mine)'
+        query = prefix + 'SELECT id FROM runs WHERE ' + predicate
+        ids = [row['id'] for row in self.rows(query + ' ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 100', params)]
+        # Bound placeholders even for accounts with many personally filed sessions.
+        extras = list(dict.fromkeys(extra_ids))
+        for offset in range(0, len(extras), 500):
+            batch = extras[offset:offset + 500]
+            ids.extend(row['id'] for row in self.rows(query + ' AND id IN (' + ','.join('?' for _ in batch) + ')', [*params, *batch]))
+        return list(dict.fromkeys(ids))
 
     def run(self, run_id: str):
         rows = self.rows("SELECT * FROM runs WHERE id=?", (run_id,))
@@ -275,7 +311,8 @@ class Store:
                 raise ValueError("The session queue is full.")
             conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,owner_id) VALUES(?,?,'','modal','queued',?,?,?,1,?,?)",
                          (run_id, prompt, json.dumps(plugins), stamp, stamp, self.default_model, actor_id))
-            conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)", (run_id, prompt, stamp, self.default_model, actor_id))
+            message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)", (run_id, prompt, stamp, self.default_model, actor_id)).lastrowid
+            self.slack_mentions.queue_in(conn, message_id, team_id, prompt)
             if file_ids:
                 message_id = conn.execute('SELECT id FROM messages WHERE run_id=?', (run_id,)).fetchone()[0]
                 conn.execute('INSERT INTO slack_audio_inputs(message_id,files_json) VALUES(?,?)', (message_id, json.dumps(file_ids)))
@@ -304,6 +341,11 @@ class Store:
             m.user_id,m.revision,m.queue_locked,m.steering_parent_id,
             COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name,
             u.name AS sender_name,u.email AS sender_email,
+            COALESCE((SELECT r.team_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id
+                AND m.user_id='slack:'||r.team_id||':'||r.user_id LIMIT 1),
+                (SELECT substr(m.user_id,7,instr(substr(m.user_id,7),':')-1) FROM slack_events e
+                 WHERE e.run_id=m.run_id AND m.client_id='initial'
+                   AND m.user_id LIKE 'slack:%:'||e.user_id LIMIT 1)) AS slack_message_team,
             (SELECT r.user_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id
                 AND m.user_id='slack:'||r.team_id||':'||r.user_id
                 AND NOT EXISTS(SELECT 1 FROM slack_events e WHERE e.event_id=r.event_id)
@@ -324,6 +366,7 @@ class Store:
                 if name in {'', slack_user, 'Slack ' + slack_user, message['user_id']}:
                     name = (email or '').strip() or 'Slack teammate'
                 message['display_content'] = f'Slack reply from {name}:\n' + message['content'][len(prefix):]
+        self.slack_mentions.decorate(messages)
         # Inputs that never started (cancelled/failed while waiting) stay where
         # they were sent: before the first later-sent input that did run.
         ordered = [m for m in messages if not (m['role'] == 'user' and not m['started_at'])]
@@ -403,7 +446,12 @@ class Store:
                 conn.execute("UPDATE messages SET status=? WHERE run_id=? AND steering_parent_id=? AND status='injected'", (status, run_id, message_id))
                 conn.execute("UPDATE messages SET steering_parent_id=NULL,queue_locked=0 WHERE run_id=? AND steering_parent_id=? AND status='queued'", (run_id, message_id))
                 if status != 'steered':
-                    conn.execute("INSERT INTO messages(run_id,role,content,status,created_at,model,user_id) SELECT ?,'assistant',?,?,?,model,user_id FROM messages WHERE id=?", (run_id, content, status, now(), message_id))
+                    # Input models remain the original admission receipt. The
+                    # answer records the final model after a conversational switch.
+                    conn.execute("""INSERT INTO messages(run_id,role,content,status,created_at,model,user_id)
+                        SELECT ?,'assistant',?,?,?,CASE WHEN r.active_message_id=m.id AND r.active_model!=''
+                        THEN r.active_model ELSE m.model END,m.user_id FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.id=?""",
+                                 (run_id, content, status, now(), message_id))
                 if self.tracing:
                     # Commit the answer and its pending span together. A crash
                     # after saving the answer must not lose its root trace.
@@ -525,6 +573,12 @@ class Store:
         for row in rows:
             row["data"] = json.loads(row["data"])
         return rows
+
+    def goal(self, run_id: str):
+        rows = self.rows("SELECT data FROM events WHERE run_id=? AND kind='status' "
+                         "AND json_extract(data, '$.goal_version')=1 AND json_extract(data, '$.phase')='goal' "
+                         "ORDER BY id DESC LIMIT 1", (run_id,))
+        return json.loads(rows[0]['data']).get('goal') if rows else None
 
     def approvals(self, run_id: str):
         rows = self.rows("SELECT * FROM approvals WHERE run_id=? ORDER BY created_at", (run_id,))

@@ -45,7 +45,7 @@
       turn.rows=[];const tools=new Map();
       for(const event of turn.events){
         const data=event.data||{};
-        if(isFocus(event))continue;
+        if(isFocus(event)||data.phase==='goal')continue;
         if(event.kind==='tool'&&data.activity_version===1&&data.call_id){
           let row=tools.get(data.call_id);
           if(!row){row={id:data.call_id,eventId:String(event.id),kind:'tool',start:event.created_at};tools.set(data.call_id,row);turn.rows.push(row);}
@@ -95,7 +95,7 @@
       input(delivered);
       for(const event of turn.events){
         const data=event.data||{},at=Date.parse(event.created_at)||turn.start;
-        if(isFocus(event))continue;
+        if(isFocus(event)||data.phase==='goal')continue;
         if(data.phase==='steering'&&data.message_id){
           close(input(delivered),at);delivered=String(data.message_id);input(delivered);continue;
         }
@@ -134,7 +134,7 @@
     return new Map([...timeline(run,turns)].map(([id,items])=>[id,items.filter(item=>item.type==='update').map(({id,content})=>({id,content}))]).filter(([,items])=>items.length));
   }
   function updateHTML(update,markdown=esc){
-    return `<article class="chat-message assistant assistant-update" data-update-id="${esc(update.id)}" aria-label="Moyai update"><div class="message-label"><img src="/static/favicon.svg?v=agent-2" alt="">Moyai Devin<small>Update</small></div><div class="message-content markdown">${markdown(update.content)}</div><button type="button" class="copy-update quiet" aria-label="Copy update" title="Copy update">⧉</button></article>`;
+    return `<article class="chat-message assistant assistant-update" data-update-id="${esc(update.id)}" aria-label="Moyai update"><div class="message-label"><img src="/static/favicon.svg?v=agent-2" alt="">Moyai Devin<small>Update</small></div><div class="message-content markdown">${markdown(update.content)}</div><button type="button" class="copy-update quiet" aria-label="Copy update" title="Copy update">${root.MoyaiIcon?.('copy',16)||'Copy'}</button></article>`;
   }
   function syncItems(slot,items,{markdown,copy}){
     const existing=new Map([...slot.children].map(node=>[node.dataset.timelineKey,node]));
@@ -180,7 +180,7 @@
     const rows=turn.rows.filter(row=>row.kind!=='message');
     const older=rows.slice(0,-7),recent=rows.slice(-7);
     return `<details class="turn-work ${turn.pulse?'is-live':''}" data-work-key="${esc(key)}" data-turn="${esc(turn.id)}">
-      <summary class="work-heading"><span class="work-indicator" aria-hidden="true">${turn.live?'':turn.status==='completed'||turn.status==='idle'?'✓':['failed','cancelled','interrupted','save_failed'].includes(turn.status)?'!':''}</span><span class="work-title">${esc(turn.headline)}</span><span class="work-count">${turn.count?`${turn.count} action${turn.count===1?'':'s'}`:''}</span><time class="work-elapsed" ${turn.live?`data-work-timer="${turn.start}"`:''}>${duration(turn.start,turn.end||Date.now())}</time><span class="work-chevron" aria-hidden="true">›</span></summary>
+      <summary class="work-heading"><span class="work-chevron" aria-hidden="true">›</span><span class="work-indicator" aria-hidden="true">${turn.live?'':turn.status==='completed'||turn.status==='idle'?'✓':['failed','cancelled','interrupted','save_failed'].includes(turn.status)?'!':''}</span><span class="work-title">${!turn.live&&['completed','idle'].includes(turn.status)&&turn.start?`<span class="sr-only">${esc(turn.headline)} · </span>Worked for ${duration(turn.start,turn.end||Date.now())}`:esc(turn.headline)}</span><span class="work-count">${turn.count?`${turn.count} action${turn.count===1?'':'s'}`:''}</span><time class="work-elapsed" ${turn.live?`data-work-timer="${turn.start}"`:''}>${duration(turn.start,turn.end||Date.now())}</time></summary>
       <div class="work-body">${older.length?`<details class="work-earlier" data-work-key="earlier:${esc(turn.id)}"><summary>Show ${older.length} earlier updates</summary><ol class="work-list">${older.map(row=>rowHTML(row,turn)).join('')}</ol></details>`:''}
       <ol class="work-list">${recent.map(row=>rowHTML(row,turn)).join('')}</ol>
       ${turn.live?`<div class="work-current" role="status"><span class="work-live-dot" aria-hidden="true"></span><span>${esc(waiting.has(turn.status)?turn.headline:turn.summary||turn.headline)}</span></div>`:''}</div></details>`;

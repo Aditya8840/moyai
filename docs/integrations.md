@@ -1,0 +1,121 @@
+# App connections
+
+[Documentation](README.md) · [Project overview](../README.md)
+
+> This guide retains the detailed reference material from the original README.
+> Dated acceptance reports describe past checks, not a current deployment or test result.
+
+## Connect the apps
+
+New browser sessions select all enabled connected apps by default; uncheck an app to exclude it from that session. No per-user provider sign-in is required.
+
+Connections are **shared by the LiteLLM organization** and retain the permissions of their authorizing identity. The deployed app uses verified BerriAI Google SSO; password sign-in is a configurable fallback. Members can start sessions and use all enabled connected-app tools without an administrator approval step. Only admins can manage connections, change access policies, view spend or link Slack identities. This is a single-organization trusted-team MVP with shared session visibility.
+
+Open **Organization** and either enter the appropriate token or use the OAuth button after configuring the provider's client ID and secret. Tokens are checked with the provider before being saved. Disconnect removes the locally stored credential; revoke the integration at the provider as well if you want to terminate its authorization there.
+
+| App | Required setup | Tools exposed |
+| --- | --- | --- |
+| Linear | Personal API key, or OAuth app with `read,write`; callback `PUBLIC_URL/oauth/linear/callback`. | List accessible teams (50 results), search issue titles (20 results), read an issue and its parent, create an issue (optionally under a parent) directly, update an existing issue's parent or add a comment directly. Creating issues requires the credential’s Create issues permission (Linear also permits updates under that scope). |
+| Slack | User token with `search:read` and relevant channel/DM history scopes for reads. Sending requires the installed **Moyai Devin bot** with `chat:write`, `im:write` (to open DMs), and `im:history` (to verify them). OAuth callback: `PUBLIC_URL/oauth/slack/callback`. Bot tokens cannot search messages. | Search messages (20 results), read a thread (50 messages), send as the Moyai Devin app. |
+| Notion | Integration token with content access and the target pages shared to it; or public integration OAuth client with callback `PUBLIC_URL/oauth/notion/callback`. | Search page titles (20 results), read up to 100 top-level blocks, append a paragraph directly. |
+
+Set `LINEAR_CLIENT_ID` / `LINEAR_CLIENT_SECRET`, `SLACK_CLIENT_ID` / `SLACK_CLIENT_SECRET`, and/or `NOTION_CLIENT_ID` / `NOTION_CLIENT_SECRET` to show native OAuth buttons. Provider administrators may need to approve the apps and scopes. Notion search is title search, not full-text search; nested page blocks and subsequent result pages are not automatically expanded in this MVP.
+
+**Slack sender identity:** `slack_send` always uses the installed bot, including in shared chats and follow-up turns from other users. The server prefixes the body with the active requester's stored profile name (`Moe: message` or `Tin: message`), not the session creator or connection owner. The agent supplies only the message body and cannot override the sender. Unidentified/shared-password requesters cannot send. It never loads or falls back to the shared user token. Pass a recipient’s Slack user ID (`U…` or `W…`) as `channel` for a DM; Moyai opens the bot’s conversation before posting. Existing bot-accessible channel/conversation IDs still work. Missing, expired, or insufficient bot access fails with a reconnect instruction. Use `slack_thread(as_bot=true)` with the returned channel and timestamp to verify the bot’s DM without switching to the shared read account. Reconnect existing installations to grant `im:write` and `im:history` before opening/verifying bot DMs. New OAuth connections no longer request user `chat:write`; previously granted user permissions are not automatically revoked. Shared search/thread reads remain unchanged; per-user Slack OAuth is not implemented.
+
+This application registers its own app integrations. It does not reuse or copy credentials from the Codex/ChatGPT connectors in this chat.
+
+Local sender demo: run `uv run python scripts/slack_sender_demo.py` and open `http://127.0.0.1:8796/demo`. It calls the real broker and connector with stored test profiles and a simulated Slack HTTP API, showing consecutive `Moe:` and `Tin:` messages in the bot's DM and a blocked send when the bot is removed. No live Slack messages are sent.
+
+## Linear tickets and sub-issues
+
+When the user requests a ticket, `linear_create_issue` creates it directly, with no administrator approval step for either members or admins. Use `linear_teams` to resolve the intended team. The session must enable Linear, the shared connection must permit writes, and the connected credential must have Create issues permission. Disabled/read-only connections, missing credentials and revoked session capabilities still block creation. If the provider does not confirm the write, verify the destination before retrying. Linear comments, parent updates and other enabled connected-app writes also execute directly.
+
+For a **new** sub-issue, include `parent_id` in `linear_create_issue`. Omit it (or
+use `null`) for a standalone issue. The original three required arguments remain
+unchanged. A missing or inaccessible parent stops creation.
+
+For an **existing** ticket, use `linear_update_issue` with `issue_id` and
+`parent_id`, for example `{"issue_id":"LIT-1234","parent_id":"LIT-9222"}`.
+Both accept a Linear identifier or UUID. This sends `issueUpdate` with only
+`parentId`; it preserves the existing issue instead of creating a replacement or
+substituting cross-links. To remove a parent, explicitly pass `"parent_id":null`.
+Omitting `parent_id` is rejected. Parent updates execute directly when the
+connection allows writes, without an administrator approval step.
+
+Read the ticket with `linear_issue` to verify its returned `parent` (ID,
+identifier, title and URL). An update is confirmed only when Linear returns
+success, the same issue ID, and the requested parent. Unconfirmed writes are
+marked uncertain and are never retried automatically. Reparenting several
+existing tickets requires one update per ticket; no new tickets are needed.
+
+Run `uv run python scripts/linear_parenting_demo.py` for a local demonstration
+of five existing issues being moved under one parent without approval clicks.
+It exercises the broker, connector HTTP handling and parent readback against a
+simulated Linear API, with no live provider calls. The script's `--pause 1.5`
+option spaces out the output for a terminal recording.
+
+After deployment, these tools are advertised by the workspace broker and its
+MCP bridge; a running agent may need to refresh its tool discovery or resume in
+a new turn to see the updated schema. The connector uses Linear's
+[issue update API](https://linear.app/developers/graphql#creating--editing-issues).
+
+## Shared organization GitHub
+
+Set `GITHUB_REPOSITORIES=BerriAI/litellm,BerriAI/moyai-devin` to allow both repositories, then use **Connections → GitHub → Connect** as an administrator. An empty allowlist preserves the legacy `GITHUB_REPOSITORY` setting (default `BerriAI/litellm`). All selected repositories must belong to the same organization. Connect an existing organization-owned App with its App ID and PEM private key, or register a new App through the manifest flow. The server validates its organization and required permissions before encrypting the signing key. Install it on **only the configured repositories**, with Contents and Pull requests write access and Metadata read. New App registrations also request Administration write for ruleset reviewer edits. Existing installations continue working without that permission; additional granted permissions do not cause rejection, and each token is narrowed to the specific operation. Teammates use the shared installation without personal GitHub OAuth. New web and Slack sessions can select GitHub; existing sessions retain their original app selection.
+
+Use `github_repositories` to list connected repositories and pass an explicit `repository` to `github_checkout`, `github_repository`, or `github_pull_request`. Without it, tools use the session’s repository URL when allowed, then the first connected repository. A checkout records its repository and base; publishing follows those recorded values. Adding a repository to configuration requires reconnecting the installation before agents can access it. Removing a repository immediately revokes its broker access and invalidates pending publications.
+
+Moyai can propose changes to `BerriAI/moyai-devin` through the same branch/PR tool, without an administrator approval step. It cannot merge or deploy its own changes; a human must review and merge, and deployment remains a separate administrative action.
+
+The agent can read repository details and PRs, check out private code, and publish up to 100 changed UTF-8 text files (10 MiB each, 20 MiB total) **without an administrator approval step** when the task requests a PR and the connection permits writes. Publishing creates a unique `moyai/...` branch and a normal, ready-for-review PR. Local commits, uncommitted edits, new nonignored files and deletions are compared against the recorded checkout base. Busy default branches are allowed when the recorded checkout base remains an ancestor. Existing files are never overwritten by checkout.
+
+GitHub's `pull_requests:write` permission includes review/merge capabilities, so GitHub scopes alone cannot restrict agents to publishing and commenting. Moyai enforces this boundary in its server broker: it exposes no approval, review, merge, auto-merge, arbitrary branch update, force-push, or generic GitHub API operation. Signing keys are encrypted on the server; short-lived installation tokens are narrowed to exactly one requested repository and never sent to Modal. Git transport is a streaming read-only `git-upload-pack` endpoint, authenticated with the current session capability. Credentials are not stored in Git URLs/config or command arguments. Workflow, access-control, credential, binary, symlink and submodule changes are rejected; the base tree is checked to prevent implicit directory deletion. Do not add the App as a branch-protection/ruleset bypass actor.
+
+### Repository rulesets and automatic reviewers
+
+Use `github_rulesets` (paginate with `next_page`) and `github_ruleset` to inspect
+repository and inherited organization rules, including the `pull_request` rule's
+`required_reviewers` and file patterns. These tools request only Metadata read;
+Administration access is not required to diagnose automatic reviewer requests.
+Check rulesets when CODEOWNERS and workflows do not explain the behavior.
+
+`github_update_ruleset_reviewers` replaces only the required-reviewer entries in
+one repository-owned branch ruleset. Supply an explicit `repository`,
+`ruleset_id`, the `revision` from `github_ruleset`, and the complete desired
+`required_reviewers` list (including narrower entries that should remain).
+For example, `required_reviewers: []` removes all required team entries from
+that one ruleset. Each entry uses GitHub's `reviewer: {id, type: "Team"}`,
+`file_patterns` and `minimum_approvals` fields. Other rulesets are unaffected.
+The tool preserves the general approval count, code-owner review, status checks,
+enforcement, branch conditions and bypass actors. It cannot edit inherited
+organization rules, create/delete rulesets, or change other protections.
+
+Editing requires the organization GitHub App **Administration: read and write**
+permission. For existing Apps, an organization owner enables that repository
+permission in GitHub App settings and approves the installation's pending
+permission request. No replacement signing key is needed. Missing permission
+produces actionable guidance; inspection and PR operations remain available.
+The server mints an administration-only token for reviewer updates, keeps it out
+of the sandbox, and rechecks the live session, connection and write policy
+before sending the update. Broader App grants never carry over into PR/checkout
+tokens. The existing connection's read-only setting blocks reviewer edits too.
+
+A changed revision stops the update. GitHub does not expose an atomic revision
+condition here, so this is a preflight conflict check, not a lock against an
+external edit between read and write. Only `rules` is sent, and a fresh read
+verifies both the requested result and the preserved settings. Unconfirmed
+writes are never retried automatically: inspect the current ruleset before an
+explicit retry. The `required_reviewers` API is currently a GitHub beta.
+
+Run `uv run python scripts/github_rulesets_demo.py` for a local broker demo, or
+add `--serve` and open `http://127.0.0.1:8794` for the browser recording flow.
+It exercises the real broker and GitHub HTTP client against an in-memory
+provider, removes only the wildcard reviewer entry, verifies preserved rules,
+and demonstrates stale-edit rejection. It never changes live GitHub settings.
+
+After publication, `github_update_pull_request` publishes another commit to the same open PR, and `github_comment_pull_request` posts a discussion comment (including a user-requested review-bot command). Both require a publication receipt owned by the current session and the same GitHub installation; a branch name alone never grants access. The server verifies the head repository/branch, rejects stale bases and uses a non-forced ref update. `github_pull_request_comments` reads discussion, inline comments and review summaries with explicit pagination. These tools do not submit reviews, approvals or merges.
+
+A successful publication fetches its commit through read-only Git and advances the local comparison base without changing the working files or index. If synchronization fails, the successful receipt includes recovery guidance. To resume from a missing or stale checkout, use `github_checkout` with `number` and a fresh directory. Existing directories and pending edits are preserved. Large files are uploaded as individual Git blobs; trees contain blob SHAs. Sandbox, server, relay and encrypted tool-call envelopes share compatible byte budgets, including JSON escaping; model and other HTTP requests retain their existing limits.
+
+Publication and follow-up journals use the session plus `request_key` to recover uncertain results across chat turns. Comment recovery searches for a hidden receipt marker and never automatically re-posts an unconfirmed comment. Explicit retries with unchanged files and fields find the existing PR; conflicting payloads, changed installations and externally changed branches stop instead of overwriting. Retrying PR creation does not require approval; read-only and disabled connections still block publication. Pausing/disconnecting GitHub or stopping the session revokes further calls; an already-sent GitHub action cannot be recalled.
