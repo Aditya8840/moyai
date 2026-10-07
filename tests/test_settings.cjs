@@ -71,3 +71,66 @@ test('a delayed Settings access check cannot overwrite a different page', async 
   await context.renderSettings();
   assert.equal(elements.get('#content').innerHTML, 'The next page');
 });
+
+test('settings navigation selects exactly one destination and respects member access', () => {
+  const {context} = setup({automations: true});
+  const member = context.settingsNavigation('skills', 'member');
+  assert.equal((member.match(/aria-current="page"/g) || []).length, 1);
+  assert.match(member, /href="#skills" aria-current="page"/);
+  assert.doesNotMatch(member, /href="#(?:users|adoption|environments)"/);
+  assert.match(member, /href="#spend"/);
+  const admin = context.settingsNavigation('spend', 'admin');
+  for (const view of ['automations','skills','memory','connections','secrets','runtime','environments','users','spend','adoption']) {
+    assert.match(admin, new RegExp(`href="#${view}"`));
+  }
+});
+
+test('library filters combine query and scope, survive redraw, and recover from no matches', () => {
+  const {context} = setup();
+  let focused = false, clear;
+  const search = {value:'', focus:()=>{focused=true;}};
+  const scope = {value:''};
+  const count = {};
+  const empty = {querySelector:()=>({addEventListener:(_,fn)=>{clear=fn;}})};
+  const rows = [
+    {textContent:'API key', dataset:{filter:'personal'}, onclick:()=>{}},
+    {textContent:'API staging', dataset:{filter:'organization'}, onclick:()=>{}},
+    {textContent:'Browser access', dataset:{filter:'personal'}, onclick:()=>{}},
+  ];
+  const handler = rows[0].onclick;
+  const nodes = {'#query':search,'#scope':scope,'#count':count,'#empty':empty};
+  context.document = {querySelector:key=>nodes[key],querySelectorAll:()=>rows};
+  const options = {input:'#query',select:'#scope',rows:'.row',count:'#count',empty:'#empty'};
+  context.bindSettingsFilter(options);
+  search.value = ' API '; search.oninput();
+  scope.value = 'personal'; scope.onchange();
+  assert.deepEqual(rows.map(row=>row.hidden),[false,true,true]);
+  assert.equal(count.textContent,'1 of 3');
+  search.value = ''; scope.value = '';
+  context.bindSettingsFilter(options);
+  assert.equal(search.value,' API ');
+  assert.equal(scope.value,'personal');
+  search.value = 'No such credential'; search.oninput();
+  assert.equal(empty.hidden,false);
+  clear();
+  assert.equal(count.textContent,'3 of 3');
+  assert.equal(empty.hidden,true);
+  assert.equal(focused,true);
+  assert.equal(rows[0].onclick,handler);
+});
+
+test('background refresh defers while a dialog or page control is active', () => {
+  const {context} = setup();
+  let modal = null, contains = true, interactive = true;
+  context.document = {
+    querySelector:key=>key==='dialog[open]'?modal:{contains:()=>contains},
+    activeElement:{matches:()=>interactive},
+  };
+  assert.equal(context.settingsInteractionActive(),true);
+  interactive = false;
+  assert.equal(context.settingsInteractionActive(),false);
+  contains = false; interactive = true;
+  assert.equal(context.settingsInteractionActive(),false);
+  modal = {};
+  assert.equal(context.settingsInteractionActive(),true);
+});

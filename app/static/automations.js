@@ -9,20 +9,25 @@ function automationTiming(t) {
   return (t.frequency==='hourly'?`Every hour at :${t.time.slice(3)}`:t.frequency==='weekdays'?`Weekdays at ${t.time}`:t.frequency==='weekly'?`${days[t.weekday]} at ${t.time}`:`Every day at ${t.time}`)+` · ${t.timezone}`;
 }
 
-async function renderAutomations() {
+async function renderAutomations(background = false) {
   clearTimeout(automationRefresh);
-  const openHistory=new Set([...document.querySelectorAll('.automation-history[open]')].map(e=>e.dataset.history));
+  if (background && state.view !== 'automations') return;
+  if (background && settingsInteractionActive()) {
+    automationRefresh=setTimeout(()=>renderAutomations(true).catch(showError),5000);
+    return;
+  }
+  const openHistory=new Set([...document.querySelectorAll('.automation-history[open],.automation-workflow[open]')].map(e=>e.dataset.history));
   const version=state.pageVersion;
   const data=await api('/api/automations');
   if(version!==state.pageVersion)return;
   automationEventChoices=data.event_choices||{};
   const content=$('#content');
-  content.innerHTML=`<section class="automations-page"><div class="page-heading"><div><div class="eyebrow">RECURRING WORK</div><h1>Automations</h1><p class="subtext">Run a workflow on a schedule or when an event happens.</p></div><button class="primary" id="new-automation">＋ New automation</button></div>
+  content.innerHTML=`<section class="automations-page"><div class="page-heading"><div><h1>Automations</h1><p class="subtext">Run a workflow on a schedule or when an event happens.</p></div><button class="primary" id="new-automation">New automation</button></div>
     ${!data.enabled?'<p class="automation-notice">You can save workflows and test them now. Automatic runs require Temporal.</p>':!data.connected?'<p class="automation-notice">Reconnecting to the worker. Received events and workflows stay saved.</p>':''}
     <div class="automation-template"><div><span aria-hidden="true">↗</span><div><strong>My Linear tickets → PR</strong><p>Pick a ticket, implement a fix, run tests, and prepare a PR.</p></div></div><button class="quiet" id="linear-automation">Use template</button></div>
     <div class="automation-list">${data.automations.length?data.automations.map(a=>{
       const d=a.definition,last=a.history[0],synced=a.revision===a.synced_revision,hasEvents=automationTriggers(d).some(t=>t.event),done=automationTriggers(d).every(t=>(a.completed_triggers||[]).includes(t.id));
-      return `<article class="automation-card"><header><div><h2>${esc(d.name)}</h2><p>${esc(automationTriggerSummary(d,a.completed_triggers||[]))}</p></div><span class="badge">${a.paused?'Paused':done?'Completed':a.environment_blocker?'Blocked':!synced?'Syncing':hasEvents?'Listening':'Scheduled'}</span></header><p class="automation-prompt">${esc(d.prompt)}</p><div class="automation-meta"><span>Runs as ${esc(a.owner)}</span><span>${esc(modelName(d.model))}</span>${d.mode==='demo'?'<span>Simulated preview</span>':''}</div>
+      return `<article class="automation-card"><header><div><h2>${esc(d.name)}</h2><p>${esc(automationTriggerSummary(d,a.completed_triggers||[]))}</p></div><span class="badge ${a.environment_blocker?'settings-status-warning':''}">${a.paused?'Paused':done?'Completed':a.environment_blocker?'Blocked':!synced?'Syncing':hasEvents?'Listening':'Scheduled'}</span></header><details class="automation-workflow" data-history="workflow-${a.id}" ${openHistory.has('workflow-'+a.id)?'open':''}><summary>Workflow instructions</summary><p class="automation-prompt">${esc(d.prompt)}</p></details><div class="automation-meta"><span>Runs as ${esc(a.owner)}</span><span>${esc(modelName(d.model))}</span>${d.mode==='demo'?'<span>Simulated preview</span>':''}</div>
       ${a.sync_error?`<p role="status" class="automation-notice">${esc(a.sync_error)}</p>`:''}
       ${a.environment_blocker?`<p role="status" class="automation-notice">${esc(a.environment_blocker)} ${hasEvents&&!a.paused?'New events stay queued for up to 24 hours.':''} <a href="#environments">View environments</a></p>`:''}
       <footer><span>${last?`Last run: ${esc(automationRunStatus(last))}`:'No runs yet'}</span><div>${a.can_edit?`<button class="quiet" data-edit-automation="${a.id}">Edit</button><button class="quiet" data-run-automation="${a.id}">Run now</button>${hasEvents?`<button class="quiet" data-test-event="${a.id}">Test filters</button>${automationWebhookProviders(a).length?`<button class="quiet" data-setup-event="${a.id}">${a.trigger.ready?'Webhook settings':'Set up webhook'}</button>`:''}`:''}`:''}${a.can_edit||(state.role==='admin'&&!a.paused)?`<button class="quiet" data-toggle-automation="${a.id}" ${a.paused&&!data.enabled?'disabled':''}>${a.paused?'Enable':'Pause'}</button>`:''}</div></footer>
@@ -45,7 +50,7 @@ async function renderAutomations() {
   });
   content.querySelectorAll('[data-setup-event]').forEach(b=>b.onclick=()=>setupAutomationWebhook(data.automations.find(a=>a.id===b.dataset.setupEvent)));
   content.querySelectorAll('[data-test-event]').forEach(b=>b.onclick=()=>testAutomationFilters(data.automations.find(a=>a.id===b.dataset.testEvent)));
-  if(data.enabled&&data.automations.some(a=>a.environment_blocker||a.revision!==a.synced_revision||a.trigger?.deliveries?.some(e=>e.status==='pending')||a.history.some(r=>r.run_id&&!['idle','completed','failed','cancelled','interrupted'].includes(r.status))))automationRefresh=setTimeout(()=>{if(state.view==='automations'&&!$('#automation-dialog').open)renderAutomations().catch(showError);},5000);
+  if(data.enabled&&data.automations.some(a=>a.environment_blocker||a.revision!==a.synced_revision||a.trigger?.deliveries?.some(e=>e.status==='pending')||a.history.some(r=>r.run_id&&!['idle','completed','failed','cancelled','interrupted'].includes(r.status))))automationRefresh=setTimeout(()=>renderAutomations(true).catch(showError),5000);
 }
 
 async function editAutomation(existing,template) {
