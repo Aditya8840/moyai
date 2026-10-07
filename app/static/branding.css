@@ -80,7 +80,7 @@ button.quiet:hover, .icon-button:hover, .new-task:hover, .nav-button:hover,
 }
 .composer-toolbar > * { flex: none; }
 .composer-toolbar button.quiet, .task-options summary, .model-picker, .composer-model {
-  height: 28px; border-radius: 7px; font-size: 13px; line-height: 1; color: var(--muted);
+  height: 28px; border-radius: 7px; font-size: 13px; line-height: 1; font-weight: 400; color: var(--muted);
 }
 .attach-button, .record-button.is-idle, .skill-picker-button {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
