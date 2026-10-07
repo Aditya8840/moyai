@@ -121,9 +121,10 @@ def test_slack_turn_root_span_links_its_thread_for_lens(tmp_path):
     store.finish_message(run['id'], message['id'], 'Done')
     store.finish_message(web_run['id'], web_message['id'], 'Done')
     slack_root, web_root = processor.spans
-    assert slack_root.attributes['lens.source.url'] == permalink
-    assert slack_root.attributes['lens.source.title'] == '@Mateo Wang can you add me to the guestlist?'
-    assert not any(key.startswith('lens.source.') for key in web_root.attributes)
+    assert slack_root.attributes['agent.source.type'] == 'slack'
+    assert slack_root.attributes['agent.source.url'] == permalink
+    assert slack_root.attributes['agent.source.title'] == '@Mateo Wang can you add me to the guestlist?'
+    assert not any(key.startswith('agent.source.') for key in web_root.attributes)
 
 
 def test_disabled_and_broken_capture_cannot_break_agent_work(tmp_path):
