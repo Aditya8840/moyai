@@ -1,8 +1,34 @@
 # Moyai
 
+<p align="center">
+  <img src="docs/assets/moyai-hero.png" alt="Moyai, an open source cloud agent" width="100%">
+</p>
+
 A self-hosted coding agent for background work. Give it a task from your browser or Slack; it edits code, runs tests, and opens a pull request for review. Send corrections while it works or resume with saved files and conversation history.
 
-New sessions default to the native **Claude Agent SDK** with prompt caching enabled. Bring your own model and choose a harness: **Hermes, Claude Agent SDK, Codex, OpenCode, Deep Agents, or Tool Loop**. See [supported combinations and custom harnesses](docs/harnesses.md).
+## Harnesses
+
+<p align="center">
+  <img src="docs/assets/harnesses.png" alt="Supported harnesses: Claude Agent SDK, Codex, Hermes, OpenCode, Deep Agents, and Tool Loop" width="100%">
+</p>
+
+New sessions default to the native **Claude Agent SDK** with prompt caching enabled. You can pick a different harness for each session: **Hermes, Claude Agent SDK, Codex, OpenCode, Deep Agents, or Tool Loop**. Every harness runs in the same isolated workspace with the same tools and permissions. See [supported combinations and custom harnesses](docs/harnesses.md).
+
+## Models and providers
+
+<p align="center">
+  <img src="docs/assets/providers.png" alt="Models and providers through LiteLLM: OpenAI, Anthropic, Google, Bedrock, Fireworks, xAI, Mistral, DeepSeek, Moonshot, and 100+ more" width="100%">
+</p>
+
+Moyai uses [LiteLLM](https://github.com/BerriAI/litellm) for inference, so it can run on any of the 100+ providers LiteLLM supports. Point it at your [LiteLLM gateway](https://docs.litellm.ai/), switch models between messages, and spend is tracked per teammate. Provider keys stay on the server, and the sandbox never sees them.
+
+## See it in action
+
+<p align="center">
+  <img src="docs/assets/moyai-launch.gif" alt="Scrolling through the Moyai launch post" width="100%">
+</p>
+
+Read the launch post: [Moyai is now open source](https://docs.litellm.ai/blog/moyai-open-source)
 
 ## Getting started
 
