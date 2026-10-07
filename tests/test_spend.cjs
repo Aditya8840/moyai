@@ -65,7 +65,7 @@ test('admin Spend retains organization, infrastructure, user filters and identit
   await context.renderSpend();
   assert.deepEqual(calls, ['/api/spend?', '/api/admin/identities/status']);
   const html = elements.get('#content').innerHTML;
-  for (const text of ['Usage & spend', 'Organization totals', 'Infrastructure costs', 'LLM spend by user', 'All users', 'Slack identities']) {
+  for (const text of ['Spend', 'Organization totals', 'Infrastructure costs', 'LLM spend by user', 'All users', 'Slack identities']) {
     assert.ok(html.includes(text), text);
   }
   assert.equal(typeof elements.get('#spend-user').onchange, 'function');

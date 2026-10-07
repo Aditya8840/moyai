@@ -20,6 +20,76 @@ const settingsGroups = [
 ];
 const settingsViews = new Set(['settings', ...settingsGroups.flatMap(group => group.items.map(item => item.view))]);
 
+// The same destinations drive the overview and the persistent settings rail.
+function settingsNavigation(view, role) {
+  const link = (target, title, icon) => `<a href="#${target}"${view === target ? ' aria-current="page"' : ''}>${icon ? settingsIcon(target) : '<span class="settings-overview-icon" aria-hidden="true">⊞</span>'}<span>${title}</span></a>`;
+  return `<a class="settings-back" href="#tasks"><span aria-hidden="true">←</span> Back to workspace</a>
+    <div class="settings-nav-title">Settings</div>${link('settings', 'Overview')}
+    ${settingsGroups.filter(group => !group.admin || role === 'admin').map(group => `<div class="settings-nav-group"><h2>${group.title}</h2>${group.items.filter(item => !item.admin || role === 'admin').map(item => link(item.view, item.title, true)).join('')}</div>`).join('')}`;
+}
+
+function updateSettingsNavigation() {
+  const nav = $('#settings-navigation');
+  if (nav) nav.innerHTML = settingsNavigation(state.view, state.role);
+}
+
+function settingsLoadError(title, error, retry) {
+  $('#content').innerHTML = `<section class="settings-load-error"><h1>${esc(title)}</h1><div role="alert"><h2>Unable to load this page</h2><p>${esc(error.message)}</p><p>Check your connection and try again.</p></div><button id="settings-retry">Try again</button></section>`;
+  $('#settings-retry').onclick = retry;
+}
+
+function confirmSettingsAction(title, description, action) {
+  return new Promise(resolve => {
+    const dialog = document.createElement('dialog');
+    dialog.setAttribute('aria-label', title);
+    dialog.innerHTML = `<h2>${esc(title)}</h2><p>${esc(description)}</p><div class="credential-actions"><button class="quiet" data-cancel>Cancel</button><button class="danger" data-confirm>${esc(action)}</button></div>`;
+    document.body.append(dialog);
+    dialog.querySelector('[data-cancel]').onclick = () => dialog.close();
+    dialog.querySelector('[data-confirm]').onclick = () => dialog.close('confirmed');
+    dialog.addEventListener('close', () => {
+      const confirmed = dialog.returnValue === 'confirmed';
+      dialog.remove();
+      resolve(confirmed);
+    }, {once:true});
+    dialog.showModal();
+    dialog.querySelector('[data-cancel]').focus();
+  });
+}
+
+// Background polling must not replace the control someone is using.
+function settingsInteractionActive() {
+  return !!document.querySelector('dialog[open]') ||
+    !!(document.querySelector('#content')?.contains(document.activeElement) &&
+      document.activeElement?.matches('button,a,input,select,textarea,summary,[tabindex="0"]'));
+}
+
+// Filtering hides existing rows so their action handlers and disclosure state survive.
+const settingsFilterState = new Map();
+function bindSettingsFilter({input, select, rows, count, empty}) {
+  const search = document.querySelector(input), filter = select && document.querySelector(select);
+  const items = [...document.querySelectorAll(rows)];
+  const saved = settingsFilterState.get(input);
+  if (saved) { search.value = saved.query; if (filter) filter.value = saved.filter; }
+  const draw = () => {
+    settingsFilterState.set(input, {query:search.value, filter:filter?.value || ''});
+    const query = search.value.trim().toLocaleLowerCase();
+    let visible = 0;
+    for (const item of items) {
+      const matches = item.textContent.toLocaleLowerCase().includes(query) && (!filter || !filter.value || item.dataset.filter === filter.value);
+      item.hidden = !matches;
+      if (matches) visible++;
+    }
+    document.querySelector(count).textContent = `${visible} of ${items.length}`;
+    document.querySelector(empty).hidden = visible > 0 || (!query && !filter?.value);
+  };
+  search.oninput = draw;
+  if (filter) filter.onchange = draw;
+  document.querySelector(empty)?.querySelector('button')?.addEventListener('click', () => {
+    search.value = ''; if (filter) filter.value = ''; draw(); search.focus();
+  });
+  draw();
+}
+
 function settingsIcon(view) {
   const paths = {
     automations:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
@@ -45,7 +115,7 @@ async function renderSettings() {
   if (!session.authenticated) { await boot(); return; }
   const admin = state.role === 'admin';
   $('#content').innerHTML = `<section class="settings-page">
-    <div class="page-heading"><div><h1>Settings</h1><p class="subtext">Manage your workflows, tools, and workspace.</p></div></div>
+    <div class="page-heading"><div><h1>Settings</h1><p class="subtext">Make Moyai work the way your team does.</p></div></div>
     <div class="settings-grid">${settingsGroups.filter(group => !group.admin || admin).map(group => `
       <section class="settings-group" aria-labelledby="settings-${group.id}">
         <h2 id="settings-${group.id}">${group.title}${group.admin ? '<span>Admin</span>' : ''}</h2>
@@ -56,7 +126,7 @@ async function renderSettings() {
             <span class="settings-arrow" aria-hidden="true">›</span>
           </a>`).join('')}</div>
       </section>`).join('')}</div>
-    <section class="card" id="title-model-settings"><h2>Session title model</h2><p class="subtext">A small model names chats through your configured LiteLLM gateway. Changing it applies to new title attempts, not existing titles or the main chat model.</p><form id="title-model-form"><label for="title-model">Gateway model ID</label><input id="title-model" maxlength="200" required placeholder="openai/gpt-4.1-nano" ${admin?'':'disabled'}><button type="submit" ${admin?'':'disabled'}>Save title model</button><p id="title-model-status" role="status">Loading…</p></form></section>
+    <section class="card settings-form-section" id="title-model-settings"><div><h2>Session titles</h2><p class="subtext">Choose the model that names new chats. Existing titles and the chat model stay the same.</p></div><form id="title-model-form"><label for="title-model">Gateway model ID</label><input id="title-model" maxlength="200" required placeholder="openai/gpt-4.1-nano" aria-describedby="title-model-status" ${admin?'':'disabled'}><button type="submit" ${admin?'':'disabled'}>Save model</button><p id="title-model-status" role="status">Loading…</p></form></section>
   </section>`;
   try{
     const saved=await api('/api/settings/session-titles');if(version!==state.pageVersion)return;
