@@ -13,6 +13,7 @@ from .connectors import ConnectorError
 from .agentchat_slack import connect_agentchat
 from .db import now
 from .slack_chat import SlackChat
+from .security import same
 from .slack_files import SlackFiles, file_ids as slack_file_ids
 
 
@@ -54,7 +55,7 @@ class SlackSessions:
         if not secret or not valid_time:
             raise HTTPException(401, "Invalid Slack request.")
         expected = "v0=" + hmac.new(secret.encode(), b"v0:" + timestamp.encode() + b":" + body, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expected, headers.get("x-slack-signature", "")):
+        if not same(expected, headers.get("x-slack-signature", "")):
             raise HTTPException(401, "Invalid Slack request.")
 
     async def receive(self, request, missing_cloud):
