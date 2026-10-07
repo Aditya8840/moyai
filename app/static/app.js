@@ -93,7 +93,8 @@ function sessionIndicator(run){
   return '<span class="session-indicator" aria-hidden="true"></span>';
 }
 function modelName(model=state.config.model){return (state.config.models||[]).find(m=>m.id===model)?.name||model||'Hermes Agent';}
-function modelPicker(id,selected,disabled=false){return `<label class="model-picker"><span class="sr-only">Model for next message</span><select id="${id}" aria-label="Model for next message" ${disabled?'disabled':''}>${(state.config.models||[]).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}</select></label>`;}
+function providerLogo(model){const url=MoyaiProviderLogos.src(model);return `<img class="provider-logo" alt="" width="16" height="16" ${url?`src="${esc(url)}"`:'hidden'}>`;}
+function modelPicker(id,selected,disabled=false){return `<label class="model-picker">${providerLogo(selected)}<span class="sr-only">Model for next message</span><select id="${id}" aria-label="Model for next message" ${disabled?'disabled':''}>${(state.config.models||[]).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}</select></label>`;}
 
 function openSessionSearch(){$('.session-search').hidden=false;$('#search-sessions').setAttribute('aria-expanded','true');$('#session-search').focus();}
 function closeSessionSearch(){if($('#session-search').value)return;$('.session-search').hidden=true;$('#search-sessions').setAttribute('aria-expanded','false');}
@@ -334,7 +335,7 @@ function connectChatStream(run){
 function updateChatStatus(run){
   if(state.chatRun){Object.assign(state.chatRun,run);state.messageQueue?.render(state.chatRun);MoyaiActivity.sync($('#conversation'),state.chatRun,{markdown:renderMarkdown,copy:copyText});savedFiles.decorate($('#conversation'));}
   run=state.chatRun||run;
-  if(run.model&&$('#chat-model')&&!state.modelDrafts[state.selected])$('#chat-model').value=run.model;
+  if(run.model&&$('#chat-model')&&!state.modelDrafts[state.selected]){$('#chat-model').value=run.model;MoyaiProviderLogos.sync($('#chat-model').parentElement.querySelector('.provider-logo'),run.model);}
   $('#run-status').innerHTML=statusLabel(run.status);
   const busy=!terminal.has(run.status)||run.active;
   $('#stop-response').hidden=!busy;$('#stop-response').disabled=run.status==='stopping';
@@ -544,6 +545,7 @@ function registerWebMCP(){
   tools.forEach(tool=>{try{Promise.resolve(document.modelContext.registerTool(tool,{signal:abort.signal})).catch(()=>{});}catch{}});
 }
 matchMedia('(max-width:850px)').addEventListener('change',()=>setSidebar(false));
+document.addEventListener('change',e=>{const picker=e.target.closest?.('.model-picker select');if(picker)MoyaiProviderLogos.sync(picker.parentElement.querySelector('.provider-logo'),picker.value);});
 setInterval(()=>{if(state.authenticated&&!document.hidden)refreshRuns().catch(()=>{});},15000);
 boot();
 
