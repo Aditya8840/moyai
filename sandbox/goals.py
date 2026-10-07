@@ -239,12 +239,17 @@ def run_goal_conversation(agent, prompt, history, system_message, goal, *, suspe
         if goal.control_reply:
             result['final_response'] = goal.control_reply
             return result
-        if (result.get('pending_steer') and not result.get('interrupted') and
+        if (result.get('pending_steer') and result.get('completed') is True and not result.get('interrupted') and
                 not result.get('failed') and not result.get('partial')):
             prompt, history = result['pending_steer'], result['messages']
             continue
         next_prompt = goal.after_response(result, suspended=suspended())
         if not next_prompt:
+            # Hermes can return an accepted but unapplied correction when a
+            # restart guard stops the turn. Keep it in the saved conversation
+            # for an explicit resume; never bypass a stop by starting a new turn.
+            if result.get('pending_steer') and isinstance(result.get('messages'), list):
+                result['messages'].append({'role': 'user', 'content': result.pop('pending_steer')})
             return result
         notify()
         prompt, history = next_prompt, result['messages']

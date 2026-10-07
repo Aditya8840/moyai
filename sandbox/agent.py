@@ -20,6 +20,7 @@ try:
     from .project_environment import prepare_project
     from .memory_history import scrub_memory_history
     from .goals import GoalLoop, run_goal_conversation
+    from .hermes_compat import apply_hermes_patches
 except ImportError:
     from broker_relay import BrokerRelay
     from artifacts import collect_archive
@@ -32,6 +33,7 @@ except ImportError:
     from project_environment import prepare_project
     from memory_history import scrub_memory_history
     from goals import GoalLoop, run_goal_conversation
+    from hermes_compat import apply_hermes_patches
 LOCK = threading.Lock()
 ACTIVITY_INPUT_ID = None
 
@@ -90,6 +92,7 @@ def hermes_config(spec, broker_url, workspace):
 
 
 def run_agent(spec, relay):
+    apply_hermes_patches()
     workspace = Path("/workspace")
     workspace.mkdir(exist_ok=True)
     prepare_attachments(spec, os.environ['WORKSPACE_RUN_TOKEN'], notify=reconnecting)

@@ -8,11 +8,23 @@ import pytest
 
 from app.config import Settings
 from app.db import Store
-from app.runner import RunManager
+from app.runner import RunManager, refresh_sandbox_files
 
 
 def aio(function):
     return SimpleNamespace(aio=function)
+
+
+async def test_snapshot_refresh_includes_runtime_fixes_without_touching_user_files():
+    written = {}
+    async def write(text, path):
+        written[path] = text
+    await refresh_sandbox_files(SimpleNamespace(filesystem=SimpleNamespace(write_text=aio(write))))
+    assert '/opt/workspace-runner/hermes_compat.py' in written
+    assert '/opt/workspace-runner/hermes-steering.patch' in written
+    assert '/opt/workspace-runner/hermes-stop-reason.patch' in written
+    assert 'apply_hermes_patches()' in written['/opt/workspace-runner/agent.py']
+    assert all(path.startswith('/opt/workspace-runner/') for path in written)
 
 
 class Lines:

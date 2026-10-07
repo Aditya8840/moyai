@@ -76,6 +76,24 @@ def test_partial_with_pending_steer_does_not_restart(goal):
     assert not goal.active
 
 
+@pytest.mark.parametrize('flags', [
+    {'completed': False}, {'failed': True}, {'partial': True}, {'interrupted': True},
+])
+def test_stopped_turn_saves_unapplied_correction_without_restarting(goal, flags):
+    result = response(pending_steer='Also check the copy button.')
+    result.update(flags)
+    calls = []
+    def run(*args, **kwargs):
+        calls.append(args[0])
+        assert len(calls) == 1, 'A pending correction must not bypass a stop guard'
+        return result
+    returned = run_goal_conversation(SimpleNamespace(run_conversation=run), 'work', [], '', goal)
+    assert calls == ['work']
+    assert returned['messages'][-1] == {'role': 'user', 'content': 'Also check the copy button.'}
+    assert 'pending_steer' not in returned
+    assert not goal.active
+
+
 def test_reused_tool_id_with_failure_cannot_use_stale_evidence(goal):
     goal.tool_complete('check', 'terminal', {}, {'exit_code': 0})
     goal.tool_complete('check', 'terminal', {}, {'exit_code': 1})
