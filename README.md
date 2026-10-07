@@ -1,10 +1,16 @@
 # Moyai Devin
 
-Moyai Devin is a self-hosted AI coding agent for background engineering work. Ask it to fix a bug or build a feature from your browser or Slack. The agent works in an isolated cloud workspace, where it can edit code, run tests, and open a pull request for your review. Connect GitHub, Linear, Slack, or Notion to give it access to your code and team context. You can check its progress and send corrections while it works, or resume the task with your saved conversation and files.
+Use Moyai Devin to delegate coding tasks from your browser or Slack. The agent edits code and runs tests in an isolated cloud workspace, and can open a pull request for your review. You can send corrections during a task or resume it with saved files and conversation history. Connect GitHub for repository access; add Linear, Slack, or Notion for team context.
+
+## Choose your model and harness
+
+Bring your own model through a compatible API or LiteLLM gateway, and choose the agent harness for each new session: **Hermes, Claude Code, Codex, OpenCode, Deep Agents, or Tool Loop**. You can configure models beyond the built-in picker defaults with `AGENT_MODEL`.
+
+Choose **Harness** beside **Model** before starting a session. Hermes is the default. Claude Code requires an enabled `anthropic/claude-*` model and a Messages endpoint; Codex requires an enabled `openai/*` model and a Responses endpoint. The other harnesses use Chat Completions with tool calling. Keep the same harness for a session, or start a new session to change it. See [harness compatibility and custom adapters](docs/harnesses.md).
 
 ## Getting started
 
-**Start with a real agent, not the local demo.** Real execution requires a Modal account for the agent's machine and a paid model API or gateway. There is no local-only agent runner in this repository. The recommended setup below hosts both the web app and agent machines on Modal; you do not need Render, Docker, a domain, or an HTTPS tunnel.
+You need a **Modal account** and a **model API key or gateway key** to run coding tasks. Follow these steps to host the web app and agent machines on Modal. Modal supplies the HTTPS address, so you can skip domain and proxy setup. The repository has no local agent runner; its local demo produces simulated responses.
 
 ### 1. Install and clone
 
@@ -22,7 +28,7 @@ Do not overwrite an existing `.env` when upgrading.
 
 ### 2. Connect Modal and a model
 
-1. Create a [Modal account](https://modal.com/docs/guide) and select the workspace that should own this installation. Run `uv run modal token new` and complete its browser authentication. Open the generated `~/.modal.toml` **privately in your editor**, and copy that workspace's `token_id` and `token_secret` into `.env` as `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`. CLI authentication alone is not enough: Moyai reads these fields from `.env`.
+1. Create a [Modal account](https://modal.com/docs/guide) and select the workspace for this installation. Run `uv run modal token new` and complete the browser login. Open `~/.modal.toml` in a private editor window. Copy the selected workspace's `token_id` and `token_secret` into `.env` as `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`. Moyai requires these fields even after you log in through the CLI.
 2. Get an API key from your model provider, or a dedicated key from your team's LiteLLM gateway. Edit these existing entries in `.env` (replace the example values):
 
    ```dotenv
@@ -33,10 +39,10 @@ Do not overwrite an existing `.env` when upgrading.
    AGENT_MODEL=<exact model alias enabled for that key>
    ```
 
-   **No gateway?** You can configure OpenAI directly: [create an API key and enable API billing](https://platform.openai.com/docs/quickstart), use `LITELLM_API_BASE=https://api.openai.com/v1`, put that key in `LITELLM_API_KEY`, and use `AGENT_MODEL=gpt-4.1` if your project has access to it. These environment variable names are retained even without LiteLLM. The endpoint must support Chat Completions and tool calling; a ChatGPT subscription is not an API credential.
+   For a first run with Hermes and OpenAI, [create an API key and enable API billing](https://platform.openai.com/docs/quickstart). Set `LITELLM_API_BASE=https://api.openai.com/v1`, put the key in `LITELLM_API_KEY`, and set `AGENT_MODEL=gpt-4.1` if your project has access. Keep the `LITELLM_*` variable names for this configuration. Your endpoint must support Chat Completions and tool calling. A ChatGPT subscription does not include API access. For other harnesses, use the [model and protocol requirements](docs/getting-started.md#choose-a-harness).
 3. For code work, change `GITHUB_REPOSITORY` from the example's BerriAI repository to **your organization's** `owner/repository`. Leave optional Slack, Google SSO, tracing, and Temporal settings off for the first run. Set `SESSION_TITLES_ENABLED=false` to avoid requiring the separate default title model.
 
-Never commit `.env`, paste keys into chat, or share your Modal profile. **[The full setup walkthrough](docs/getting-started.md)** explains every required value, model selection, and how to connect GitHub.
+Keep `.env` and your Modal profile out of Git and chat. See the [setup walkthrough](docs/getting-started.md) for credential details and GitHub connection steps.
 
 ### 3. Deploy and sign in
 
@@ -44,21 +50,21 @@ Never commit `.env`, paste keys into chat, or share your Modal profile. **[The f
 uv run python deploy_modal.py
 ```
 
-**This creates a billed, always-on cloud service.** Use a fresh Modal workspace for a new installation: the script updates fixed app, secret, and volume names, so rerunning it in an existing installation redeploys that installation and interrupts active tasks.
+**Deployment starts a billed, always-on service.** Use a fresh Modal workspace for a new installation. The script uses fixed resource names; running it in an existing installation replaces the web app and interrupts active tasks.
 
-The command prints `Workspace URL: https://…`. Open that actual URL and sign in using `WORKSPACE_PASSWORD`, which the script generates in your local `.env` if empty. It also generates the session/encryption secrets and configures the public HTTPS URL automatically. Keep `.env` safe for future deployments; do not invent a `PUBLIC_URL` or start localhost for this path.
+Open the address printed as `Workspace URL: https://…`. Sign in with `WORKSPACE_PASSWORD` from your local `.env`; the script generates it if empty. It generates missing session/encryption secrets and sets the public HTTPS URL too. Keep `.env` for future deployments. Leave `PUBLIC_URL` at its example value for this deployment path.
 
-### 4. Verify real execution, then connect your repository
+### 4. Run a task and connect your repository
 
-Open **Settings → Runtime** and check for **Cloud ready**. This checks configuration only, not whether credentials work. Start a new session with **Context & tools → Execution → Cloud session**, select the exact model you configured, leave the repository empty, and send:
+Open **Settings → Runtime** and check for **Cloud ready**. The badge confirms that you supplied the required settings; you still need to test the credentials. Start a new session with **Context & tools → Execution → Cloud session**, choose **Hermes** in the harness picker for this first check, select your configured model, leave the repository empty, and send:
 
 > Use the terminal to create `/workspace/setup-check.txt` containing `moyai setup works`. Read it back with a tool and report the contents. Do not connect apps or publish anything.
 
-The first run builds the agent image and can take several minutes. Confirm actual tool calls in **Activity** and the file in **Files**. A simulated reply or a green Runtime badge is not a successful installation.
+Allow several minutes for the first agent image build. Check the tool calls in **Activity** and open `setup-check.txt` in **Files** to confirm its contents.
 
-Next, open **Connections → GitHub → Connect**, register or connect an organization-owned GitHub App, and install it on only your configured repository. Follow the [GitHub setup and first repository task](docs/getting-started.md#6-connect-your-github-repository). Slack, Linear, and Notion are optional and can be added later.
+Open **Connections → GitHub → Connect**, register or connect an organization-owned GitHub App, and restrict its installation to your configured repository. Follow the [GitHub setup and first repository task](docs/getting-started.md#6-connect-your-github-repository). Add Slack, Linear, or Notion as needed.
 
-**Stuck?** See [setup troubleshooting](docs/getting-started.md#troubleshooting). Stop the `moyai-devin` web app in the Modal dashboard when you no longer need it, and check for remaining agent sandboxes; closing the browser does not stop billing.
+For errors, see [setup troubleshooting](docs/getting-started.md#troubleshooting). To stop compute charges, stop the `moyai-devin` web app and any remaining agent sandboxes in the Modal dashboard. Closing your browser leaves them running.
 
 ## Local UI preview (not a working agent)
 
@@ -69,7 +75,7 @@ uv sync --frozen
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8787 --workers 1
 ```
 
-Open [localhost:8787](http://127.0.0.1:8787). Responses are simulated: no model is called, no agent machine is started, and no repository changes are made. This is not a required setup step.
+Open [localhost:8787](http://127.0.0.1:8787) to inspect the UI with simulated responses. The preview does not call a model, start an agent machine, or change a repository. Skip it unless you need to work on the UI.
 
 ## More information
 

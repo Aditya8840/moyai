@@ -2,9 +2,9 @@
 
 [Documentation](README.md) · [Project overview](../README.md)
 
-This walkthrough is for a **new installation**. It deploys the browser app on Modal and uses Modal sandboxes for real agent work. The local UI demo is not part of this setup.
+Deploy a new Moyai installation on Modal, configure your model, and run a task. You can choose a harness before starting each session. Use Hermes for the first check below, or follow the compatibility table to configure another harness.
 
-## What runs where
+## Deployment layout
 
 ```text
 Your browser → Moyai web app on Modal → isolated Modal agent sandbox
@@ -15,7 +15,7 @@ Your browser → Moyai web app on Modal → isolated Modal agent sandbox
                         └── GitHub and other apps you connect later
 ```
 
-Your computer runs the installation commands; it does not need to stay on after deployment. The web app holds the encrypted connections and brokers access for agents. Modal provides compute, not model credits. You pay separately for Modal and model usage. This route needs no domain, reverse proxy, Render account, Docker, or tunnel.
+Run the installation commands on your computer. After deployment, you can shut it down and use Moyai from a browser. You pay Modal for the web app and agent machines, and your model provider for inference. Moyai stores encrypted connections on the web server and brokers the agent's access to them. Modal supplies the HTTPS address.
 
 **This is a shared, trusted-team workspace.** Do not expose it without authentication or invite untrusted users. Connected apps retain their authorizing identity's permissions; see [security boundaries](security-and-scope.md).
 
@@ -34,7 +34,7 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Run subsequent commands from this repository directory. `uv sync` installs the Modal CLI and other project dependencies in `.venv`; there is no separate global Modal installation step. If you already have a `.env`, edit it rather than copying over it.
+Run the remaining commands from this repository directory. Use the Modal CLI installed by `uv sync` in `.venv`. If you have a `.env`, edit it rather than overwriting it.
 
 ## 2. Get Modal credentials
 
@@ -45,14 +45,14 @@ Run subsequent commands from this repository directory. `uv sync` installs the M
    uv run modal token new
    ```
 
-3. Complete the browser flow for the intended workspace. The CLI verifies the new credentials by default and saves them in `~/.modal.toml` (unless you have explicitly overridden Modal's configuration location).
-4. Open that file **privately in a text editor**, not by printing it into a shared terminal or chat. Find the profile for that workspace. Copy `token_id` into the existing `MODAL_TOKEN_ID=` entry in `.env`, and `token_secret` into `MODAL_TOKEN_SECRET=`. Use both values from the same profile.
+3. Complete the browser login for your chosen workspace. The CLI verifies the credentials and saves them in `~/.modal.toml`, unless you changed Modal's configuration location.
+4. Open that file in a private editor window. Copy the workspace profile's `token_id` into `MODAL_TOKEN_ID=` in `.env`, and its `token_secret` into `MODAL_TOKEN_SECRET=`. Keep both values from the same profile. Do not print them into a shared terminal or chat.
 
-Moyai's deploy script requires these two `.env` fields even if the Modal CLI is already logged in. Tokens expire according to your Modal workspace's policy; plan rotation rather than copying an expiry date from someone else's deployment. For a team service, use your organization's managed service identity policy.
+Supply both `.env` fields even if you have logged in through the Modal CLI. Check the token's expiry in your Modal workspace and plan its replacement. For a team service, follow your organization's service identity policy.
 
 ## 3. Configure a model endpoint
 
-Choose **one** option. An API credential belongs in `.env` or the host's secret store, never in a task prompt.
+Choose one option. Store API credentials in `.env` or the host's secret store. Do not paste them into task prompts.
 
 ### Option A: your existing LiteLLM gateway
 
@@ -70,9 +70,9 @@ LITELLM_API_KEY=<dedicated gateway key>
 AGENT_MODEL=<exact gateway model alias>
 ```
 
-The app appends `/chat/completions` to the base URL. Do not put `/chat/completions` in the base itself. The gateway must be reachable **from Modal**, not just your laptop; `localhost:4000` refers to the cloud container after deployment. To operate your own gateway, use the [LiteLLM gateway setup guide](https://docs.litellm.ai/docs/proxy/quick_start) and host it at a protected reachable endpoint.
+For Hermes, supply the API base without `/chat/completions`; Moyai appends that path. Use a gateway address reachable from Modal. After deployment, `localhost:4000` refers to the cloud container. To host your own gateway, follow the [LiteLLM gateway setup guide](https://docs.litellm.ai/docs/proxy/quick_start) and expose it at a protected endpoint.
 
-### Option B: OpenAI directly, without operating a gateway
+### Option B: Hermes with the OpenAI API
 
 Follow the [OpenAI API quickstart](https://platform.openai.com/docs/quickstart) to create a project API key and configure API billing. A ChatGPT subscription does not supply API access. Then set:
 
@@ -82,7 +82,24 @@ LITELLM_API_KEY=<your OpenAI project API key>
 AGENT_MODEL=gpt-4.1
 ```
 
-Use `gpt-4.1` only if enabled for your project, or another accessible Chat Completions model supporting tool calling and the agent's request parameters. The `LITELLM_*` names are still used for this direct endpoint. Use the provider's exact model ID, not a LiteLLM provider prefix. An Anthropic API key cannot be substituted into this example; route non-OpenAI APIs through a compatible gateway.
+Choose `gpt-4.1` if your project has access, or another Chat Completions model supporting tool calling and the agent's request parameters. Keep the `LITELLM_*` variable names and use the provider's exact model ID. This example uses Hermes; to use Claude Code or Codex, configure the gateway protocols and model prefixes below. Route Anthropic and other provider APIs through a compatible gateway.
+
+### Choose a harness
+
+Use the **Harness** picker beside **Model** in a new session. You can bring any model that supports your harness's API and tool-calling requirements. Set `AGENT_MODEL` to its exact gateway alias to add a custom default to the model picker; the built-in names do not grant access to those models.
+
+| Harness | Model selection | Required API |
+| --- | --- | --- |
+| Hermes (default) | Any configured compatible model | Chat Completions |
+| Claude Code | Configured `anthropic/claude-*` model | Messages |
+| Codex | Configured `openai/*` model | Responses |
+| OpenCode | Any configured compatible model | Chat Completions |
+| Deep Agents | Any configured compatible model | Chat Completions |
+| Tool Loop | Any configured compatible model | Chat Completions |
+
+For Claude Code or Codex, use a LiteLLM gateway that exposes the required native API. Moyai forwards Messages and Responses requests without converting them to Chat Completions. Confirm that your key permits the selected model and protocol.
+
+Keep the chosen harness for the session; start a new session to change it. You can change models within the harness's compatibility rules. Automations use Hermes in this version. To add another harness, register an adapter and runtime binding using the [harness extension guide](harnesses.md). The six listed harnesses have built-in adapters; additional harnesses need an integration.
 
 ### Finish the first-run configuration
 
@@ -95,7 +112,7 @@ GITHUB_REPOSITORY=your-org/your-repo
 SESSION_TITLES_ENABLED=false
 ```
 
-Replace `your-org/your-repo` before connecting GitHub. GitHub is optional for the initial file-writing smoke test. For several repositories, use `GITHUB_REPOSITORIES=your-org/repo-a,your-org/repo-b`; this overrides `GITHUB_REPOSITORY` and all repositories must belong to one organization. Personal-account GitHub App installations are not supported by the current shared organization flow.
+Replace `your-org/your-repo` before connecting GitHub. You can run the file-writing check without GitHub. For several repositories in one organization, set `GITHUB_REPOSITORIES=your-org/repo-a,your-org/repo-b`; this overrides `GITHUB_REPOSITORY`. Use an organization-owned GitHub App. Moyai does not support personal-account installations in this flow.
 
 Leave Google OAuth, Slack, tracing, and Temporal disabled for now. You do not need their credentials to run an agent. The copied Google domain/admin examples are BerriAI-specific; replace them before enabling Google SSO for your own team.
 
@@ -109,7 +126,7 @@ This checks for missing values without printing secrets or making a model call:
 uv run python -c 'from app.config import Settings; s=Settings(); missing=s.missing_cloud(); print("Missing: " + ", ".join(missing) if missing else "Required cloud fields are present (credentials not tested)."); raise SystemExit(bool(missing))'
 ```
 
-Do not proceed if it lists missing fields. Presence alone does not establish authentication, model access, or network reachability.
+Fill in any missing fields before deploying. You will test credentials and connectivity with the first task.
 
 ## 4. Deploy the web app
 
@@ -119,34 +136,27 @@ Do not proceed if it lists missing fields. Presence alone does not establish aut
 uv run python deploy_modal.py
 ```
 
-The script:
+After the image build and deployment finish, open the address printed as `Workspace URL: https://…`. Read `WORKSPACE_PASSWORD` from `.env` in your private editor and use it to sign in. The deploy script generates that password and the session/encryption secrets if empty, saves them in `.env`, and uploads the configuration to a Modal Secret. It sets `PUBLIC_URL` to Modal's assigned origin at startup.
 
-1. Reads `.env` and checks for Modal credentials.
-2. Generates missing workspace password, session secret, and encryption key, saving them privately back to `.env`.
-3. Uploads configuration into a Modal Secret, builds the web app image, and deploys one always-on web container.
-4. Prints `Workspace URL: https://…` using Modal's actual assigned URL.
+Keep a secure backup of `.env` for redeployment. Preserve `ENCRYPTION_KEY` to retain access to encrypted connections. Git ignores `.env`, and the image build excludes it. Run one web container with persistent snapshots; see [deployment and backups](deployment.md#deploy-the-control-plane) before changing that setup.
 
-Open **the URL printed by your command**. The app sets its own `PUBLIC_URL` to that origin at startup; you do not need to guess a hostname or deploy twice. Retrieve `WORKSPACE_PASSWORD` from `.env` in your private editor and use it to sign in.
+Edit credentials in `.env`: its values override shell variables, including blank entries. After an edit, wait for active sessions to finish and rerun the deployment command to update the hosted app.
 
-Keep this `.env` for redeployment, with a secure backup. Regenerating `ENCRYPTION_KEY` can make existing saved connections unreadable. `.env` is gitignored and is not bundled into the image. The web service uses one writer with persistent snapshots; see [deployment and backups](deployment.md#deploy-the-control-plane) before changing that topology.
+## 5. Run your first task
 
-**Local configuration rule:** explicitly present `.env` values override shell variables, even when empty. Exporting a key in your shell will not replace a blank entry in `.env`. After changing `.env` for a Modal-hosted installation, rerun the deploy command when sessions are idle; editing the local file alone does not update the running service.
-
-## 5. Prove the agent actually runs
-
-1. Open **Settings → Runtime**. Each required value should be configured and the badge should read **Cloud ready**. This is only a configuration check, not a successful model or Modal call.
-2. Start a new session. In **Context & tools**, select **Execution → Cloud session** and leave **GitHub repository** empty. Do not choose **Demo · simulated**.
-3. Select the exact model configured as `AGENT_MODEL`. The picker also contains built-in model names; their presence does **not** mean your endpoint/key supports them.
+1. Open **Settings → Runtime** and check for **Cloud ready**. The badge checks for required settings; you still need to test the credentials.
+2. Start a new session. In **Context & tools**, select **Execution → Cloud session** and leave **GitHub repository** empty.
+3. Choose **Hermes** in the harness picker for this first check, then select your configured `AGENT_MODEL`. To test another harness, use a compatible model and endpoint from the table above.
 4. Send:
 
    > Use the terminal to create `/workspace/setup-check.txt` containing `moyai setup works`. Read it back with a tool and report the contents. Do not connect apps or publish anything.
 
-5. Allow several minutes for the first Hermes sandbox image build. Inspect **Activity** for actual tool execution and **Files** for `setup-check.txt`. Wait for the turn to finish, not just for text to appear.
+5. Allow several minutes for the first sandbox image build. Wait for the turn to finish, inspect the tool calls in **Activity**, and open `setup-check.txt` in **Files**.
 6. Send a follow-up in the same chat:
 
-   > Read `/workspace/setup-check.txt` again using a tool. What does it contain?
+   > Read `/workspace/setup-check.txt` using a tool and report its contents.
 
-You have verified real execution when tool output and the saved file agree and the follow-up can read it. A normal-looking response in Demo mode proves none of this. If the task fails, fix that layer before adding integrations.
+Confirm that both turns read `moyai setup works` from the file. If either fails, resolve the error before connecting apps.
 
 ## 6. Connect your GitHub repository
 
@@ -162,7 +172,7 @@ You need an organization owner or someone allowed to register/install the organi
 
    > Check out this repository, identify the command for running its tests, and run the smallest relevant test suite. Report the command and actual result. Do not edit files or open a PR.
 
-After that succeeds, request a small change and explicitly ask for a pull request when you want one. The integration can publish PRs; it cannot approve or merge them. [Slack](slack.md), [Linear, and Notion](integrations.md) can be connected later and are not prerequisites for coding.
+After the tests pass, request a small change and ask for a pull request. Review and merge it yourself; Moyai cannot approve or merge PRs. Add [Slack](slack.md), [Linear, or Notion](integrations.md) as needed.
 
 ## Troubleshooting
 
@@ -176,7 +186,8 @@ After that succeeds, request a small change and explicitly ask for a pull reques
 | **Cloud ready**, then model request fails | The badge checks presence only. A gateway 401/403 usually means key/access problems; 404 can mean the wrong base URL or model alias; 429 can mean budget/rate limits. Inspect the provider/gateway error and your model access. Do not select a built-in model unless your endpoint serves that exact ID. |
 | Web app cannot reach gateway | A local-only gateway is not reachable from Modal. Use a reachable protected endpoint; the app appends `/chat/completions` to `LITELLM_API_BASE`. |
 | Agent fails to call back to a separately hosted app | Use HTTPS and the exact configured origin; proxies must preserve Host and allow `/broker/` requests authenticated by run tokens, without an extra browser-only login. The Modal-hosted path configures its origin for you. |
-| Responses say demo/simulated | Start a new session with **Cloud session** selected. Existing demo sessions do not become real agents when configuration changes. |
+| Responses say demo/simulated | Start a new session with **Cloud session** selected. Existing demo sessions keep their mode after configuration changes. |
+| Harness has no models or rejects your selection | Claude Code requires an enabled `anthropic/claude-*` model; Codex requires `openai/*`. Set a compatible `AGENT_MODEL` and redeploy. Check that the gateway exposes Messages or Responses for the chosen harness. |
 | GitHub shows BerriAI's repository / wrong repositories | Change the allowlist in `.env`, redeploy, then reconnect/install the App for exactly those repositories. |
 | GitHub connected but missing from an old session | Start a new session and explicitly check GitHub in **Context & tools**. Check that the connection is enabled and healthy. |
 | Changed `.env`, but nothing changed in the app | Redeploy for Modal hosting; restart for a locally hosted control plane. Preserve existing secrets and wait for active turns to settle first. |

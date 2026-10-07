@@ -2,7 +2,7 @@
 
 [Back to Moyai Devin](../README.md)
 
-Start with the [installation walkthrough](getting-started.md) to deploy Moyai on Modal, configure a model, verify a real task, and connect your repository. The [README](../README.md#getting-started) has the shorter version. The local demo is only a simulated UI preview, not a working agent setup.
+Follow the [installation walkthrough](getting-started.md) to deploy Moyai on Modal and run your first task. Choose your model and harness using the [compatibility guide](harnesses.md). For a shorter setup, use the [README](../README.md#getting-started).
 
 ## Use Moyai
 
