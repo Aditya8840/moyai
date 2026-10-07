@@ -1,6 +1,6 @@
 """Real bundled SDK process and real MCP transport; inference is a local fixture.
 
-No provider calls or generated shell commands. The sole tool echoes test data.
+No provider calls or generated shell commands. Tools read and echo synthetic data.
 """
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -9,16 +9,19 @@ import sys
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from sandbox.claude_harness import ClaudeAgent
 
 
-def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch):
+@pytest.mark.parametrize('resumed', [False, True], ids=['new-session', 'large-checkpoint'])
+def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resumed):
     calls, requests, events = [], [], []
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
-        def reply(self, value):
+        def reply(self, value, status=200):
             body = json.dumps(value).encode()
-            self.send_response(200)
+            self.send_response(status)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
@@ -34,9 +37,22 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch):
                 return self.reply({'text': data['arguments']['text']})
             assert self.path.startswith('/v1/messages')
             requests.append(data)
+            # A fresh SDK session cannot compact an oversized first message.
+            if len(json.dumps(data['messages']).encode()) > 100_000:
+                return self.reply({'type': 'error', 'error': {'type': 'invalid_request_error',
+                    'message': 'Prompt is too long'}}, status=400)
             done = bool(calls)
-            block = ({'type': 'text', 'text': 'sdk-transport-ok'} if done else
-                     {'type': 'tool_use', 'id': 'tool_echo', 'name': 'mcp__moyai__echo', 'input': {'text': 'sdk-transport-ok'}})
+            receipt = next((block for message in data['messages'] for block in message.get('content', [])
+                            if isinstance(block, dict) and block.get('tool_use_id') == 'history_read'), None)
+            if resumed and receipt is None:
+                block = {'type': 'tool_use', 'id': 'history_read', 'name': 'Read', 'input': {
+                    'file_path': str(session / '.moyai-history.jsonl'), 'offset': 1, 'limit': 1}}
+            else:
+                if resumed:
+                    assert not receipt.get('is_error'), receipt
+                    assert 'Continue the searchable dropdown task' in json.dumps(receipt)
+                block = ({'type': 'text', 'text': 'sdk-transport-ok'} if done else
+                         {'type': 'tool_use', 'id': 'tool_echo', 'name': 'mcp__moyai__echo', 'input': {'text': 'sdk-transport-ok'}})
             message = {'id': 'msg_' + str(len(requests)), 'type': 'message', 'role': 'assistant',
                        'model': 'claude-sonnet-4-5', 'content': [block], 'stop_reason': 'end_turn' if done else 'tool_use',
                        'stop_sequence': None, 'usage': {'input_tokens': 50, 'output_tokens': 10}}
@@ -64,22 +80,37 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch):
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'fixture-capability')
     monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-config'))
     relay = SimpleNamespace(url=url)
-    agent = ClaudeAgent(spec={'model': 'anthropic/claude-sonnet-4-5', 'timeout': 30, 'max_iterations': 3},
+    workspace, session = tmp_path / 'workspace', tmp_path / 'session'
+    workspace.mkdir()
+    session.mkdir()
+    agent = ClaudeAgent(spec={'model': 'anthropic/claude-sonnet-4-5', 'timeout': 30, 'max_iterations': 3,
+                             'history_reference_dir': str(session)},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
             'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': url, 'WORKSPACE_RUN_TOKEN': 'fixture-capability'}}}},
         activity=SimpleNamespace(start=lambda *a: events.append(('start', a)),
             complete=lambda *a: events.append(('complete', a)), commentary=lambda text: None),
-        step=lambda: None, cwd=str(tmp_path), definition=None)
+        step=lambda: None, cwd=str(workspace), definition=None)
+    history = ([{'role': 'user', 'content': 'Continue the searchable dropdown task; do not repeat completed writes.'},
+                {'role': 'assistant', 'tool_calls': [{'id': 'read1', 'type': 'function', 'function': {
+                    'name': 'Read', 'arguments': '{"file_path":"build.log"}'}}]},
+                {'role': 'tool', 'tool_call_id': 'read1', 'content': '\n'.join(
+                    f'Build output {i}: completed operation with verbose diagnostic details.' for i in range(5000))}]
+               if resumed else [])
     try:
-        result = agent.run_conversation('Call the echo tool.', conversation_history=[], system_message='Transport fixture.')
+        result = agent.run_conversation('Call the echo tool.', conversation_history=history, system_message='Transport fixture.')
         assert result['completed'], result['final_response']
         assert result['final_response'] == 'sdk-transport-ok'
         assert calls == [{'name': 'echo', 'arguments': {'text': 'sdk-transport-ok'}}]
-        assert [kind for kind, _ in events] == ['start', 'complete']
+        assert [kind for kind, _ in events] == ['start', 'complete'] * (2 if resumed else 1)
         assert not agent.journal.pending
         assert any(m.get('role') == 'tool' and 'sdk-transport-ok' in m['content'] for m in result['messages'])
         assert any('cache_control' in json.dumps(body) for body in requests)
+        assert result['messages'][:len(history)] == history
+        if resumed:
+            saved = [json.loads(line) for line in (session / '.moyai-history.jsonl').read_text().splitlines()]
+            assert saved == history
+            assert not (workspace / '.moyai-history.jsonl').exists()
     finally:
         agent.close()
         server.shutdown()
