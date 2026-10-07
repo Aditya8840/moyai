@@ -37,7 +37,7 @@ function bindAttachments(input,form,key){
   form.prepend(region);
   const picker=document.createElement('input');picker.type='file';picker.multiple=true;picker.hidden=true;picker.setAttribute('aria-label','Choose attachments');form.append(picker);
   const button=document.createElement('button');button.type='button';button.className='quiet attach-button';button.title='Attach files · or paste an image';button.setAttribute('aria-label','Attach files');
-  button.innerHTML=`${globalThis.MoyaiIcon?.('paperclip',18)||''}<span>Attach</span>`;
+  button.innerHTML=`${globalThis.MoyaiIcon?.('paperclip',16)||''}<span>Attach</span>`;
   form.querySelector('.composer-toolbar').prepend(button);
   const announce=document.createElement('span');announce.className='sr-only';announce.setAttribute('role','status');form.append(announce);
   const notify=()=>draft.listeners.forEach(listener=>listener());

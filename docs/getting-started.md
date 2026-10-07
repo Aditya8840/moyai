@@ -139,7 +139,7 @@ Edit credentials in `.env`: its values override shell variables, including blank
 ## 5. Run your first task
 
 1. Open **Settings → Runtime** and check for **Cloud ready**. The badge checks for required settings; you still need to test the credentials.
-2. Start a new session. In **Context & tools**, select **Execution → Cloud session** and leave **GitHub repository** empty.
+2. Start a new session. In **Context**, select **Execution → Cloud session** and leave **GitHub repository** empty.
 3. Choose **Claude Agent SDK** in the harness picker and **GPT-6 Astra** in the model picker. To test another combination, select any configured model and a harness whose API your gateway supports.
 4. Send:
 
@@ -183,7 +183,7 @@ After the tests pass, request a small change and ask for a pull request. Review 
 | Responses say demo/simulated | Start a new session with **Cloud session** selected. Existing demo sessions keep their mode after configuration changes. |
 | Model missing or gateway rejects a harness request | Set the gateway alias as `AGENT_MODEL` and redeploy. All harnesses offer the configured models. Check that your gateway/key supports the model through Messages (Claude Agent SDK), Responses (Codex), or Chat Completions (other harnesses). |
 | GitHub shows BerriAI's repository / wrong repositories | Change the allowlist in `.env`, redeploy, then reconnect/install the App for exactly those repositories. |
-| GitHub connected but missing from an old session | Start a new session and explicitly check GitHub in **Context & tools**. Check that the connection is enabled and healthy. |
+| GitHub connected but missing from an old session | Start a new session and explicitly check GitHub in **Context**. Check that the connection is enabled and healthy. |
 | Changed `.env`, but nothing changed in the app | Redeploy for Modal hosting; restart for a locally hosted control plane. Preserve existing secrets and wait for active turns to settle first. |
 
 Do not include `.env`, model keys, Modal tokens, or PEM files in bug reports. Include the failed step and redacted error instead.
