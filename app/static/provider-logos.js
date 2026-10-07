@@ -7,8 +7,10 @@
     meta_llama:'meta_llama',moonshot:'moonshot',openrouter:'openrouter',together_ai:'togetherai',
     cohere:'cohere',minimax:'minimax',
   };
+  const harnesses={'claude-agent-sdk':'claude-code',codex:'codex'};
   function src(model){const file=logos[String(model||'').split('/')[0].toLowerCase()];return file?`/static/provider-logos/${file}.svg`:null;}
-  function sync(img,model){const url=src(model);img.hidden=!url;if(url)img.src=url;else img.removeAttribute('src');}
-  const api={src,sync};root.MoyaiProviderLogos=api;
+  function harness(id){const file=harnesses[id];return file?`/static/harness-logos/${file}.svg`:null;}
+  function sync(img,model,resolve=src){const url=resolve(model);img.hidden=!url;if(url)img.src=url;else img.removeAttribute('src');}
+  const api={src,harness,sync};root.MoyaiProviderLogos=api;
   if(typeof module!=='undefined')module.exports=api;
 })(typeof globalThis!=='undefined'?globalThis:window);
