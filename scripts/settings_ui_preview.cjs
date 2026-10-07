@@ -73,7 +73,7 @@ const server=http.createServer(async(req,res)=>{
    if(role!=='admin')return json(res,403,{detail:'Administrator access required.'});
    sandboxConnection={...sandboxConnection,provider:body.provider,revision:sandboxConnection.revision+1,message:'Synthetic connection test succeeded.'};
    for(const [key,value] of Object.entries(body.values||{})){
-    if(key.includes('token'))sandboxConnection.providers[body.provider].secrets[key]=!!value;
+    if(key.includes('token')){if(value)sandboxConnection.providers[body.provider].secrets[key]=true;}
     else sandboxConnection.providers[body.provider].values[key]=value;
    }
   }

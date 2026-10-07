@@ -145,6 +145,8 @@ class Environments:
                     build = recent[0] if recent else self.enqueue(selected['id'], selected['revision'], 'First session', provider=run['sandbox_provider'])
                     if build['phase'] == 'failed':
                         raise HTTPException(409, 'Project setup failed for ' + recipe['repository'] + '. An administrator can inspect the build log, edit the recipe, and rebuild in Environments.')
+                    if build['phase'] == 'ready':
+                        return self.bind(run_id, prepared_build=build['id'])
                     raise EnvironmentPending(recipe['name'], build['id'])
         except ConnectorError as exc:
             raise HTTPException(409, str(exc)) from None
@@ -276,16 +278,16 @@ class Environments:
             return 'Project setup failed for ' + recipe['repository'] + '. Rebuild its environment in Environments.'
         return 'Preparing project environment: ' + recipe['name'] + '. Waiting for a successful build.'
 
-    def bind(self, run_id):
+    def bind(self, run_id, prepared_build=None):
         """Pin once. Existing session snapshots always win over project templates."""
         run = self.store.run(run_id)
         if not run.get('environment_build_id'):
             previous = run.get('snapshot_id') or run.get('parent_run_id') or self.store.rows(
                 "SELECT 1 FROM messages WHERE run_id=? AND role='assistant' LIMIT 1", (run_id,))
             row = None if previous else self.choose(run.get('environment_id', 'auto'), run['repo_url'], run.get('github_repository_id'))
-            if row and not row['active_build']:
+            if row and not row['active_build'] and not prepared_build:
                 raise HTTPException(409, 'This repository environment is still being prepared.')
-            identity = row['active_build'] if row else 'none'
+            identity = (prepared_build or row['active_build']) if row else 'none'
             self.store.execute("UPDATE runs SET environment_build_id=? WHERE id=? AND environment_build_id=''", (identity, run_id))
             if row:
                 recipe = json.loads(self.build(identity)['recipe'])
@@ -471,7 +473,7 @@ class Environments:
         async def build(identity: str, body: BuildRequest, request: Request):
             who = actor(request)
             if self.settings.missing_sandbox():
-                raise HTTPException(503, 'Configure Modal in Runtime before building an environment.')
+                raise HTTPException(503, 'Configure a sandbox provider in Runtime before building an environment.')
             return self.enqueue(identity, body.revision, who)
 
         @router.put('/api/admin/environments/{identity}/policy')

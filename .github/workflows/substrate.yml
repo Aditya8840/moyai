@@ -38,9 +38,23 @@ jobs:
       - name: Create disposable Kubernetes cluster
         working-directory: .substrate
         run: hack/create-kind-cluster.sh
+      - uses: actions/cache/restore@v4
+        id: substrate-go-cache
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: substrate-go-1.27-${{ runner.os }}-${{ runner.arch }}-92b74c0
       - name: Install real Substrate and two sandbox workers
         working-directory: .substrate
         run: hack/install-ate-kind.sh --deploy-ate-system --credential-provider='{"enabled":false}' --deploy-demo-sandbox
+      - uses: actions/cache/save@v4
+        if: steps.substrate-go-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: substrate-go-1.27-${{ runner.os }}-${{ runner.arch }}-92b74c0
       - name: Build Moyai runtime image
         run: |
           docker build -f Dockerfile.sandbox -t localhost:5001/moyai-sandbox:test .
@@ -54,7 +68,9 @@ jobs:
         run: |
           kubectl get pods -A -o wide
           kubectl get events -A --sort-by=.metadata.creationTimestamp | tail -80
-          kubectl logs -n ate-system deployment/ate-api-server --tail=150 || true
+          kubectl logs -n ate-system deployment/ate-api-server --all-pods=true --tail=150 || true
+          kubectl logs -n ate-system deployment/atenet-router --all-pods=true --all-containers=true --tail=80 || true
+          kubectl logs -n ate-demo-sandbox deployment/sandbox-workerpool --all-pods=true --tail=150 || true
       - name: Delete disposable cluster
         if: always()
         working-directory: .substrate

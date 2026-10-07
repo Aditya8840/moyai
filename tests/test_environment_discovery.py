@@ -97,6 +97,20 @@ async def test_first_sessions_share_one_pending_build(environments):
 
 
 @pytest.mark.asyncio
+async def test_provider_switch_reuses_ready_build_for_original_provider(environments):
+    env = environments
+    modal_build = prepared(env)
+    substrate_build = env.enqueue('e' * 32, 1, 'admin', provider='substrate')
+    env.update(substrate_build['id'], phase='ready', snapshot_id='substrate:tests:moyai:prepared')
+    env.store.execute('UPDATE environments SET active_build=? WHERE id=?', (substrate_build['id'], 'e' * 32))
+    run = new_run(env, 'BerriAI/litellm')
+    context = await env.prepare(run['id'])
+    assert context['build_id'] == modal_build
+    assert context['snapshot_id'] == 'im-project'
+    assert len(env.store.rows('SELECT id FROM environment_builds')) == 2
+
+
+@pytest.mark.asyncio
 async def test_ready_environment_only_matches_its_repository(environments, monkeypatch):
     env = environments
     run = new_run(env)

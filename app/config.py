@@ -285,6 +285,14 @@ class Settings(BaseSettings):
             private_key(value)
         return value
 
+    @field_validator('substrate_egress_hosts')
+    @classmethod
+    def substrate_hosts(cls, value):
+        hosts = [host.strip() for host in value.split(',') if host.strip()]
+        if not hosts:
+            raise ValueError('Enter at least one outbound hostname pattern.')
+        return ','.join(hosts)
+
     def missing_sandbox(self, provider=None) -> list[str]:
         required = ({'MODAL_TOKEN_ID': self.modal_token_id, 'MODAL_TOKEN_SECRET': self.modal_token_secret}
                     if (provider or self.sandbox_provider) == 'modal' else {

@@ -8,11 +8,12 @@ Substrate runs the sandboxes on your existing Kubernetes cluster. Moyai's web ap
 
 This integration targets Substrate's API at commit `92b74c0ee45aee6578a1a3d468f9f56b95074050`. Substrate is pre-1.0; use this tested API version. The automated integration test installs this exact revision on a disposable GitHub runner.
 
-1. Build and push the workspace image to a registry your Substrate workers can pull. Use an immutable tag or digest:
+1. Build and push the workspace image to a registry your Substrate workers can pull. Copy its repository digest; Substrate requires a digest to keep snapshots compatible:
 
    ```sh
    docker build -f Dockerfile.sandbox -t YOUR_REGISTRY/moyai-sandbox:YOUR_VERSION .
    docker push YOUR_REGISTRY/moyai-sandbox:YOUR_VERSION
+   docker image inspect --format '{{index .RepoDigests 0}}' YOUR_REGISTRY/moyai-sandbox:YOUR_VERSION
    ```
 
 2. In Moyai's Runtime settings, select **Substrate** and expand **Set up the Moyai actor template**. Copy the public key. The private signing key stays encrypted on the server; the sandbox only receives the public key.
@@ -22,7 +23,7 @@ This integration targets Substrate's API at commit `92b74c0ee45aee6578a1a3d468f9
    ```sh
    kubectl ate create atespace moyai
    python scripts/substrate_template.py \
-     --image YOUR_REGISTRY/moyai-sandbox:YOUR_VERSION \
+     --image YOUR_REGISTRY/moyai-sandbox@sha256:YOUR_DIGEST \
      --storage gs://YOUR_BUCKET/moyai \
      --public-key YOUR_MOYAI_PUBLIC_KEY > /tmp/moyai-template.json
    kubectl ate create actor-template -f /tmp/moyai-template.json

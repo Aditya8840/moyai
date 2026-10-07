@@ -35,6 +35,13 @@ def ref(atespace, name):
     return {'atespace': atespace, 'name': name}
 
 
+def tls_context(settings):
+    context = ssl.create_default_context()
+    if settings.substrate_ca_cert:
+        context.load_verify_locations(cadata=settings.substrate_ca_cert)
+    return context
+
+
 class SubstrateProvider:
     name = 'substrate'
 
@@ -43,7 +50,7 @@ class SubstrateProvider:
 
     async def rpc(self, method, data, timeout=120):
         url = urlsplit(self.settings.substrate_api_url)
-        tls = ssl.create_default_context(cadata=self.settings.substrate_ca_cert or None) if url.scheme == 'https' else False
+        tls = tls_context(self.settings) if url.scheme == 'https' else False
         if tls:
             tls.set_alpn_protocols(['h2'])
         channel = Channel(url.hostname, url.port or (443 if tls else 80), ssl=tls)
@@ -136,7 +143,8 @@ class SubstrateProvider:
             response = await sandbox.request('/activate', {})
             if response.get('version') != VERSION:
                 raise ValueError('Update the Moyai Substrate runtime image.')
-            process = await sandbox.exec.aio('/usr/local/bin/python', '-c', 'print("moyai-connected")', timeout=30)
+            process = await sandbox.exec.aio('/opt/hermes-env/bin/python', '-c',
+                'from run_agent import AIAgent; import mcp, claude_agent_sdk; print("moyai-connected")', timeout=30)
             out, _ = await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
             if await process.wait.aio() or out.strip() != 'moyai-connected':
                 raise RuntimeError('The sandbox could not execute a command.')
@@ -169,7 +177,7 @@ class Sandbox:
                    'X-Moyai-Actor': self.actor.metadata.uid, 'X-Moyai-Time': stamp, 'X-Moyai-Nonce': nonce,
                    'X-Moyai-Signature': base64.b64encode(signature).decode(), 'Content-Type': 'application/json'}
         settings = self.provider.settings
-        verify = ssl.create_default_context(cadata=settings.substrate_ca_cert or None)
+        verify = tls_context(settings)
         async with httpx.AsyncClient(timeout=60, verify=verify, follow_redirects=False) as client:
             async with client.stream('POST', settings.substrate_router_url.rstrip('/') + path, content=body, headers=headers) as response:
                 if response.status_code == 404:

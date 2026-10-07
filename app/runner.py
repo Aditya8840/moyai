@@ -240,7 +240,7 @@ class RunManager:
             if self.stopped(run_id):
                 self.store.update_run(run_id, status="cancelled", token_hash="")
             else:
-                message = str(exc.detail) if isinstance(exc, HTTPException) else ("Task exceeded its time limit." if isinstance(exc, TimeoutError) else f"Cloud run failed ({type(exc).__name__}). Check runtime configuration and Modal logs.")
+                message = str(exc.detail) if isinstance(exc, HTTPException) else ("Task exceeded its time limit." if isinstance(exc, TimeoutError) else f"Cloud run failed ({type(exc).__name__}). Check runtime configuration and sandbox provider logs.")
                 self.store.update_run(run_id, status="failed", token_hash="", error=message)
                 self.store.event(run_id, "error", message)
         finally:
@@ -271,9 +271,9 @@ class RunManager:
         steps = [
             ("status", "Demo started · no cloud machine or model is being used"),
             ("plan", "Preview the task workflow, stream activity, and save a result."),
-            ("tool", "Simulated sandbox ready", {"command": "Sandbox creation will happen on Modal in cloud mode."}),
+            ("tool", "Simulated sandbox ready", {"command": "Sandbox creation will use your selected provider in cloud mode."}),
             ("tool", "Simulated workspace inspection", {"command": "No repository files are read or changed in demo mode."}),
-            ("result", "Demo complete. Your task and activity are saved. Configure Modal and your model gateway in Runtime to execute this task with Hermes."),
+            ("result", "Demo complete. Your task and activity are saved. Configure a sandbox provider and your model gateway in Runtime to execute this task."),
         ]
         for step in steps:
             await asyncio.sleep(self.settings.demo_step_seconds)
@@ -338,7 +338,7 @@ class RunManager:
     async def cloud(self, run):
         run_id = run["id"]
         self.store.update_run(run_id, status="provisioning")
-        self.store.event(run_id, "status", "Provisioning an isolated Modal sandbox")
+        self.store.event(run_id, "status", "Provisioning an isolated sandbox")
         waiting = ''
         while self.environments and not self.stopped(run_id):
             try:

@@ -46,10 +46,12 @@ def main():
             backend = SubstrateProvider(Settings(_env_file=None))
             # Reuse the installed sandbox demo's storage scheme and worker pool.
             existing = await backend.rpc('GetActorTemplate', {'actor_template': {'atespace': 'ate-demo-sandbox', 'name': 'sandbox-template'}})
-            config = template(image='localhost:5001/moyai-sandbox:test', storage=existing.snapshot_config.storage_location,
+            digest = output('docker', 'image', 'inspect', '--format', '{{index .RepoDigests 0}}', 'localhost:5001/moyai-sandbox:test')
+            config = template(image=digest, storage=existing.snapshot_config.storage_location,
                               public_key=public, atespace='ate-demo-sandbox', memory='1536Mi', workload='sandbox')
             message = ParseDict(config, pb.ActorTemplate())
             await backend.rpc('CreateActorTemplate', {'actor_template': message})
+            print(await backend.check(), flush=True)
             await smoke()
         asyncio.run(run())
     finally:

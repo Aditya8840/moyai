@@ -55,6 +55,38 @@ async def verify_environment_build(sandbox):
     print('PASS outbound GitHub access and real environment build supervisor', flush=True)
 
 
+async def verify_computer(sandbox):
+    result = await execute(sandbox, r'''
+import sys, threading, json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+sys.path.insert(0, '/opt/workspace-runner')
+import computer
+class Page(BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+    def do_GET(self):
+        page = b'<title>Moyai</title><h1>Ready</h1><button onclick="document.querySelector(\'h1\').textContent=\'Clicked\'">Test</button>'
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html')
+        self.end_headers()
+        self.wfile.write(page)
+server = ThreadingHTTPServer(('127.0.0.1', 0), Page)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+try:
+    opened = computer.request({'action':'open','args':{'url':f'http://127.0.0.1:{server.server_port}'}})
+    assert opened.get('title') == 'Moyai', opened
+    clicked = computer.request({'action':'click','args':{'role':'button','name':'Test'}})
+    assert 'Clicked' in clicked.get('text',''), clicked
+    captured = computer.request({'action':'screenshot','args':{'name':'substrate-computer'}})
+    assert 'path' in captured, captured
+    print(json.dumps(captured))
+finally:
+    server.shutdown()
+    server.server_close()
+''')
+    assert (await sandbox.filesystem.read_bytes.aio(json.loads(result)['path'])).startswith(b'\x89PNG')
+    print('PASS Moyai Computer service, visible Chromium/Xvfb, click and saved screenshot', flush=True)
+
+
 async def main():
     settings = Settings()
     backend = SubstrateProvider(settings)
@@ -66,6 +98,8 @@ async def main():
         await original.filesystem.write_text.aio('persisted ✓', '/workspace/proof.txt')
         assert (await original.filesystem.read_bytes.aio('/workspace/proof.txt')).decode() == 'persisted ✓'
         assert 'out ✓' in await execute(original, 'import sys; print("out ✓"); print("err", file=sys.stderr)')
+        timed = await original.exec.aio('/usr/local/bin/python', '-c', 'import time; time.sleep(30)', timeout=1)
+        assert await timed.wait.aio() == 124
         await execute(original, 'from pathlib import Path; Path("/usr/local/rootfs-proof").write_text("rootfs")')
         print('PASS command, stdout/stderr, file read/write', flush=True)
         await original.exec.aio('/usr/local/bin/python', '-c',
@@ -90,6 +124,7 @@ async def main():
         assert output.strip() == 'Moyai'
         assert (await clone.filesystem.read_bytes.aio('/workspace/browser.png')).startswith(b'\x89PNG')
         print('PASS real Chromium and screenshot artifact', flush=True)
+        await verify_computer(clone)
         if os.environ.get('MOYAI_SMOKE_FULL_IMAGE'):
             await verify_agent_image(clone)
             await verify_environment_build(clone)

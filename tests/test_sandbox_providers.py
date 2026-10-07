@@ -33,6 +33,17 @@ def test_readiness_only_requires_selected_provider(tmp_path):
     assert settings.missing_sandbox('modal') == ['MODAL_TOKEN_ID', 'MODAL_TOKEN_SECRET']
 
 
+def test_actor_template_requires_digest_and_projects_actor_identity():
+    from scripts.substrate_template import template
+    args = {'image': 'registry/moyai:latest', 'storage': 'gs://bucket/moyai', 'public_key': 'test'}
+    with pytest.raises(ValueError, match='requires an image digest'):
+        template(**args)
+    args['image'] = 'registry/moyai@sha256:' + 'a' * 64
+    result = template(**args)
+    assert result['containers'][0]['image'] == args['image']
+    assert result['volumes'][0]['systemInfo']['dataSources'][0]['actorMetadata']['items'][0]['field'] == 'ACTOR_METADATA_FIELD_UID'
+
+
 @pytest.mark.parametrize('url', ['http://untrusted.example', 'https://user:secret@example.com', 'https://example.com/path', 'https://example.com?token=x'])
 def test_connection_endpoint_validation(url):
     with pytest.raises(ValueError):

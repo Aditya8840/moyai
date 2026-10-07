@@ -1,9 +1,12 @@
 """Print the Moyai ActorTemplate for `kubectl ate create actor-template -f -`."""
 import argparse
 import json
+import re
 
 
 def template(*, image, storage, public_key, atespace='moyai', name='moyai', memory='4Gi', workload='moyai'):
+    if not re.fullmatch(r'.+@sha256:[0-9a-f]{64}', image):
+        raise ValueError('Substrate requires an image digest: registry/image@sha256:<digest>. Inspect the pushed image to get its RepoDigest.')
     return {
         'metadata': {'atespace': atespace, 'name': name},
         'workerSelector': {'matchLabels': {'workload': workload}},
