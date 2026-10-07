@@ -42,7 +42,7 @@ def test_native_gateway_preserves_discovered_tool_references(workspace, monkeypa
                    'tools': [{'type': 'custom', 'name': 'apply_patch', 'format': {'type': 'text'}}]},
      b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_test","status":"completed","usage":{"input_tokens":11,"output_tokens":3}}}\n\n'),
 ])
-@pytest.mark.parametrize('model', ['openai/gpt-6-astra', 'anthropic/claude-opus-5-5', 'fireworks_ai/glm-5p3'])
+@pytest.mark.parametrize('model', ['openai/gpt-6-astra', 'openai/gpt-6.1-sol', 'anthropic/claude-opus-5-5', 'fireworks_ai/glm-5p3'])
 def test_native_gateway_preserves_protocol_stream_and_pins_access(workspace, monkeypatch, route, body, wire, model):
     app, client = workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
