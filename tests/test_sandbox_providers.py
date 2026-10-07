@@ -319,7 +319,8 @@ async def test_initialize_sends_required_egress_ports():
     policy = pb.CreateActorEgressPolicyRequest(**data).egress_policy
     for rule in (policy.rules[0].http, policy.rules[1].tls_passthrough):
         assert list(rule.hostnames) == ['github.com', '*.example.com']
-        assert rule.ports.HasField('all')
+    assert list(policy.rules[0].http.ports.numbers) == [80]
+    assert policy.rules[1].tls_passthrough.ports.HasField('all')
 
 
 def test_repeated_activation_does_not_extend_original_lease(transport):

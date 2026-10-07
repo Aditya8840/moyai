@@ -99,7 +99,7 @@ class SubstrateProvider:
         try:
             await self.rpc('CreateActorEgressPolicy', {
                 'actor': sandbox.ref, 'egress_policy': {'metadata': ref(sandbox.ref['atespace'], 'default'), 'rules': [
-                    {'http': {'hostnames': self.settings.substrate_egress_hosts.split(','), 'ports': {'all': {}}}},
+                    {'http': {'hostnames': self.settings.substrate_egress_hosts.split(','), 'ports': {'numbers': [80]}}},
                     {'tls_passthrough': {'hostnames': self.settings.substrate_egress_hosts.split(','), 'ports': {'all': {}}}}]}})
         except AlreadyExistsError:
             pass

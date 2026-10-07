@@ -63,7 +63,7 @@ Moyai takes FULL Substrate snapshots so workspace files, installed packages, and
 
 Snapshots are retained as Substrate tags after their actor is deleted. Keep tags while sessions or environment builds reference them. Their storage is billed by your cluster's object-storage provider. Infrastructure billing remains provider-specific; Modal's billing API cannot report Kubernetes costs. LLM usage tracking works for either provider.
 
-Moyai configures HTTP and TLS-passthrough egress for the allowed outbound host patterns (default `*`, equivalent to an internet-enabled workspace). Substrate's own networking and runtime restrictions still apply. Narrow this list when your cluster's policy requires it, including Moyai's broker and the package/repository hosts your tasks need.
+Moyai configures HTTP on port 80 and TLS-passthrough on any port for the allowed outbound host patterns (default `*`). Substrate's own networking and runtime restrictions still apply. Narrow this list when your cluster's policy requires it, including Moyai's broker and the package/repository hosts your tasks need.
 
 ## Validate an installation
 
