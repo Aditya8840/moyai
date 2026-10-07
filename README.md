@@ -284,6 +284,12 @@ its Python interpreter (prepared with the `mcp` extra), then run
 stdio bridge and Moyai broker with fixture providers, checks the model-visible
 schema size, and exercises scope restrictions, revocation, and denied writes.
 
+The sandbox also applies [targeted Hermes runtime patches](sandbox/HERMES_PATCHES.md)
+so repeated mid-turn corrections do not stop a healthy session. With the same
+environment variables, run `uv run pytest -q -s tests/test_hermes_steering.py`
+to reproduce the original failure and verify the installed fix with real file
+tools and scripted model replies.
+
 ## Enable cloud runs
 
 The cloud sandbox calls back to this server for model and app tools, so `PUBLIC_URL` must be a **reachable HTTPS address**. Loopback URLs deliberately keep cloud execution disabled.
