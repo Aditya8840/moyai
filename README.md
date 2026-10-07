@@ -1,8 +1,8 @@
+# Moyai
+
 <p align="center">
   <img src="docs/assets/moyai-hero.png" alt="Moyai, an open source cloud agent" width="100%">
 </p>
-
-# Moyai
 
 A self-hosted coding agent for background work. Give it a task from your browser or Slack; it edits code, runs tests, and opens a pull request for review. Send corrections while it works or resume with saved files and conversation history.
 
