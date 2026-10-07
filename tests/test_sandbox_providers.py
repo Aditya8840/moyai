@@ -308,6 +308,20 @@ async def test_retry_initializes_partial_actor_without_deleting_it_on_failure():
     backend.initialize.assert_not_awaited()
 
 
+async def test_initialize_sends_required_egress_ports():
+    backend = SubstrateProvider(Settings(_env_file=None, substrate_egress_hosts='github.com,*.example.com'))
+    backend.rpc = AsyncMock()
+    sandbox = Sandbox(backend, pb.Actor(metadata={'atespace': 'tests', 'name': 'one', 'uid': 'actor-one'}))
+    sandbox.request = AsyncMock()
+    await backend.initialize(sandbox, timeout=120, apt_packages=())
+    method, data = backend.rpc.call_args_list[0].args
+    assert method == 'CreateActorEgressPolicy'
+    policy = pb.CreateActorEgressPolicyRequest(**data).egress_policy
+    for rule in (policy.rules[0].http, policy.rules[1].tls_passthrough):
+        assert list(rule.hostnames) == ['github.com', '*.example.com']
+        assert rule.ports.HasField('all')
+
+
 def test_repeated_activation_does_not_extend_original_lease(transport):
     sandbox, _ = transport
     guest.dispatch('/activate', {'expires_at': 1234})
