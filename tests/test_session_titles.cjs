@@ -63,6 +63,71 @@ test('sidebar escapes titles and exposes real status, timestamps, repository, se
   assert.equal(h.sessionRepository({repo_url:'https://github.com.evil.test/org/repo'}),'');
 });
 
+test('active states use an icon by the title with no visible status text next to the timestamp',()=>{
+  const {context:h}=harness();
+  for(const status of ['running','queued','provisioning','reconnecting','saving','waiting_children','stopping'])for(const child of [false,true]){
+    const row=h.sidebarRow({id:'parent',prompt:'Task',status,updated_at:'2026-10-06T12:00:00Z'},child);
+    assert.match(row,/session-title-row.*session-spinner.*session-link-meta/);
+    assert.match(row,/2m ago/);
+    assert.doesNotMatch(row,/session-state|session-dot|session-completion/);
+    assert.doesNotMatch(row.replace(/<[^>]*>/g,''),/Working|Queued|Starting|Saving|Stopping|Reconnecting/);
+  }
+  for(const status of ['idle','completed','failed','cancelled','interrupted','waiting_credential','awaiting_approval','unknown']){
+    const row=h.sidebarRow({id:'parent',status});
+    assert.doesNotMatch(row,/session-spinner|session-state|Working now/);
+  }
+});
+
+test('completion circles fade once opened, persist on reload, and reappear for newer work',()=>{
+  const {context:h,state}=harness(),saved=new Map();
+  h.localStorage={getItem:key=>saved.get(key),setItem:(key,value)=>saved.set(key,value)};
+  const run={id:'parent',status:'completed',updated_at:'2026-10-07T12:00:00Z'};
+  assert.match(h.sidebarRow(run),/Unread completion/);
+  h.markSessionRead(run);
+  assert.match(h.sidebarRow(run),/session-completion is-read/);
+  assert.doesNotMatch(h.sidebarRow(run),/Unread completion/);
+  state.sessionReadFade.clear();state.sessionRead=new Map();
+  assert.doesNotMatch(h.sidebarRow(run),/session-completion/);
+  assert.match(h.sidebarRow({...run,status:'running'}),/session-spinner/);
+  assert.match(h.sidebarRow({...run,updated_at:'2026-10-07T13:00:00Z'}),/Unread completion/);
+  state.userId='another-user';assert.match(h.sidebarRow(run),/Unread completion/);
+});
+
+test('read state handles disabled storage and child sessions independently',()=>{
+  const {context:h,state}=harness();
+  h.localStorage={getItem:()=>{throw Error('Blocked');},setItem:()=>{throw Error('Quota');}};
+  const run={id:'parent',status:'idle',updated_at:'2026-10-07T12:00:00Z'};
+  h.markSessionRead(run);state.sessionReadFade.clear();
+  assert.doesNotMatch(h.sidebarRow(run),/session-completion/);
+  assert.match(h.sidebarRow({...run,id:'child'},true),/Unread completion/);
+  assert.doesNotMatch(h.sidebarRow({...run,status:'waiting_credential'}),/session-completion/);
+  assert.match(h.sidebarRow({...run,status:'waiting_credential'}),/session-attention/);
+});
+
+test('only a completion rendered in the visible open chat is automatically read',()=>{
+  const {context:h,state}=harness();
+  const run={id:'parent',status:'idle',updated_at:'2026-10-07T12:00:00Z'};
+  state.runs=[run];state.chatRun={id:'parent'};h.document.hidden=true;
+  h.syncRunSummary(run);assert.match(h.sidebarRow(run),/Unread completion/);
+  h.document.hidden=false;h.syncRunSummary(run);
+  assert.doesNotMatch(h.sidebarRow(run),/Unread completion/);
+  state.selected='other';h.syncRunSummary({...run,updated_at:'2026-10-07T13:00:00Z'});
+  assert.match(h.sidebarRow(state.runs[0]),/Unread completion/);
+});
+
+test('a live status update removes the spinner when work finishes and restores it for follow-ups',()=>{
+  const {context:h,state,node}=harness();
+  state.runs=[{id:'parent',prompt:'Task',status:'running'}];
+  h.renderSidebar();assert.match(node('#session-list').innerHTML,/session-spinner/);
+  for(const status of ['idle','completed','failed','waiting_credential']){
+    h.syncRunSummary({id:'parent',status});
+    assert.doesNotMatch(node('#session-list').innerHTML,/session-spinner|Working now/);
+    h.syncRunSummary({id:'parent',status:'running'});
+    assert.match(node('#session-list').innerHTML,/session-spinner/);
+    assert.match(node('#session-list').innerHTML,/Working now/);
+  }
+});
+
 test('background list poll updates header, sidebar, search and side tabs without changing conversation state',async()=>{
   const {context:h,state,node,panelUpdates}=harness();
   const original={id:'parent',prompt:'- we wanna tidy things',status:'idle',children:[]};

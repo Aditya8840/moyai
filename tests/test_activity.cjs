@@ -255,11 +255,12 @@ test('manual expansion and collapse survive focus changes and completion with ke
 test('the composer follows live SSE focus, reconnects and lifecycle state without exposing focus history',()=>{
   const script=readFileSync('app/static/app.js','utf8'),nodes=new Map(),sources=[],refreshes=[];
   const node=selector=>{
+    if(selector==='#activity-history'||selector==='#goal-status')return null;
     if(!nodes.has(selector))nodes.set(selector,{dataset:{},textContent:'',classList:{toggle(name,value){this[name]=value;}},setAttribute(){},querySelectorAll:()=>[],insertAdjacentHTML(){}});
     return nodes.get(selector);
   };
   const data=run(),state={selected:'chat',chatRun:data,modelDrafts:{},runs:[]};
-  const context={state,$:node,MoyaiActivity,terminal:new Set(['completed','failed','cancelled','interrupted','idle']),savedFiles:{decorate(){}},
+  const context={state,document:{hidden:false},$:node,MoyaiActivity,MoyaiGoal:require('../app/static/goal-status.js'),terminal:new Set(['completed','failed','cancelled','interrupted','idle']),savedFiles:{decorate(){}},
     renderMarkdown:text=>text,esc:text=>text,copyText(){},modelName:()=>'',statusLabel:text=>text,renderSidebar(){},
     refreshChat:async id=>refreshes.push(id),showError:error=>{throw error;},clearTimeout(){},setTimeout(){},
     EventSource:class{constructor(){sources.push(this);this.handlers={};}addEventListener(name,handler){this.handlers[name]=handler;}close(){}}};

@@ -45,7 +45,7 @@
       turn.rows=[];const tools=new Map();
       for(const event of turn.events){
         const data=event.data||{};
-        if(isFocus(event))continue;
+        if(isFocus(event)||data.phase==='goal')continue;
         if(event.kind==='tool'&&data.activity_version===1&&data.call_id){
           let row=tools.get(data.call_id);
           if(!row){row={id:data.call_id,eventId:String(event.id),kind:'tool',start:event.created_at};tools.set(data.call_id,row);turn.rows.push(row);}
@@ -95,7 +95,7 @@
       input(delivered);
       for(const event of turn.events){
         const data=event.data||{},at=Date.parse(event.created_at)||turn.start;
-        if(isFocus(event))continue;
+        if(isFocus(event)||data.phase==='goal')continue;
         if(data.phase==='steering'&&data.message_id){
           close(input(delivered),at);delivered=String(data.message_id);input(delivered);continue;
         }
@@ -134,7 +134,7 @@
     return new Map([...timeline(run,turns)].map(([id,items])=>[id,items.filter(item=>item.type==='update').map(({id,content})=>({id,content}))]).filter(([,items])=>items.length));
   }
   function updateHTML(update,markdown=esc){
-    return `<article class="chat-message assistant assistant-update" data-update-id="${esc(update.id)}" aria-label="Moyai update"><div class="message-label"><img src="/static/favicon.svg?v=agent-2" alt="">Moyai Devin<small>Update</small></div><div class="message-content markdown">${markdown(update.content)}</div><button type="button" class="copy-update quiet" aria-label="Copy update" title="Copy update">⧉</button></article>`;
+    return `<article class="chat-message assistant assistant-update" data-update-id="${esc(update.id)}" aria-label="Moyai update"><div class="message-label"><img src="/static/favicon.svg?v=agent-2" alt="">Moyai Devin<small>Update</small></div><div class="message-content markdown">${markdown(update.content)}</div><button type="button" class="copy-update quiet" aria-label="Copy update" title="Copy update">${root.MoyaiIcon?.('copy',16)||'Copy'}</button></article>`;
   }
   function syncItems(slot,items,{markdown,copy}){
     const existing=new Map([...slot.children].map(node=>[node.dataset.timelineKey,node]));
