@@ -41,6 +41,9 @@ def configure_environment():
         raise RuntimeError("RENDER_EXTERNAL_URL must be an HTTPS origin.")
     os.environ["PUBLIC_URL"] = external_url.rstrip("/")
     os.environ["TRUST_MODAL_PROXY"] = "false"
+    # Render connects from an in-container proxy on 127.0.0.1 and appends
+    # "<client>, <Cloudflare edge>, <Render proxy>" to X-Forwarded-For.
+    os.environ.setdefault("TRUSTED_PROXY_HOPS", "3")
     # Render's disk is the authoritative database. No Modal Volume writer runs here.
     os.environ.pop("CHECKPOINT_DIR", None)
     os.environ.pop("MODAL_VOLUME_NAME", None)
@@ -115,7 +118,9 @@ def main():
     if stage == "false":
         asyncio.run(bootstrap())
     uvicorn.run(maintenance if stage == "true" else "app.main:app", host="0.0.0.0",
-                port=int(os.environ.get("PORT", "10000")), workers=1, timeout_graceful_shutdown=20)
+                port=int(os.environ.get("PORT", "10000")), workers=1, timeout_graceful_shutdown=20,
+                # The app resolves the client from X-Forwarded-For itself (TRUSTED_PROXY_HOPS).
+                proxy_headers=False)
 
 
 if __name__ == "__main__":

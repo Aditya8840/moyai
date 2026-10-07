@@ -139,6 +139,9 @@ class Store:
                     pinned_at TEXT NOT NULL, PRIMARY KEY(owner_id, run_id)
                 );
             """)
+            if 'client' not in {row['name'] for row in conn.execute('PRAGMA table_info(login_states)')}:
+                conn.execute("ALTER TABLE login_states ADD COLUMN client TEXT NOT NULL DEFAULT ''")
+            conn.execute("CREATE INDEX IF NOT EXISTS login_states_client ON login_states(client, expires)")
             if 'metadata' not in {row['name'] for row in conn.execute('PRAGMA table_info(slack_outbox)')}:
                 conn.execute("ALTER TABLE slack_outbox ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
             for table, names in [('runs', ('owner_id', 'active_user_id')), ('messages', ('user_id',))]:

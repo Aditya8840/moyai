@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     checkpoint_dir: Path | None = None
     modal_volume_name: str = ""
     trust_modal_proxy: bool = False
+    trusted_proxy_hops: int = Field(default=0, ge=0, le=5)
     public_url: str = "http://127.0.0.1:8787"
     workspace_password: str = ""
     workspace_member_password: str = ""
