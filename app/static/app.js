@@ -48,7 +48,7 @@ function sessionMatches(run,search){
   return [sessionTitle(run),run.agent_label,run.display_title,run.prompt].some(value=>typeof value==='string'&&value.toLowerCase().includes(term));
 }
 function sessionStatus(run){
-  return ({idle:'Ready',completed:'Completed',running:'Working',queued:'Queued',provisioning:'Starting',reconnecting:'Reconnecting',saving:'Saving',awaiting_approval:'Needs approval',waiting_credential:'Needs access',waiting_children:'Agents working',stopping:'Stopping',failed:'Failed',cancelled:'Stopped',interrupted:'Interrupted'})[run.status]||'Status unknown';
+  return ({idle:'Ready',completed:'Completed',running:'Working now',queued:'Queued',provisioning:'Starting',reconnecting:'Reconnecting',saving:'Saving',awaiting_approval:'Needs approval',waiting_credential:'Needs access',waiting_children:'Agents working',stopping:'Stopping',failed:'Failed',cancelled:'Stopped',interrupted:'Interrupted'})[run.status]||'Status unknown';
 }
 function sessionRepository(run){
   try{const url=new URL(run.repo_url);return url.protocol==='https:'&&url.hostname==='github.com'?url.pathname.split('/').filter(Boolean).slice(0,2).join('/').replace(/\.git$/,''):'';}catch{return '';}
@@ -80,8 +80,10 @@ function sidebarGroups(runs,search){
 function sidebarRow(run,child=false){
   const selected=state.selected===run.id,title=sessionTitle(run),label=sessionStatus(run),repo=sessionRepository(run);
   const date=run.updated_at||run.created_at,time=date&&Number.isFinite(Date.parse(date))?relative(date):'';
+  const active=['running','queued','provisioning','reconnecting','saving','waiting_children','stopping'].includes(run.status);
+  const indicator=active?'<span class="session-spinner" aria-hidden="true"></span>':`<span class="session-dot ${esc(run.status||'unknown')}" aria-hidden="true"></span>`;
   const context=[child?'Agent':run.side_chat_of?'Side chat':'',run.mode==='demo'?'Demo':'',repo].filter(Boolean).join(' · ');
-  return `<button class="session-link ${child?'child-session ':''}${selected?'selected':''}" data-run="${esc(run.id)}" ${child?'':`draggable="true" data-drag-session="${esc(run.id)}"`} ${selected?'aria-current="page"':''} aria-label="${esc([title,label,context,time].filter(Boolean).join(' · '))}" title="${esc(title)}">${child?'<span class="child-mark" aria-hidden="true">·</span>':''}<span class="session-link-body"><span class="session-link-title">${esc(title)}</span><span class="session-link-meta"><span class="session-state"><span class="session-dot ${esc(run.status||'unknown')}" aria-hidden="true"></span>${esc(label)}</span>${time?`<span class="session-updated" data-session-time="${esc(run.id)}" title="${esc('Updated '+new Date(date).toLocaleString())}">${esc(time)}</span>`:''}</span>${context?`<span class="session-link-context" title="${esc(context)}">${esc(context)}</span>`:''}</span></button>`;
+  return `<button class="session-link ${child?'child-session ':''}${selected?'selected':''}" data-run="${esc(run.id)}" ${child?'':`draggable="true" data-drag-session="${esc(run.id)}"`} ${selected?'aria-current="page"':''} aria-label="${esc([title,label,context,time].filter(Boolean).join(' · '))}" title="${esc(title)}">${child?'<span class="child-mark" aria-hidden="true">·</span>':''}<span class="session-link-body"><span class="session-link-title">${esc(title)}</span><span class="session-link-meta"><span class="session-state${active?' is-active':''}">${indicator}${esc(label)}</span>${time?`<span class="session-updated" data-session-time="${esc(run.id)}" title="${esc('Updated '+new Date(date).toLocaleString())}">${esc(time)}</span>`:''}</span>${context?`<span class="session-link-context" title="${esc(context)}">${esc(context)}</span>`:''}</span></button>`;
 }
 function sidebarSections(runs,folders,search){
   const ids=new Set(folders.map(folder=>folder.id));

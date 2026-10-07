@@ -63,6 +63,36 @@ test('sidebar escapes titles and exposes real status, timestamps, repository, se
   assert.equal(h.sessionRepository({repo_url:'https://github.com.evil.test/org/repo'}),'');
 });
 
+test('active states use a spinner and explicit text next to the timestamp, including child agents',()=>{
+  const {context:h}=harness();
+  const labels={running:'Working now',queued:'Queued',provisioning:'Starting',reconnecting:'Reconnecting',saving:'Saving',waiting_children:'Agents working',stopping:'Stopping'};
+  for(const [status,label] of Object.entries(labels))for(const child of [false,true]){
+    const row=h.sidebarRow({id:'parent',prompt:'Task',status,updated_at:'2026-10-06T12:00:00Z'},child);
+    assert.match(row,/session-state is-active/);
+    assert.match(row,new RegExp(`session-spinner" aria-hidden="true"></span>${label}</span><span class="session-updated"`));
+    assert.match(row,/2m ago/);
+    assert.doesNotMatch(row,/session-dot/);
+  }
+  for(const status of ['idle','completed','failed','cancelled','interrupted','waiting_credential','awaiting_approval','unknown']){
+    const row=h.sidebarRow({id:'parent',status});
+    assert.doesNotMatch(row,/session-spinner|session-state is-active|Working now/);
+    assert.match(row,/session-dot/);
+  }
+});
+
+test('a live status update removes the spinner when work finishes and restores it for follow-ups',()=>{
+  const {context:h,state,node}=harness();
+  state.runs=[{id:'parent',prompt:'Task',status:'running'}];
+  h.renderSidebar();assert.match(node('#session-list').innerHTML,/session-spinner/);
+  for(const status of ['idle','completed','failed','waiting_credential']){
+    h.syncRunSummary({id:'parent',status});
+    assert.doesNotMatch(node('#session-list').innerHTML,/session-spinner|Working now/);
+    h.syncRunSummary({id:'parent',status:'running'});
+    assert.match(node('#session-list').innerHTML,/session-spinner/);
+    assert.match(node('#session-list').innerHTML,/Working now/);
+  }
+});
+
 test('background list poll updates header, sidebar, search and side tabs without changing conversation state',async()=>{
   const {context:h,state,node,panelUpdates}=harness();
   const original={id:'parent',prompt:'- we wanna tidy things',status:'idle',children:[]};
