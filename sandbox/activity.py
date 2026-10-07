@@ -60,7 +60,7 @@ def result_status(result):
 
 def tool_summary(name, arguments):
     args = arguments if isinstance(arguments, dict) else {}
-    tool = re.sub(r'^mcp[_-]+workspace[_-]+', '', str(name))
+    tool = re.sub(r'^(?:mcp[_-]+(?:workspace|moyai)[_-]+|moyai[_-]+)', '', str(name))
     data = {'tool': public_text(tool, 100), 'category': 'tool'}
     if tool == 'terminal':
         data.update(category='command', label='Run command', command=public_text(args.get('command')))
@@ -116,7 +116,7 @@ class ActivityReporter:
                     from trace_content import trace_content
                 with self.lock:
                     start = self.trace_starts.pop(str(call_id), time.time_ns())
-                private = data['tool'].startswith(('credentials_', 'skills_', 'memory_'))
+                private = data['tool'].startswith(('credentials_', 'skills_', 'memory_')) or data['tool'] in {'workspace_call', 'call'}
                 self.emit('trace', '', {'tool': data['tool'], 'call_id': data['call_id'],
                           'start_ns': start, 'end_ns': time.time_ns(), 'status': phase,
                           'input': '[private tool payload omitted]' if private else trace_content(args),

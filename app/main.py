@@ -54,6 +54,7 @@ AttachmentId = Annotated[str, Field(pattern=r'^[0-9a-f]{32}$')]
 
 class NewRun(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    harness: str = Field(default='hermes', min_length=1, max_length=80)
     prompt: str = Field(default="", max_length=16000)
     repo_url: str = Field(default="", max_length=500)
     mode: Literal["demo", "modal"] = "demo"
@@ -364,7 +365,8 @@ def create_app(settings: Settings | None = None):
     async def config(request: Request):
         security.require(request)
         missing = missing_cloud()
-        return {"cloud_ready": not missing, "missing": missing, "model": settings.resolve_model(), "models": settings.model_choices(),
+        from .harnesses import choices
+        return {"harnesses": choices(), "harness": "hermes", "cloud_ready": not missing, "missing": missing, "model": settings.resolve_model(), "models": settings.model_choices(),
                 "public_url": settings.public_url, "max_concurrent_runs": settings.max_concurrent_runs,
                 "max_parallel_agents": settings.max_parallel_agents, "parallel_agents_enabled": settings.temporal_enabled,
                 "max_concurrent_model_requests": settings.max_concurrent_model_requests,
@@ -421,6 +423,8 @@ def create_app(settings: Settings | None = None):
                 raise HTTPException(422, 'Side chats require a chat session.')
         try:
             model = settings.resolve_model(body.model)
+            from .harnesses import validate_harness
+            validate_harness(body.harness, model)
         except ValueError as exc:
             raise HTTPException(422, str(exc))
         if body.mode == "modal":
@@ -434,7 +438,7 @@ def create_app(settings: Settings | None = None):
         user_id = store.identity(security.session_info(request))
         try:
             run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id,
-                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of)
+                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=body.harness)
         except ValueError as exc:
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()
@@ -481,6 +485,8 @@ def create_app(settings: Settings | None = None):
             selected_model = settings.resolve_model(body.model) if body.model is not None else None
             if selected_model is None:
                 settings.resolve_model(fallback=run['model'])
+            from .harnesses import validate_harness
+            validate_harness(run['harness'], selected_model or run['model'])
         except ValueError as exc:
             raise HTTPException(422, str(exc))
         try:
@@ -824,6 +830,19 @@ def create_app(settings: Settings | None = None):
     @app.post("/hooks/slack/events")
     async def slack_events(request: Request):
         return await slack.receive(request, missing_cloud())
+
+    from .harness_gateway import HarnessGateway
+    harness_gateway = HarnessGateway(settings=settings, store=store, spend=spend,
+        checkpoints=checkpoints, require_run=require_run, read_body=broker_body,
+        model_slots=model_slots, memory=memory, skills=skills, tracing=tracing)
+
+    @app.post('/broker/{run_id}/v1/messages')
+    async def messages_proxy(run_id: str, request: Request):
+        return await harness_gateway.forward(run_id, request, '/v1/messages')
+
+    @app.post('/broker/{run_id}/v1/responses')
+    async def responses_proxy(run_id: str, request: Request):
+        return await harness_gateway.forward(run_id, request, '/v1/responses')
 
     @app.post("/broker/{run_id}/v1/chat/completions")
     async def model_proxy(run_id: str, request: Request):

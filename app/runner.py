@@ -285,10 +285,12 @@ class RunManager:
                 .env({"HERMES_RUNTIME_DIR": "/opt/hermes-tools", "PYTHONPATH": "/opt/hermes"})
                 .run_commands(f"git init /opt/hermes && cd /opt/hermes && git remote add origin https://github.com/NousResearch/hermes-agent.git && git fetch --depth 1 origin {revision} && git checkout --detach FETCH_HEAD",
                               "cd /opt/hermes && python -m pm.build_env --source /opt/hermes --out /opt/hermes-env --no-install-project --extra mcp",
+                              "/opt/hermes-env/bin/python -m pip install claude-agent-sdk==0.2.163 'mcp<2'",
                               "cd /opt/hermes && /opt/hermes-env/bin/python -c 'from run_agent import AIAgent; import mcp; from cryptography.fernet import Fernet'")
                 .add_local_dir(SANDBOX_FILES, remote_path="/opt/workspace-runner", copy=True)
                 .run_commands("python /opt/workspace-runner/hermes_compat.py")
-                .run_commands("python /opt/workspace-runner/install_access_tools.py")
+                .run_commands("python /opt/workspace-runner/install_access_tools.py",
+                              "/opt/hermes-env/bin/python /opt/workspace-runner/harness_dependencies.py")
                 .env({"PYTHONUNBUFFERED": "1", "PYTHONPATH": "/opt/hermes", "HERMES_PYTHON": "/opt/hermes-env/bin/python", "HERMES_HOME": "/tmp/hermes-home", "GIT_TERMINAL_PROMPT": "0"}))
 
     def is_active(self, run_id):
@@ -305,7 +307,7 @@ class RunManager:
         with self.store.connect() as conn:
             activity_input_id = active_input(conn, run_id, run.get('message_id') or 0)
         spec = {"run_id": run_id, "prompt": run["prompt"], "repo_url": run["repo_url"],
-                "attachments": uploads,
+                "attachments": uploads, "harness": run.get('harness', 'hermes'),
                 "attachment_context": attachment_context(by_message.get(run.get('message_id'), [])),
                 "github_repository": self.settings.allowed_github_repositories()[0] if 'github' in run['plugins'] else '',
                 "github_repositories": self.settings.allowed_github_repositories() if 'github' in run['plugins'] else [],

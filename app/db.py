@@ -131,7 +131,7 @@ class Store:
                 for name in names:
                     if name not in existing:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
-            for name, default in [('environment_id', 'auto'), ('environment_build_id', '')]:
+            for name, default in [('environment_id', 'auto'), ('environment_build_id', ''), ('harness', 'hermes')]:
                 if name not in {row['name'] for row in conn.execute('PRAGMA table_info(runs)')}:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
             columns = {row['name'] for row in conn.execute('PRAGMA table_info(users)')}
@@ -249,16 +249,18 @@ class Store:
         row["plugins"] = json.loads(row["plugins"])
         return row
 
-    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of=''):
+    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes'):
         run_id = uuid4().hex
         stamp = now()
         model = model or self.default_model
+        from .harnesses import validate_harness
+        validate_harness(harness, model)
         with self.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             if client_id:
-                previous = conn.execute("SELECT m.*,r.repo_url,r.mode,r.plugins,r.environment_id,r.side_chat_of FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
+                previous = conn.execute("SELECT m.*,r.repo_url,r.mode,r.plugins,r.environment_id,r.side_chat_of,r.harness FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
                 if previous:
-                    if (previous['content'] != prompt or previous['model'] != model or previous['repo_url'] != repo_url
+                    if (previous['harness'] != harness or previous['content'] != prompt or previous['model'] != model or previous['repo_url'] != repo_url
                             or previous['mode'] != mode or json.loads(previous['plugins']) != plugins or previous['environment_id'] != environment_id or previous['side_chat_of'] != side_chat_of
                             or self.attachments.message_ids(conn, previous['id']) != set(attachment_ids or [])):
                         raise ValueError('That submission ID was already used for different content.')
@@ -282,8 +284,8 @@ class Store:
             if pending >= self.max_pending_runs:
                 raise ValueError('The session queue is full. Wait for a task to finish.')
             conn.execute(
-                "INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,active_model,owner_id,active_user_id,environment_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (run_id, prompt, repo_url, mode, "queued", json.dumps(plugins), stamp, stamp, chat_enabled, model, model, user_id, user_id, environment_id),
+                "INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,active_model,owner_id,active_user_id,environment_id,harness) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (run_id, prompt, repo_url, mode, "queued", json.dumps(plugins), stamp, stamp, chat_enabled, model, model, user_id, user_id, environment_id, harness),
             )
             if side_chat_of:
                 conn.execute('UPDATE runs SET side_chat_of=?,side_chat_context=?,agent_label=? WHERE id=?', (side_chat_of, context, 'Side chat · ' + prompt[:70], run_id))
@@ -406,6 +408,8 @@ class Store:
             raise ValueError("The session queue is full. Wait for a response to finish.")
         stamp = now()
         model = model if model is not None else row['model'] or self.default_model
+        from .harnesses import validate_harness
+        validate_harness(row['harness'], model)
         message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued',?,?,?,?)", (run_id, content, client_id, stamp, model, user_id)).lastrowid
         self.attachments.bind_in(conn, attachment_ids, message_id, user_id)
         conn.execute('UPDATE runs SET model=?,updated_at=? WHERE id=?', (model, stamp, run_id))
