@@ -26,9 +26,9 @@ renewals retain the current turn's trace identity. Sandbox events never receive
 the trace credential and trace payloads are separate from public chat activity.
 The service name remains `moyai`; workers use their saved agent labels.
 Each turn keeps its original trace, parent and name across recovery.
-Turns started from Slack set `lens.source.url` (the thread permalink) and
-`lens.source.title` (the thread's first message) on the agent span, so Lens
-shows a link back to the Slack thread at the top of the trace.
+Turns started from Slack set `agent.source.type=slack`, `agent.source.url`
+(the thread permalink) and `agent.source.title` (the thread's first message)
+on the agent span, so Lens shows a "Slack thread" link at the top of the trace.
 
 System prompts, loaded skills, private reasoning, images and credential-tool
 payloads are excluded. Known credentials and common secret fields are redacted;
