@@ -260,7 +260,7 @@ body { color: var(--text); letter-spacing: -0.006em; }
 .conversation { padding: 8px 20px 12px; }
 .conversation-inner { max-width: 720px; }
 .chat-message.user { background: #f4f4f4; border-radius: 22px; padding: 10px 16px; max-width: 78%; margin: 6px 0 22px auto; }
-.chat-message.user .message-label { display: none; }
+.chat-message.user .message-label { display: flex; flex-wrap: wrap; overflow-wrap: anywhere; }
 .chat-message.user .message-content { font-size: 15px; line-height: 22px; color: #1f1f1f; }
 .assistant > .message-label { display: none; }
 .assistant.response-error > .message-label { display: flex; }
