@@ -247,7 +247,7 @@ class AgentTracing:
                   failed=status not in {'completed', 'steered'}, connection=connection)
 
     def slack_source(self, run_id, rows):
-        """Link the turn to its Slack thread with the Lens `lens.source.*` contract."""
+        """Link the turn to its Slack thread with the Lens `agent.source.*` contract."""
         events = rows('SELECT thread_ts,context_json FROM slack_events WHERE run_id=?', (run_id,))
         if not events:
             return {}
@@ -261,7 +261,8 @@ class AgentTracing:
             f"SELECT user_id,name FROM slack_mention_names WHERE name!='' AND user_id IN ({','.join('?' * len(mentioned))})",
             tuple(mentioned))}
         title = MENTION.sub(lambda match: '@' + names.get(match[1], 'someone'), root)
-        return {'lens.source.url': url, 'lens.source.title': self.content(' '.join(title.split()))[:200]}
+        return {'agent.source.type': 'slack', 'agent.source.url': url,
+                'agent.source.title': self.content(' '.join(title.split()))[:200]}
 
     @best_effort
     def tool(self, run_id, data):
