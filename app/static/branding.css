@@ -53,12 +53,6 @@ button.quiet:hover, .icon-button:hover, .new-task:hover, .nav-button:hover,
 .composer:focus-within { border-color: #b4a4ca; box-shadow: 0 0 0 3px #b6a4d319; }
 .send-button, button.primary { background: var(--purple); border-color: var(--purple); color: #fff; }
 .send-button:hover, button.primary:hover { background: var(--brand-hover); border-color: var(--brand-hover); }
-.send-button:disabled { background: #d6cbe7; }
-.stop-button { background: var(--soft); color: #654a8d; }
-.attach-button:hover, .record-button.is-idle:hover, .skill-picker-button:hover {
-  background: var(--soft); color: #654a8d;
-}
-.model-picker select:hover { background-color: var(--soft); }
 .message-queue { background: #faf9fc; border-color: var(--line); }
 .queued-message + .queued-message { border-color: var(--line); }
 .queue-editor textarea { border-color: #d7cbe3; }
@@ -75,3 +69,83 @@ button.quiet:hover, .icon-button:hover, .new-task:hover, .nav-button:hover,
 .settings-icon, .settings-group h2 > span { background: var(--soft); color: var(--purple); border-color: var(--line); }
 .approval, #credential-requests .credential-request { border-color: #e4dfea; background: #faf8fd; }
 .panel-resize:hover, .panel-resize:focus-visible { background: #7155ba33; }
+
+/* Composer toolbar and sidebar account row.
+   One type size (13px), one control height (28px), two spacing steps:
+   4px between related controls, 12px between groups. Left: input actions.
+   Right: what runs the message (harness, model), then mic and send. */
+.composer-toolbar, .reply-composer .composer-toolbar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
+  min-height: 0; padding: 4px 10px 10px;
+}
+.composer-toolbar > * { flex: none; }
+.composer-toolbar button.quiet, .task-options summary, .model-picker, .composer-model {
+  height: 28px; border-radius: 7px; font-size: 13px; line-height: 1; color: var(--muted);
+}
+.attach-button, .record-button.is-idle, .skill-picker-button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  width: 28px; padding: 0 !important; border: 0; background: transparent;
+}
+.composer-toolbar .attach-button { width: auto; padding: 0 8px 0 6px !important; }
+.task-options summary { display: inline-flex; align-items: center; gap: 6px; padding: 0 8px 0 6px; white-space: nowrap; }
+.attach-button:hover, .record-button.is-idle:hover, .skill-picker-button:hover,
+.task-options summary:hover, .task-options[open] summary, .model-picker:hover {
+  background: var(--soft); color: #654a8d;
+}
+
+/* Pickers: icon + value + chevron, styled as one quiet chip. */
+.model-picker { position: relative; display: inline-flex; align-items: center; gap: 6px; margin: 0; padding: 0 6px 0 8px; min-width: 0; cursor: pointer; }
+.model-picker .provider-logo { width: 14px; height: 14px; flex: none; object-fit: contain; }
+.model-picker select {
+  appearance: none; -webkit-appearance: none; field-sizing: content;
+  width: auto; min-width: 0; max-width: 150px; height: 28px; margin: 0; padding: 0; border: 0;
+  background: none; color: #3f3a47; font: inherit; font-size: 13px; text-overflow: ellipsis; cursor: pointer;
+}
+.model-picker select:hover { background: none; }
+.model-picker select:focus-visible { outline: none; }
+.model-picker:focus-within { outline: 2px solid var(--purple); outline-offset: 1px; }
+.model-picker select:disabled { cursor: default; opacity: .55; }
+.picker-chevron { display: inline-flex; color: #a9a4b1; pointer-events: none; }
+.composer-model { display: inline-flex; align-items: center; gap: 6px; margin: 0; padding: 0 8px; color: #3f3a47; }
+.composer-model .harness-logo { width: 14px; height: 14px; flex: none; }
+
+/* Right group: harness and model sit together, separated from input actions. */
+.composer-toolbar .harness-picker, .reply-composer .harness-fixed { margin-left: auto; }
+.composer-toolbar .model-picker:not(.harness-picker), .reply-composer .composer-model:not(.harness-fixed) { margin-left: 0; }
+.composer-toolbar .harness-picker + .model-picker::before,
+.reply-composer .harness-fixed + .model-picker::before,
+.reply-composer .harness-fixed + .composer-model::before {
+  content: ""; position: absolute; left: -3px; width: 1px; height: 14px; background: var(--line);
+}
+.composer-toolbar .record-button.is-idle { order: 5; margin-left: 8px; }
+.composer-toolbar .send-button, .composer-toolbar .stop-button { order: 6; }
+.send-button, .stop-button { width: 28px; height: 28px; flex: 0 0 28px; margin-left: 4px; border-radius: 50%; }
+.send-button { background: var(--purple); color: #fff; }
+.send-button:disabled { opacity: 1; background: #d6cbe7; }
+.stop-button { background: var(--soft); color: #654a8d; font-size: 10px; }
+
+@media (max-width: 480px) {
+  .composer-toolbar .attach-button span, .task-options summary span { display: none; }
+  .composer-toolbar .attach-button, .task-options summary { width: 28px; padding: 0 !important; justify-content: center; }
+  .model-picker select { max-width: 104px; }
+  .composer-toolbar .record-button.is-idle { margin-left: 0; }
+}
+
+/* Sidebar account row: identity left, icon actions right, one line. */
+.rail-foot {
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  margin: 0; padding: 8px 0 0 8px; border-top: 1px solid var(--line);
+}
+.rail-foot .rail-identity {
+  flex: 1; min-width: 0; margin: 0; padding: 0;
+  font-size: 13px; line-height: 28px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rail-account-actions { display: flex; align-items: center; gap: 2px; flex: none; }
+.rail-foot .rail-settings, .rail-foot #logout {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; padding: 0; border: 0; border-radius: 7px;
+  background: transparent; color: var(--muted);
+}
+.rail-foot .rail-settings:hover, .rail-foot .rail-settings.active, .rail-foot #logout:hover { background: var(--soft); color: #654a8d; }
+.rail-foot #logout[hidden] { display: none; }
