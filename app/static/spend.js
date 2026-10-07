@@ -22,8 +22,13 @@ function bindSpendFilters(){
   $('#spend-filter-form').onsubmit=e=>{e.preventDefault();spendState.start=$('#spend-start').value;spendState.end=$('#spend-end').value;renderSpend().catch(showError);};
   $('#sync-spend').onclick=async()=>{const button=$('#sync-spend');button.disabled=true;button.textContent='Refreshing…';try{await renderSpend();}catch(e){showError(e);button.disabled=false;button.textContent='Refresh';}};
 }
-async function renderSpend(){
+async function renderSpend(background = false){
   clearTimeout(spendState.timer);
+  if(background && state.view!=='spend')return;
+  if(background && settingsInteractionActive()){
+    spendState.timer=setTimeout(()=>renderSpend(true).catch(showError),5000);
+    return;
+  }
   const version=state.pageVersion,renderVersion=++spendState.version;
   const current=()=>version===state.pageVersion&&renderVersion===spendState.version;
   $('#content').innerHTML='<p class="subtext" role="status">Loading spend…</p>';
@@ -60,7 +65,7 @@ async function renderSpend(){
     ${admin?renderSlackIdentities(slack,google,identityStatus):''}
     <p class="subtext spend-note">LLM costs are saved from Moyai’s inference responses across gateway key rotations. ${admin?'Infrastructure uses the provider reports and monthly bills above.':'Each response is attributed to the person who sent that message. Your view excludes other users and infrastructure costs.'} Calls made with separate credential-proxy keys are not included. Usage before tracking began or outside Moyai is not included. An interrupted or failed request may have no returned cost, so this is not a full audit of the key’s lifetime spend. ${data.tracked_since?'Per-user tracking began '+esc(new Date(data.tracked_since).toLocaleString())+'.':''}</p>`;
   if(admin)bindInfrastructure(data);
-  if(admin&&data.infrastructure.pending)spendState.timer=setTimeout(()=>{if(current()&&!$('#infra-bill-editor')?.open)renderSpend().catch(showError);},5000);
+  if(admin&&data.infrastructure.pending)spendState.timer=setTimeout(()=>{if(current())renderSpend(true).catch(showError);},5000);
   bindSpendFilters();
   if(!admin)return;
   $('#spend-user').onchange=()=>{spendState.user=$('#spend-user').value;renderSpend().catch(showError);};

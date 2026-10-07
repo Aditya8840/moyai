@@ -4,7 +4,7 @@ All 11 Settings destinations share Moyai’s existing white, lavender, and purpl
 
 ## Screenshot evidence
 
-**Before is on the left; after is on the right.** Every pair uses the same synthetic team data and a 1440 × 1000 browser viewport. The baseline is `a00a1f7` from `main`; the after images show this PR. These are actual browser renders, not mockups. They show the initial viewport; long pages continue below it.
+**Before is on the left; after is on the right.** Every pair uses the same synthetic team data and a 1440 × 1000 browser viewport. The baseline is `a00a1f7` from `main` when the redesign began; the after images show this PR rebased onto `9cdf9b8`. The newer personal Spend view is preserved, including its move into Workspace navigation. These are actual browser renders, not mockups. They show the initial viewport; long pages continue below it.
 
 The authenticated production pages were also inspected and captured locally. Those images are excluded from this public repository because they contain production account and library data. The matched preview makes layout differences directly comparable without publishing that data.
 
@@ -35,7 +35,7 @@ The repository’s [Moyai UI skill](../.agents/skills/moyai-ui/SKILL.md), refere
 
 ## Validation
 
-- `node --test --test-reporter=tap tests/*.cjs`: **177 passing**. New regressions cover navigation access/current state, combined filters and retained state, and deferring refresh while controls are active.
+- `node --test --test-reporter=tap tests/*.cjs`: **184 passing**. New regressions cover navigation access/current state, combined filters and retained state, and deferring refresh while controls are active.
 - Syntax checks on every changed JavaScript file and the fixture server; skill metadata validation; `git diff --check`.
 - All 11 routes inspected at 1440px, 768px, and 320px. Main content fits the viewport; wide tables scroll within their own containers.
 - Browser checks: seven main editors at desktop and mobile widths, dialog Escape/focus return, destructive cancellation, empty results/clear filters, retained query/scope, member-only navigation, simulated outage/retry, empty libraries, and fixture-backed memory saving.
@@ -51,6 +51,8 @@ node scripts/settings_ui_preview.cjs --root /path/to/baseline/app/static --port 
 ```
 
 Open `http://127.0.0.1:8840/#settings`. The local-only fixture also supports `/?fixture=empty`, `/?fixture=error`, and `/?fixture=member`. A full document navigation selects the fixture for that server; use one fixture mode at a time. Supported writes update only in-memory fixture data; unsupported operations return 501. Restart to reset fixture edits.
+
+[Personal Spend view](assets/settings-redesign/spend-personal-after.jpg) is also included for internal users.
 
 ## Editor examples
 
