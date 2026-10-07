@@ -173,6 +173,8 @@ def create_app(settings: Settings | None = None):
     skills = Skills(store, security, credentials.same_requester)
     memory = Memory(store, security, credentials.same_requester, checkpoints)
     model_slots = asyncio.Semaphore(settings.max_concurrent_model_requests)
+    from .context_budget import ContextBudget, ContextPressure, provider_context_rejection
+    context_budget = ContextBudget(settings)
     credentials.slots = model_slots
     manager.persist = checkpoints.flush
     store.execute("INSERT OR IGNORE INTO organization(id,name) VALUES(1,?)", (settings.organization_name,))
@@ -226,6 +228,7 @@ def create_app(settings: Settings | None = None):
     app = FastAPI(title="Moyai", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     google = GoogleSignIn(settings, security, store)
     app.state.google_signin = google
+    app.state.context_budget = context_budget
     app.state.session_titles = session_titles
     app.include_router(session_titles.routes(security))
     app.include_router(google.routes())
@@ -863,11 +866,15 @@ def create_app(settings: Settings | None = None):
     from .harness_gateway import HarnessGateway
     harness_gateway = HarnessGateway(settings=settings, store=store, spend=spend,
         checkpoints=checkpoints, require_run=require_run, read_body=broker_body,
-        model_slots=model_slots, memory=memory, skills=skills, tracing=tracing)
+        model_slots=model_slots, memory=memory, skills=skills, tracing=tracing, context_budget=context_budget)
 
     @app.post('/broker/{run_id}/context/compact')
     async def compact_context(run_id: str, request: Request):
         return await harness_gateway.forward(run_id, request, '/context/compact')
+
+    @app.get('/broker/{run_id}/context/window')
+    async def native_context_window(run_id: str, request: Request):
+        return await harness_gateway.context_window(run_id, request)
 
     @app.post('/broker/{run_id}/v1/messages')
     async def messages_proxy(run_id: str, request: Request):
@@ -900,10 +907,6 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(422, "messages must be an array")
         if 'steering_applied' in body:
             message_queue.acknowledge(run_id, run['active_message_id'], body['steering_applied'])
-        admitted = store.execute("UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) AND status IN ('running','reconnecting','awaiting_approval')",
-                                 (run_id, settings.max_agent_iterations, settings.max_agent_iterations * 3))
-        if not admitted:
-            raise HTTPException(429, "This run reached its model request limit.")
         allowed = {"messages", "tools", "tool_choice", "parallel_tool_calls", "temperature", "top_p", "stop", "stream", "stream_options", "response_format", "reasoning_effort", "max_tokens", "max_completion_tokens", "seed"}
         payload = {key: value for key, value in body.items() if key in allowed}
         payload['messages'] = store.attachments.with_images(run, scrub_memory_history(payload['messages']))
@@ -923,6 +926,17 @@ def create_app(settings: Settings | None = None):
             if field in payload:
                 if type(payload[field]) is not int or payload[field] < 1:
                     raise HTTPException(422, "Invalid output limit")
+        try:
+            checked_budget = await context_budget.check(payload, scope=run_id + '/v1/chat/completions')
+        except ContextPressure as exc:
+            store.event(run_id, 'context', 'Compacting before the next model request.', exc.budget)
+            await checkpoints.flush()
+            raise
+        require_run(run_id, request)
+        admitted = store.execute("UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) AND status IN ('running','reconnecting','awaiting_approval')",
+                                 (run_id, settings.max_agent_iterations, settings.max_agent_iterations * 3))
+        if not admitted:
+            raise HTTPException(429, "This run reached its model request limit.")
         request_id = spend.begin(run, selected_model)
         # Keep user/session accounting local. The existing virtual key remains
         # the sole billing credential; sandbox-supplied attribution is ignored.
@@ -946,6 +960,14 @@ def create_app(settings: Settings | None = None):
                     gateway_id = spend.headers(request_id, upstream, False)
                     if upstream.status_code >= 400:
                         status = 'failed'
+                        raw_error = bytearray()
+                        async for chunk in upstream.aiter_bytes():
+                            raw_error.extend(chunk[:8192 - len(raw_error)])
+                            if len(raw_error) >= 8192:
+                                break
+                        if provider_context_rejection(upstream.status_code, raw_error):
+                            store.event(run_id, 'context', 'The provider requested further context reduction.', checked_budget.public())
+                            raise ContextPressure(checked_budget.public())
                         raise HTTPException(502, f'Model gateway rejected the request ({upstream.status_code}). Check model access and gateway configuration.')
                     # Bound transport memory independently of model token limits.
                     raw_response = bytearray()
@@ -968,6 +990,8 @@ def create_app(settings: Settings | None = None):
                 # Account before returning any data, including if the sandbox
                 # stopped while the already-submitted inference was completing.
                 spend.finish(request_id, capture, status)
+                if status == 'completed':
+                    context_budget.remember(payload, capture.usage, run_id + '/v1/chat/completions')
                 tracing.model(run, request_id, trace_started, body['messages'],
                               {**trace_response, **capture.response}, status, gateway_id=gateway_id)
                 await checkpoints.flush()

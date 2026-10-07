@@ -16,11 +16,12 @@ from sandbox.claude_harness import ClaudeAgent
 from sandbox.context_store import ContextStore
 
 
-@pytest.mark.parametrize('resumed', [False, True, 'durable', 'pending'],
-                         ids=['new-session', 'large-checkpoint', 'durable-checkpoint', 'interrupted-tool'])
+@pytest.mark.parametrize('resumed', [False, True, 'durable', 'pressure', 'pending'],
+                         ids=['new-session', 'large-checkpoint', 'durable-checkpoint', 'context-pressure', 'interrupted-tool'])
 @pytest.mark.parametrize('model', ['anthropic/claude-sonnet-4-5', 'openai/gpt-6-astra', 'fireworks_ai/glm-5p3'])
 def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resumed, model):
     calls, requests, events = [], [], []
+    rejected = []
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
         def reply(self, value, status=200):
@@ -44,6 +45,11 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
                 return self.reply({'text': data['arguments']['text']})
             assert self.path.startswith('/v1/messages')
             requests.append(data)
+            if resumed == 'pressure' and calls and not rejected:
+                rejected.append(True)
+                relay.context_required = {'input_tokens': 50000, 'input_budget': 20000}
+                return self.reply({'type': 'error', 'error': {'type': 'invalid_request_error',
+                    'message': 'Context handoff requested', 'code': 'context_length_exceeded'}}, status=400)
             # A fresh SDK session cannot compact an oversized first message.
             if len(json.dumps(data['messages']).encode()) > 100_000:
                 return self.reply({'type': 'error', 'error': {'type': 'invalid_request_error',
@@ -51,7 +57,7 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
             done = bool(calls)
             receipt = next((block for message in data['messages'] for block in message.get('content', [])
                             if isinstance(block, dict) and block.get('tool_use_id') == 'history_read'), None)
-            if resumed in ('durable', 'pending'):
+            if resumed in {'durable', 'pressure', 'pending'}:
                 text = json.dumps(data['messages'])
                 assert 'Keep Escape support' in text and 'Do not deploy' in text
                 if resumed == 'pending':
@@ -120,7 +126,7 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
                     f'Build output {i}: completed operation with verbose diagnostic details.' for i in range(5000))}]
                if resumed else [])
     store = None
-    if resumed in ('durable', 'pending'):
+    if resumed in {'durable', 'pressure', 'pending'}:
         store = ContextStore(session / 'context.sqlite3', 'transport-run')
         if resumed == 'pending':
             (workspace / 'note.txt').write_text('already edited\n')
@@ -128,7 +134,7 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
                 'name': 'Edit', 'arguments': json.dumps({'file_path': str(workspace / 'note.txt')})}}]}]
         store.initialize([{'role': 'user', 'content': 'Keep Escape support. Do not deploy.'}, *history,
             *[{'role': 'assistant', 'content': 'Older completed step ' + str(i)} for i in range(80)]])
-        def compact(previous, entries):
+        def compact(previous, entries, **kwargs):
             # Deterministic tool-free inference fixture, separately exercised
             # through the authenticated endpoint in test_context_gateway.py.
             source = previous + json.dumps(entries)
@@ -147,14 +153,18 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
         assert {'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'ToolSearch'} <= first_tools
         assert not any(name.startswith('mcp__') for name in first_tools)
         assert not any('unused_' in tool['name'] for body in requests for tool in body['tools'])
-        last_tools = {tool['name']: tool for tool in requests[-1]['tools']}
+        discovered = next(body for body in reversed(requests)
+                          if any(t['name'] == 'mcp__moyai__echo' for t in body['tools']))
+        last_tools = {tool['name']: tool for tool in discovered['tools']}
         assert last_tools['mcp__moyai__echo']['input_schema']['properties'] == {'text': {'type': 'string'}}
         assert last_tools['mcp__moyai__echo']['defer_loading'] is True
-        assert 'tool_reference' in json.dumps(requests[-1]['messages'])
+        assert 'tool_reference' in json.dumps(discovered['messages'])
+        if resumed == 'pressure':
+            assert not any(t['name'] == 'mcp__moyai__echo' for t in requests[-1]['tools'])
         assert not agent.journal.pending
         assert any(m.get('role') == 'tool' and 'sdk-transport-ok' in m['content'] for m in result['messages'])
         assert any('cache_control' in json.dumps(body) for body in requests)
-        if resumed in ('durable', 'pending'):
+        if resumed in {'durable', 'pressure', 'pending'}:
             if resumed == 'pending':
                 assert store.pending == {'history_read'}
                 assert (workspace / 'note.txt').read_text() == 'already edited\n'
@@ -176,6 +186,8 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
             if resumed == 'pending':
                 assert store.pending == {'history_read'}
             assert not (session / '.moyai-history.jsonl').exists()
+            if resumed == 'pressure':
+                assert rejected == [True]
         else:
             assert result['messages'][:len(history)] == history
         if resumed is True:
