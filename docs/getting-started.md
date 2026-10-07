@@ -36,7 +36,11 @@ chmod 600 .env
 
 Run the remaining commands from this repository directory. Use the Modal CLI installed by `uv sync` in `.venv`. If you have a `.env`, edit it rather than overwriting it.
 
-## 2. Get Modal credentials
+## 2. Choose a sandbox provider
+
+For an existing Substrate cluster, follow [Substrate setup](substrate.md) and host the Moyai web app using [Render or Docker](deployment.md). No Modal sandbox credentials are needed for that path. The steps below use Modal for both hosting and sandboxes.
+
+### Modal credentials
 
 1. [Create a Modal account](https://modal.com/docs/guide), choose the workspace that should own Moyai, and make sure its usage/billing policy permits the deployment. Prefer a fresh workspace: the deploy script uses fixed resource names and will update an existing Moyai installation in the same environment.
 2. Authenticate from the repository:
@@ -191,7 +195,7 @@ Do not include `.env`, model keys, Modal tokens, or PEM files in bug reports. In
 - Closing the browser does not stop the service. Stop/cancel active sessions, then stop the `moyai` web app in the Modal dashboard if no longer needed. Check remaining sandboxes separately and review storage retention/charges; stopping the web app does not delete persisted data.
 - Keep one web container. Do not enable rolling deployments, multiple Uvicorn workers, or multiple writers on the same database/volume. Redeployments interrupt active tasks.
 - Back up your stable session/encryption secrets along with state. Rotate expired credentials privately and redeploy when idle.
-- Use [deployment alternatives](deployment.md) if you need Render or an existing VM. Those paths still require Modal for the agent sandbox; Docker alone is not a local agent runner.
+- Use [deployment alternatives](deployment.md) if you need Render or an existing VM. Choose Modal or [Substrate](substrate.md) for the agent sandboxes; the web app’s Docker container does not run agents itself.
 
 ## Optional: local UI development only
 

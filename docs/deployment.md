@@ -12,7 +12,7 @@ With `deploy_modal.py`, you use the HTTPS URL assigned by Modal. Follow the [wal
 
 The cloud sandbox calls back to this server for model and app tools, so `PUBLIC_URL` must be a **reachable HTTPS address**. Loopback URLs deliberately keep cloud execution disabled.
 
-Set these in `.env` or your host's secret store:
+Set these in `.env` or your host's secret store. For Substrate, replace the two Modal credentials with the [Substrate connection settings](substrate.md#environment-configuration):
 
 ```dotenv
 PUBLIC_URL=https://your-workspace.example.com
@@ -46,13 +46,13 @@ Track your Modal token's expiry and replace it in the deployment's secret store 
 
 ### Alternative: Docker on an existing cloud host
 
-The included Docker image runs the control plane on an always-on cloud VM or container host. Modal supplies the task sandboxes separately.
+The included Docker image runs the control plane on an always-on cloud VM or container host. The selected Modal or Substrate provider supplies the task sandboxes separately.
 
 ```sh
 docker compose up --build -d
 ```
 
-The compose port binds only to the cloud host's loopback interface. Place an HTTPS reverse proxy in front of port 8787, set `PUBLIC_URL` to its exact origin, and preserve the incoming Host header. Allow `/broker/` traffic from Modal with its run-scoped bearer tokens. Disable proxy buffering for event streams. Set an appropriate body-size limit (5 MB) at the proxy.
+The compose port binds only to the cloud host's loopback interface. Place an HTTPS reverse proxy in front of port 8787, set `PUBLIC_URL` to its exact origin, and preserve the incoming Host header. Allow `/broker/` traffic from your sandbox provider with its run-scoped bearer tokens. Disable proxy buffering for event streams. Set an appropriate body-size limit (5 MB) at the proxy.
 
 Use one replica with a persistent local disk. Avoid serverless request hosts that stop background work after an HTTP response. The Docker image was built and its task creation and restart persistence were verified locally. This alternative has not been deployed to a separate VM.
 
@@ -68,6 +68,8 @@ python scripts/docker_smoke.py moyai-docker-smoke
 This seeds synthetic sessions, encrypted connections, keys, and an archive as UID 1000 with private permissions, reproduces the old SQLite permission failure, and verifies that the new image preserves the data and can write after a restart. It also checks non-root execution, Render's empty-database guard, staging mode, and ordinary Docker startup. No cloud credentials are needed.
 
 ## Render web app with Modal sandboxes
+
+Render also supports Moyai with [Substrate sandboxes](substrate.md). Set `SANDBOX_PROVIDER=substrate` in Render to skip the Modal prebuild; the Substrate cluster runs separately. The deployment and migration history below describes the existing Modal installation.
 
 **Live migration verified September 29, 2026:** all 12 existing sessions, 14 messages, three organization connections, saved filesystem snapshot IDs, Slack source context, and 10 byte-identical result archives moved to Render. All three provider health checks passed. The existing continuity chat resumed on a new Modal sandbox and recovered “blue lantern” and file value `12`. A real [#bot-spam thread mention](https://berriaillm.slack.com/archives/C0B302ZJU05/p1790733863830609?thread_ts=1790733854.157109&cid=C0B302ZJU05) created a Render session (`b371989dcc8842fdad936f5784beec7f`), automatically read two source messages, and answered the marker `river-stone-73`. No external writes were requested. Both sandboxes terminated. The old Modal web deployment is stopped; its Volume remains a frozen migration backup. Existing workspace passwords are unchanged. A second Render deployment, with bootstrap disabled, preserved all 13 current sessions, 18 messages, 11 archive checksums, saved snapshots, and organization connections. Unauthenticated APIs still returned 401, and no Modal sandbox remained running.
 

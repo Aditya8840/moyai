@@ -20,3 +20,13 @@ Checked in the browser:
 The existing reduced-motion styles are unchanged; reduced-motion emulation was not available in the browser driver. These checks are not a complete accessibility audit. Backend authorization, CSRF, credential encryption, connection failure, and revision conflict behavior have separate Python tests.
 
 Reproduce with `node scripts/settings_ui_preview.cjs --port 8840`, then open `/#runtime`. Use `/?fixture=member#runtime` and `/?fixture=error#runtime` for alternate states. Writes in this preview are synthetic and do not contact a provider.
+
+The legacy task details screen was also checked with the synthetic `substrate-run` fixture. It now shows the session's pinned provider instead of always saying Modal. The `modal-run` fixture still shows Modal. No document overflow occurred at any checked width; this change adds no controls or motion. These matched captures compare the label from commit `e110b89` with the corrected label:
+
+| Viewport | Before | After |
+| --- | --- | --- |
+| 1440 × 1000 | [Before](assets/substrate/task-before-1440.jpg) | [After](assets/substrate/task-after-1440.jpg) |
+| 768 × 1000 | [Before](assets/substrate/task-before-768.jpg) | [After](assets/substrate/task-after-768.jpg) |
+| 320 × 900 | [Before](assets/substrate/task-before-320.jpg) | [After](assets/substrate/task-after-320.jpg) |
+
+Open `/?fixture=substrate-run#run=11111111111111111111111111111111` to reproduce the task view. All temporary preview tabs and servers were closed after verification.

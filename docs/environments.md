@@ -66,10 +66,10 @@ the build or included in its snapshot. Recipes and their resulting source and
 files are organization resources, not personal environments.
 
 Save the recipe, then **Build environment**. Builds run one at a time in separate
-2-CPU/8-GiB Modal sandboxes with a one-hour lifetime. The build log and exact source
+sandboxes with a one-hour lifetime using the selected provider. Modal builds use 2 CPUs and 8 GiB; size the [Substrate template](substrate.md) for the dependencies being installed. The build log and exact source
 SHA appear in the admin page. All install, startup, verification and shutdown
 commands must succeed before a filesystem snapshot becomes available. Setup
-runs only in Modal, never on Render. Failed or cancelled builds leave the last
+runs in the sandbox provider, separately from the Moyai web host. Failed or cancelled builds leave the last
 working environment in place. Editing during a build cannot publish the obsolete
 recipe over a newer one. Named build sandboxes, a detached supervisor, and the
 SQLite journal allow the web worker to reattach after deployment without rerunning
