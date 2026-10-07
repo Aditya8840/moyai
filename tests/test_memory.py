@@ -179,7 +179,7 @@ def test_retrieval_bounds_expiration_repository_and_new_session(workspace):
     call(client,next_run,'memory_search',query='quartz')
     assert scoped in [n['id'] for n in json.loads(app.state.memory.context(next_run).split('\n',1)[1])['notes']]
     # Changing a repository rechecks loaded notes, too.
-    app.state.store.execute("UPDATE runs SET repo_url='https://github.com/BerriAI/moyai-devin' WHERE id=?",(next_run['id'],))
+    app.state.store.execute("UPDATE runs SET repo_url='https://github.com/BerriAI/moyai' WHERE id=?",(next_run['id'],))
     assert MARKER not in app.state.memory.context(next_run)
 
 

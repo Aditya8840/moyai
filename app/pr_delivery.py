@@ -82,7 +82,7 @@ def attachment(pr: PullRequest, public_url: str, run_id: str) -> dict:
     return {'color': '#5B3FD1', 'fallback': f'{pr.repository} #{pr.number}: {pr.url}', 'blocks': [
         {'type': 'context', 'elements': [
             {'type': 'image', 'image_url': public_url.rstrip('/') + '/static/litellm-train.png', 'alt_text': 'LiteLLM train'},
-            {'type': 'plain_text', 'text': 'LiteLLM · Moyai Devin'}]},
+            {'type': 'plain_text', 'text': 'LiteLLM · Moyai'}]},
         {'type': 'section', 'text': {'type': 'mrkdwn', 'text': f'*<{pr.url}|{text}>*', 'verbatim': True}},
         {'type': 'context', 'elements': [{'type': 'plain_text', 'text': pr.repository + ' · Pull request'}]},
         {'type': 'actions', 'elements': [

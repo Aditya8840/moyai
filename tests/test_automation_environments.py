@@ -18,11 +18,11 @@ def blocked(workspace, monkeypatch):
     settings.modal_token_id = settings.modal_token_secret = settings.litellm_api_key = 'test-placeholder'
     settings.litellm_api_base = 'https://unused.invalid/v1'
     monkeypatch.setattr(env, 'advance', AsyncMock())
-    env.save_recipe('e' * 32, SaveRecipe(recipe=Recipe(name='Moyai development', repository='BerriAI/moyai-devin', verify='true')), 'admin')
+    env.save_recipe('e' * 32, SaveRecipe(recipe=Recipe(name='Moyai development', repository='BerriAI/moyai', verify='true')), 'admin')
     env.store.execute('UPDATE environments SET activate_on_ready=1')
     build = env.enqueue('e' * 32, 1, 'admin')
     env.update(build['id'], phase='failed')
-    a = create(client, mode='modal', repo_url='https://github.com/BerriAI/moyai-devin',
+    a = create(client, mode='modal', repo_url='https://github.com/BerriAI/moyai',
                event={'provider': 'webhook', 'event': 'complaint.received'})
     response = client.post(f"/api/automations/{a['id']}/webhook", json={'revision': 1, 'secret': SECRET})
     assert response.status_code == 200, response.text
@@ -103,7 +103,7 @@ def test_manual_and_scheduled_runs_report_blocker_without_creating_session(block
         assert response.status_code == 202
         result = response.json()
     else:
-        schedule = create(client, mode='modal', repo_url='https://github.com/BerriAI/moyai-devin')
+        schedule = create(client, mode='modal', repo_url='https://github.com/BerriAI/moyai')
         app.state.store.execute('UPDATE automations SET paused=0 WHERE id=?', (schedule['id'],))
         result = asyncio.run(app.state.automations.launch(schedule['id'], schedule['revision'], 'scheduled-check'))
     assert result == {'run_id': '', 'outcome': 'blocked'}
@@ -114,7 +114,7 @@ def test_manual_and_scheduled_runs_report_blocker_without_creating_session(block
 def test_environment_blocker_respects_selection_and_last_good_build(blocked):
     app, _, _ = blocked
     env, store = app.state.environments, app.state.store
-    repo = 'https://github.com/BerriAI/moyai-devin'
+    repo = 'https://github.com/BerriAI/moyai'
     assert env.setup_blocker('e' * 32, repo)
     assert env.setup_blocker('auto', repo)
     assert env.setup_blocker('none', repo) == ''
@@ -133,7 +133,7 @@ def test_environment_blocker_respects_selection_and_last_good_build(blocked):
 
 def test_first_build_and_demo_mode_are_not_blocked(blocked):
     app, client, _ = blocked
-    demo = create(client, repo_url='https://github.com/BerriAI/moyai-devin')
+    demo = create(client, repo_url='https://github.com/BerriAI/moyai')
     assert demo['environment_blocker'] == ''
     app.state.store.execute('DELETE FROM environment_builds')
-    assert app.state.environments.setup_blocker('auto', 'https://github.com/BerriAI/moyai-devin') == ''
+    assert app.state.environments.setup_blocker('auto', 'https://github.com/BerriAI/moyai') == ''

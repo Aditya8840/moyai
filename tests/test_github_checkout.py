@@ -135,7 +135,7 @@ def test_escape_and_existing_nonrepo_refused(checkout):
     assert (occupied / 'keep').read_text() == 'preserve'
 
 
-@pytest.mark.parametrize('checkout', ['BerriAI/litellm', 'BerriAI/moyai-devin'], indirect=True)
+@pytest.mark.parametrize('checkout', ['BerriAI/litellm', 'BerriAI/moyai'], indirect=True)
 def test_specific_repository_real_checkout_and_publication_payload(checkout):
     repo, result, requests, broker, server = checkout
     target = result['repository']

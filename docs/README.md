@@ -1,6 +1,6 @@
 # Documentation
 
-[Back to Moyai Devin](../README.md)
+[Back to Moyai](../README.md)
 
 Follow the [installation walkthrough](getting-started.md) to deploy Moyai on Modal and run your first task. Choose your model and harness using the [compatibility guide](harnesses.md). For a shorter setup, use the [README](../README.md#getting-started).
 

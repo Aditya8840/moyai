@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: moyai-devin-litellm
+    name: moyai
     runtime: python
     region: oregon
     plan: 1c-2g
@@ -41,7 +41,7 @@ services:
       - key: LANGSMITH_ENDPOINT
         value: https://api.smith.langchain.com
       - key: LANGSMITH_PROJECT
-        value: moyai-devin
+        value: moyai
       - key: LANGSMITH_API_KEY
         sync: false
       - key: LANGSMITH_WORKSPACE_ID

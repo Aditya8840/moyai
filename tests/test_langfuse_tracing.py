@@ -70,7 +70,7 @@ async def test_langfuse_only_exports_typed_tree_and_redacts_keys(tmp_path):
     for span in exported:
         assert attrs(span)['session.id'] == run['id']
         assert attrs(span)['langfuse.environment'] == 'development'
-        assert attrs(span)['langfuse.trace.name'] == 'moyai-devin'
+        assert attrs(span)['langfuse.trace.name'] == 'moyai'
         assert attrs(span)['langfuse.observation.metadata.session_url'].endswith('/#run=' + run['id'])
     for private in (b'pk-lf-test', b'sk-lf-test', b'private-system', b'private-thought'):
         assert private not in request.content

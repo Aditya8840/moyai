@@ -178,7 +178,7 @@ def test_revocation_during_publication_stops_further_mutations(workspace, monkey
         elif change == 'rotate':
             app.state.store.update_run(run_id, token_hash=digest('new-token'))
         elif change == 'allowlist':
-            app.state.connectors.settings.github_repositories = 'BerriAI/moyai-devin'
+            app.state.connectors.settings.github_repositories = 'BerriAI/moyai'
         else:
             app.state.store.execute("INSERT INTO connection_policies(provider,read_only) VALUES('github',1)")
     api.on_call = mutate
@@ -379,9 +379,9 @@ def test_git_read_only_stream_and_no_header_or_redirect_leak(workspace, monkeypa
 
 
 def connect_multiple(app):
-    app.state.connectors.settings.github_repositories = 'BerriAI/litellm,BerriAI/moyai-devin'
+    app.state.connectors.settings.github_repositories = 'BerriAI/litellm,BerriAI/moyai'
     app.state.connectors.save('github', {'kind': 'github_app', 'installation_id': 10,
-        'repositories': ['BerriAI/litellm', 'BerriAI/moyai-devin']}, 'Both repositories')
+        'repositories': ['BerriAI/litellm', 'BerriAI/moyai']}, 'Both repositories')
 
 
 def test_self_repository_pr_is_created_directly_without_approval(workspace, monkeypatch):
@@ -389,15 +389,15 @@ def test_self_repository_pr_is_created_directly_without_approval(workspace, monk
     run_id, headers = connected(app)
     connect_multiple(app)
     github = app.state.connectors.github
-    api = GitHubAPI(github, monkeypatch, 'BerriAI/moyai-devin')
-    payload = {**PAYLOAD, 'repository': 'BerriAI/moyai-devin'}
+    api = GitHubAPI(github, monkeypatch, 'BerriAI/moyai')
+    payload = {**PAYLOAD, 'repository': 'BerriAI/moyai'}
     response = client.post(f'/broker/{run_id}/tools/call', headers=headers,
                            json={'name': 'github_create_pull_request', 'arguments': payload})
     assert response.status_code == 200
     result = response.json()
-    assert result['repository'] == 'BerriAI/moyai-devin' and not result['draft']
+    assert result['repository'] == 'BerriAI/moyai' and not result['draft']
     assert not app.state.store.approvals(run_id)
-    assert all(path.startswith('/repos/BerriAI/moyai-devin') for _, path, _ in api.calls)
+    assert all(path.startswith('/repos/BerriAI/moyai') for _, path, _ in api.calls)
     assert all(method == 'GET' or (method == 'POST' and path.rsplit('/', 1)[-1] in {'blobs', 'trees', 'commits', 'refs', 'pulls'}) for method, path, _ in api.calls)
 
 
@@ -405,19 +405,19 @@ def test_repository_routing_and_no_implicit_access_expansion(workspace, monkeypa
     app, client = workspace
     run_id, headers = connected(app)
     github = app.state.connectors.github
-    github.settings.github_repositories = 'BerriAI/litellm,BerriAI/moyai-devin'
+    github.settings.github_repositories = 'BerriAI/litellm,BerriAI/moyai'
     with pytest.raises(ConnectorError, match='Reconnect'):
-        asyncio.run(github.selected_target({}, 'BerriAI/moyai-devin'))
+        asyncio.run(github.selected_target({}, 'BerriAI/moyai'))
     assert asyncio.run(github.selected_target({})) == 'BerriAI/litellm'
     connect_multiple(app)
-    api = GitHubAPI(github, monkeypatch, 'BerriAI/moyai-devin')
-    run = {**app.state.store.run(run_id), 'repo_url': 'https://github.com/BerriAI/moyai-devin.git'}
+    api = GitHubAPI(github, monkeypatch, 'BerriAI/moyai')
+    run = {**app.state.store.run(run_id), 'repo_url': 'https://github.com/BerriAI/moyai.git'}
     result = asyncio.run(github.call(run, 'github_checkout', {}))
-    assert result['repository'] == 'BerriAI/moyai-devin'
-    assert result['git_path'] == '/github/BerriAI/moyai-devin.git'
+    assert result['repository'] == 'BerriAI/moyai'
+    assert result['git_path'] == '/github/BerriAI/moyai.git'
     assert asyncio.run(github.call(run, 'github_repositories', {}))['repositories'] == github.targets()
     api.calls.clear()
-    for target in ['BerriAI/other', 'OtherOrg/moyai-devin', '../moyai-devin']:
+    for target in ['BerriAI/other', 'OtherOrg/moyai', '../moyai']:
         with pytest.raises(ConnectorError):
             asyncio.run(github.call(run, 'github_checkout', {'repository': target}))
         response = client.get(f'/broker/{run_id}/github/{target}.git/info/refs?service=git-upload-pack', headers=headers)
@@ -426,7 +426,7 @@ def test_repository_routing_and_no_implicit_access_expansion(workspace, monkeypa
     approved = {**run, 'github_connection_version': github.connection_version()}
     github.settings.github_repositories = 'BerriAI/litellm'
     with pytest.raises(ConnectorError):
-        asyncio.run(github.publish(approved, Publish.model_validate({**PAYLOAD, 'repository': 'BerriAI/moyai-devin'})))
+        asyncio.run(github.publish(approved, Publish.model_validate({**PAYLOAD, 'repository': 'BerriAI/moyai'})))
     assert not api.calls
 
 
@@ -447,12 +447,12 @@ def test_installation_tokens_are_scoped_cached_and_verified_per_repository(works
         return {'account': {'login': 'BerriAI', 'type': 'Organization'}, 'permissions': PERMISSIONS, 'suspended_at': None}
     monkeypatch.setattr(github, 'request', request)
     credentials = {'kind': 'github_app', 'installation_id': 10, 'repositories': github.targets()}
-    assert asyncio.run(github.verify(credentials)) == 'BerriAI/litellm, BerriAI/moyai-devin'
-    assert [r['repositories'] for r in requests] == [['litellm'], ['moyai-devin']]
-    assert asyncio.run(github.installation_token(repository='berriai/MOYAI-devin')) == 'moyai-devin-read'
+    assert asyncio.run(github.verify(credentials)) == 'BerriAI/litellm, BerriAI/moyai'
+    assert [r['repositories'] for r in requests] == [['litellm'], ['moyai']]
+    assert asyncio.run(github.installation_token(repository='berriai/MOYAI')) == 'moyai-read'
     assert len(requests) == 2
-    assert asyncio.run(github.installation_token(repository='BerriAI/moyai-devin', write=True)) == 'moyai-devin-write'
-    assert requests[-1] == {'repositories': ['moyai-devin'], 'permissions': {'contents': 'write', 'pull_requests': 'write'}}
+    assert asyncio.run(github.installation_token(repository='BerriAI/moyai', write=True)) == 'moyai-write'
+    assert requests[-1] == {'repositories': ['moyai'], 'permissions': {'contents': 'write', 'pull_requests': 'write'}}
     assert asyncio.run(github.installation_token(repository='BerriAI/litellm')) == 'litellm-read'
     with pytest.raises(ConnectorError):
         asyncio.run(github.installation_token(repository='BerriAI/unlisted', write=True))
@@ -475,7 +475,7 @@ def test_specific_git_route_cannot_change_repo_or_allow_push(workspace, monkeypa
         return httpx.Response(200, content=b'0000', headers={'Content-Type': 'application/x-git-upload-pack-' + kind})
     original = httpx.AsyncClient
     monkeypatch.setattr('app.github_git.httpx.AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(upstream), **kwargs))
-    for repo in ['BerriAI/litellm', 'BerriAI/moyai-devin']:
+    for repo in ['BerriAI/litellm', 'BerriAI/moyai']:
         base = f'/broker/{run_id}/github/{repo}.git/'
         assert client.get(base + 'info/refs?service=git-upload-pack', headers=headers).content == b'0000'
         assert paths[-1] == '/' + repo + '.git/info/refs' and tokens[-1] == repo
@@ -484,7 +484,7 @@ def test_specific_git_route_cannot_change_repo_or_allow_push(workspace, monkeypa
         assert client.post(base + 'git-receive-pack', headers=headers).status_code == 403
     assert len(paths) == 2
     github.settings.github_repositories = 'BerriAI/litellm'
-    assert client.get(f'/broker/{run_id}/github/BerriAI/moyai-devin.git/info/refs?service=git-upload-pack', headers=headers).status_code == 403
+    assert client.get(f'/broker/{run_id}/github/BerriAI/moyai.git/info/refs?service=git-upload-pack', headers=headers).status_code == 403
     assert len(paths) == 2
 
 

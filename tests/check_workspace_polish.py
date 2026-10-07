@@ -25,12 +25,12 @@ def main():
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
         page.goto(url)
-        expect(page.locator('.brand')).to_contain_text('Moyai Devin')
+        expect(page.locator('.brand')).to_contain_text('Moyai')
         expect(page.locator('.welcome-mark')).to_be_visible()
         assert page.locator('.brand img').evaluate('(el) => el.complete && el.naturalWidth > 0')
         assert page.locator('.brand img').evaluate('(el) => getComputedStyle(el).filter') == 'none'
         assert page.locator('.send-button').evaluate('(el) => getComputedStyle(el).backgroundColor') == 'rgb(113, 85, 186)'
-        page.get_by_label('Message Moyai Devin', exact=True).fill('Workspace polish browser regression — local demo only')
+        page.get_by_label('Message Moyai', exact=True).fill('Workspace polish browser regression — local demo only')
         # Explicitly select demo; never rely on the server's execution default.
         page.locator('.task-options > summary').click()
         page.locator('#mode').select_option('demo')
@@ -77,7 +77,7 @@ def main():
                 expect(page.locator('#sidebar')).to_have_attribute('inert', '')
             print(f'PASS {width}x{height}: composer, overflow, panel, resize, sidebar')
         page.set_viewport_size({'width': 1600, 'height': 960})
-        page.get_by_label('Message Moyai Devin', exact=True).fill('Verify a follow-up still sends through the real demo backend.')
+        page.get_by_label('Message Moyai', exact=True).fill('Verify a follow-up still sends through the real demo backend.')
         page.get_by_role('button', name='Send message', exact=True).click()
         expect(page.locator('.chat-message.assistant')).to_have_count(2, timeout=30000)
         page.get_by_role('button', name='Activity', exact=True).click()

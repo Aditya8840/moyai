@@ -28,7 +28,7 @@ def health():
 
 @maintenance.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 def preparing(path: str):
-    return PlainTextResponse("Moyai Devin is being prepared on Render. Existing sessions are still on the current workspace.",
+    return PlainTextResponse("Moyai is being prepared on Render. Existing sessions are still on the current workspace.",
                              status_code=503, headers={"Retry-After": "60"})
 
 

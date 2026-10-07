@@ -48,7 +48,7 @@ def routes(github, require_run):
         if version != github.connection_version():
             raise HTTPException(409, 'The GitHub connection changed. Start checkout again.')
         auth = base64.b64encode(('x-access-token:' + token).encode()).decode()
-        headers = {'Authorization': 'Basic ' + auth, 'Accept-Encoding': 'identity', 'User-Agent': 'Moyai-Devin'}
+        headers = {'Authorization': 'Basic ' + auth, 'Accept-Encoding': 'identity', 'User-Agent': 'Moyai'}
         if request.headers.get('git-protocol') == 'version=2':
             headers['Git-Protocol'] = 'version=2'
         if pack:

@@ -29,7 +29,7 @@ body{font:18px system-ui;color:#262336;background:#f7f6fb;margin:0;padding:40px}
 h1{font-size:36px;margin:10px 0}p{color:#625d72;line-height:1.5}button{background:#5b3fd1;color:white;border:0;border-radius:9px;padding:14px 22px;font:inherit;cursor:pointer}button:disabled{opacity:.5}
 .badge{font-size:14px;letter-spacing:.08em;color:#5b3fd1;font-weight:700}#state{float:right;background:white;padding:20px;border-radius:12px;max-width:430px;min-height:50px;white-space:pre-line;font-size:17px}#steps{margin-top:30px}
 .step{padding:14px 20px;background:white;border:1px solid #e3dfee;border-radius:10px;margin:10px 0;display:grid;grid-template-columns:290px 1fr;gap:24px}.step strong{font-size:18px}.step code{display:block;color:#625d72;font-size:14px;margin-top:6px}.result{font-size:17px;white-space:pre-wrap;color:#215c45}footer{font-size:14px;color:#6b657b;margin-top:24px}
-</style><main><div class="badge">MOYAI DEVIN · LOCAL BACKEND DEMO</div>
+</style><main><div class="badge">MOYAI · LOCAL BACKEND DEMO</div>
 <h1>Manage scheduled work from chat</h1><p>Actual agent-tool requests through Moyai’s broker, with a real local Temporal scheduler.<br>No model calls, repository changes, or production schedules.</p>
 <div id="state">Ready to run</div><button id="run">Run real tools demo</button><div id="steps"></div>
 <footer>This page displays real request results. It is a demonstration harness, not a new product screen.<br>The local scheduler has no inference worker. The final step pauses the demonstration schedule.</footer></main>

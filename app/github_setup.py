@@ -86,7 +86,7 @@ def routes(connectors, security, store, settings):
         check_state(sid, 'github_app', state, consume=False)
         owner = github.target().split('/')[0]
         origin = settings.public_url.rstrip('/')
-        manifest = {'name': 'Moyai Devin ' + owner, 'url': origin,
+        manifest = {'name': 'Moyai ' + owner, 'url': origin,
                     'description': 'Shared Moyai integration for code, PRs and ruleset required reviewers; agents cannot approve or merge PRs.',
                     'redirect_url': origin + '/oauth/github/app-callback',
                     'setup_url': origin + '/oauth/github/callback', 'setup_on_update': True,
@@ -94,7 +94,7 @@ def routes(connectors, security, store, settings):
                     'public': False, 'request_oauth_on_install': False, 'default_events': [],
                     'default_permissions': MANIFEST_PERMISSIONS}
         action = 'https://github.com/organizations/' + owner + '/settings/apps/new?' + urlencode({'state': state})
-        return HTMLResponse('<!doctype html><html><head><meta charset="utf-8"><title>Connect GitHub · Moyai Devin</title>'
+        return HTMLResponse('<!doctype html><html><head><meta charset="utf-8"><title>Connect GitHub · Moyai</title>'
             '<link rel="stylesheet" href="/static/style.css"></head><body><main style="max-width:720px;margin:60px auto;padding:24px">'
             '<h1>Connect GitHub for your organization</h1><p>Repositories: <strong>' + html.escape(', '.join(github.targets())) + '</strong></p>'
             '<p>Moyai can read code, create normal pull requests, and update or comment on PRs created by the current session without an administrator approval step. It cannot approve or merge pull requests, '

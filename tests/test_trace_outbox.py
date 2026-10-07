@@ -233,7 +233,7 @@ async def test_child_name_parent_and_identity_survive_group_completion_and_resta
     store.finish_message(parent['id'], parent_message['id'], 'all done')
     exported = [span for row in store.rows('SELECT payload FROM trace_outbox') for span in spans(row['payload'])]
     attrs = lambda span: {a.key: a.value.string_value for a in span.attributes}
-    parent_span = next(s for s in exported if s.name == 'moyai-devin')
+    parent_span = next(s for s in exported if s.name == 'moyai')
     assert len({s.trace_id for s in exported}) == 1
     for label in ['Cases 1–20', 'Cases 21–40']:
         worker = [s for s in exported if attrs(s)['agent.name'] == label]
@@ -244,5 +244,5 @@ async def test_child_name_parent_and_identity_survive_group_completion_and_resta
         assert all(attrs(s)['gen_ai.agent.name'] == label for s in worker)
     for row in store.rows('SELECT payload FROM trace_outbox'):
         request = ExportTraceServiceRequest.FromString(row['payload'])
-        assert request.resource_spans[0].resource.attributes[0].value.string_value == 'moyai-devin'
+        assert request.resource_spans[0].resource.attributes[0].value.string_value == 'moyai'
     await tracing.close()

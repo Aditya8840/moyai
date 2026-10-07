@@ -23,7 +23,7 @@ Browser acceptance covered desktop and a 390px narrow viewport, session search, 
 
 ## Choose the model
 
-**Live verification:** session [`9d137408acbc4254a1c6fbbf7e86aa77`](https://moyai-devin.onrender.com/#run=9d137408acbc4254a1c6fbbf7e86aa77) ran **Opus → Astra → Opus**. Opus remembered `copper lighthouse` and wrote `21`; Astra restored the conversation/file, incremented it to `22`, and a queued Opus turn read `22` and recalled the phrase. The picker changed to Opus while the active turn stayed on Astra. All three answers have model labels, connected apps were deselected, and all three sandboxes confirmed termination. The `@Moyai Devin model opus` command was also verified in the existing #bot-spam test thread without starting compute.
+**Live verification:** session `9d137408acbc4254a1c6fbbf7e86aa77` ran **Opus → Astra → Opus**. Opus remembered `copper lighthouse` and wrote `21`; Astra restored the conversation/file, incremented it to `22`, and a queued Opus turn read `22` and recalled the phrase. The picker changed to Opus while the active turn stayed on Astra. All three answers have model labels, connected apps were deselected, and all three sandboxes confirmed termination. The `@Moyai model opus` command was also verified in the existing #bot-spam test thread without starting compute.
 
 Use the model picker in the new-session composer or below an existing conversation to choose **GPT-6 Astra** (`openai/gpt-6-astra`), **Claude Opus 5.5** (`anthropic/claude-opus-5-5`), or **GLM-5.3** (`fireworks_ai/glm-5p3`). The choice applies when you send the next message and becomes that session's preference. Your conversation and saved workspace stay together across a model switch. Each new assistant answer records its model; old answers without a stored model are left unlabeled.
 
@@ -38,7 +38,7 @@ Local routing demo: run `uv run python scripts/model_tools_demo.py` and open `ht
 In Slack, mention the bot with `model opus`, `model astra`, or `model glm-5.3` to set the model for that thread's next messages. You can start with a model directive on the first line and the task on the next line, for example:
 
 ```text
-@Moyai Devin model opus
+@Moyai model opus
 Read this thread and suggest the next step.
 ```
 

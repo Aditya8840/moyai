@@ -34,7 +34,7 @@ def demo(directory):
     with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as archive:
         for name in paths:
             if name and (root / name).is_file():
-                archive.write(root / name, 'new-files/moyai-devin/' + name)
+                archive.write(root / name, 'new-files/moyai/' + name)
     print(f"Demo: http://127.0.0.1:8797/#run={run['id']}", flush=True)
     return app
 

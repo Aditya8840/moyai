@@ -32,7 +32,7 @@ th,td{padding:15px 18px;text-align:left;border-bottom:1px solid #eeebf5}th{font-
 td:last-child{color:#56505f}#summary{margin:20px 0;padding:18px;border-left:4px solid #5b3fd1;background:#eeebfa;font-weight:650}
 code{font:12px ui-monospace,monospace}details{color:#676171;margin-top:18px}pre{font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap;max-height:240px;overflow:auto;background:#fff;padding:16px}
 .tag{font-size:12px;border:1px solid #c9c0e5;padding:4px 8px;border-radius:5px}footer{font-size:13px;margin-top:18px;color:#78717f}
-</style><main><header>MOYAI DEVIN <span class="tag">LOCAL VERIFICATION</span></header>
+</style><main><header>MOYAI <span class="tag">LOCAL VERIFICATION</span></header>
 <h1>Keep going when the user adds corrections.</h1>
 <p>Real Hermes conversation loop and file writes. Scripted model replies.<br>No production sessions, provider requests, or Slack messages.</p>
 <div class="actions"><button id="run">Run verification</button><strong id="status">Ready</strong></div>

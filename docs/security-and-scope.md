@@ -25,4 +25,4 @@ An encrypted database alone does not protect credentials from an attacker who al
 - [Slack OAuth](https://docs.slack.dev/authentication/installing-with-oauth/)
 - [Notion integrations](https://developers.notion.com/docs/authorization)
 
-Hermes is an independent MIT-licensed project from Nous Research. This MVP builds on it and is not affiliated with Devin.
+Hermes is an independent MIT-licensed project from Nous Research. Moyai builds on it and is not affiliated with Nous Research.

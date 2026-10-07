@@ -1,4 +1,4 @@
-# Moyai Devin
+# Moyai
 
 A self-hosted coding agent for background work. Give it a task from your browser or Slack; it edits code, runs tests, and opens a pull request for review. Send corrections while it works or resume with saved files and conversation history.
 
@@ -13,8 +13,8 @@ You'll need Git, Python 3.12+, [uv](https://docs.astral.sh/uv/getting-started/in
 ### 1. Install
 
 ```sh
-git clone https://github.com/BerriAI/moyai-devin.git
-cd moyai-devin
+git clone https://github.com/BerriAI/moyai.git
+cd moyai
 uv sync --frozen
 cp .env.example .env
 chmod 600 .env

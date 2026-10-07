@@ -27,8 +27,8 @@ Install Git, Python 3.12 or newer, and [uv](https://docs.astral.sh/uv/getting-st
 git --version
 uv --version
 uv python install 3.12
-git clone https://github.com/BerriAI/moyai-devin.git
-cd moyai-devin
+git clone https://github.com/BerriAI/moyai.git
+cd moyai
 uv sync --frozen --python 3.12
 cp .env.example .env
 chmod 600 .env
@@ -124,7 +124,7 @@ Fill in any missing fields before deploying. You will test credentials and conne
 
 ## 4. Deploy the web app
 
-**This command changes your Modal account and starts billed compute.** It updates the `moyai-devin` web app, `hermes-workspace-config` secret, and `hermes-workspace-state` volume. Do not run it against an existing shared installation without coordinating downtime.
+**This command changes your Modal account and starts billed compute.** It updates the `moyai` web app, `hermes-workspace-config` secret, and `hermes-workspace-state` volume. Do not run it against an existing shared installation without coordinating downtime.
 
 ```sh
 uv run python deploy_modal.py
@@ -190,7 +190,7 @@ Do not include `.env`, model keys, Modal tokens, or PEM files in bug reports. In
 
 ## Stop and maintain the installation
 
-- Closing the browser does not stop the service. Stop/cancel active sessions, then stop the `moyai-devin` web app in the Modal dashboard if no longer needed. Check remaining sandboxes separately and review storage retention/charges; stopping the web app does not delete persisted data.
+- Closing the browser does not stop the service. Stop/cancel active sessions, then stop the `moyai` web app in the Modal dashboard if no longer needed. Check remaining sandboxes separately and review storage retention/charges; stopping the web app does not delete persisted data.
 - Keep one web container. Do not enable rolling deployments, multiple Uvicorn workers, or multiple writers on the same database/volume. Redeployments interrupt active tasks.
 - Back up your stable session/encryption secrets along with state. Rotate expired credentials privately and redeploy when idle.
 - Use [deployment alternatives](deployment.md) if you need Render or an existing VM. Those paths still require Modal for the agent sandbox; Docker alone is not a local agent runner.
@@ -209,4 +209,4 @@ Open [localhost:8787](http://127.0.0.1:8787). The preview uses simulated respons
 
 ## Existing BerriAI installation
 
-BerriAI teammates can [open the hosted workspace](https://moyai-devin-litellm.onrender.com) and sign in with an `@berri.ai` Google account instead of deploying another copy.
+BerriAI teammates can open the hosted workspace and sign in with an `@berri.ai` Google account instead of deploying another copy.

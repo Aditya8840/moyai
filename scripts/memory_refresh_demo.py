@@ -63,7 +63,7 @@ async def demo(directory, delay):
             print('  ' + line, flush=True)
         await asyncio.sleep(delay)
 
-    print('MOYAI DEVIN | Automatic Slack memory refresh', flush=True)
+    print('MOYAI | Automatic Slack memory refresh', flush=True)
     print('Real broker + worker. Synthetic Slack profile; clock advanced locally.', flush=True)
     print('$ uv run python scripts/memory_refresh_demo.py', flush=True)
     with patch.object(identities, 'time', SimpleNamespace(time=lambda: clock[0])), \

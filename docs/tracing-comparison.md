@@ -8,12 +8,12 @@ this integration specifically exercises their OTLP ingestion paths.
 
 ## Where Moyai lives and how it deploys
 
-- Repository: [BerriAI/moyai-devin](https://github.com/BerriAI/moyai-devin).
+- Repository: [BerriAI/moyai](https://github.com/BerriAI/moyai).
 - [Render service](https://dashboard.render.com/web/srv-daunqr8473hc73buottg):
-  `moyai-devin-litellm`, in the Litellm workspace, Oregon, Python 3.13.7.
-- [App](https://moyai-devin-litellm.onrender.com): Render hosts FastAPI/UI,
+  in the Litellm workspace, Oregon, Python 3.13.7.
+- App: Render hosts FastAPI/UI,
   the model/tool broker, and the Temporal worker. Modal's `hermes-workspace`
-  hosts agent sandboxes. Temporal uses namespace `moyai-devin.vpxx6` and queue
+  hosts agent sandboxes. Temporal uses queue
   `moyai-sessions-v1`.
 - One Render instance, 1 CPU / 2 GB RAM, with SQLite and artifacts at
   `/var/data/moyai` on a 1 GB persistent disk. Keep one instance.
@@ -46,7 +46,7 @@ gateway. All credentials stay on the Render control plane, outside sandboxes.
 
 Use `TRACE_ENVIRONMENT=production` and
 `LANGFUSE_TRACING_ENVIRONMENT=production` for the application. Verification uses
-`verification` in both. LangSmith uses project `moyai-devin`; Braintrust uses
+`verification` in both. LangSmith uses project `moyai`; Braintrust uses
 project `03def8d1-b4cf-431e-8907-828a0ae42f97` in Moe's Org. Langfuse uses the
 existing US project `cmuvztlwz059bad0c138utb1q`. Raindrop uses Production/default.
 
@@ -83,7 +83,7 @@ Dashboard entry points (search the marker or session above):
 - [Lens](https://gateway-dev.litellm-sandbox.ai/ui/lens?trace=62a19a88e83ef1bc705c53392eaa491c)
 - [Raindrop](https://app.raindrop.ai/events?org=aaede0ab&event=62a19a88e83ef1bc705c53392eaa491c&tab=tree)
 - [LangSmith](https://smith.langchain.com/o/a8e37b69-252c-4f08-a589-c09784f432e1/projects/p/4d325963-780d-4479-b0e9-0667d39072a8)
-- [Braintrust](https://www.braintrust.dev/app/Moe%27s%20Org/p/moyai-devin/logs?r=62a19a88e83ef1bc705c53392eaa491c&s=1e0c1208f6c8bb68)
+- Braintrust (project logs view)
 - [Langfuse](https://us.cloud.langfuse.com/project/cmuvztlwz059bad0c138utb1q/traces)
 
 LangSmith derives run UUIDs from OTLP span IDs and keeps the original trace ID
