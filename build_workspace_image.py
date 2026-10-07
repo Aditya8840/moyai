@@ -18,9 +18,16 @@ async def build_workspace_image(settings: Settings) -> modal.Image:
 
 
 def main() -> None:
+    settings = Settings()
+    if settings.sandbox_provider == 'substrate':
+        print('Substrate uses its configured OCI runtime image; verify it in Settings → Runtime.')
+        return
+    if settings.missing_sandbox('modal'):
+        print('Configure the sandbox connection in Settings → Runtime to build the agent image.')
+        return
     print('Building and validating the Modal workspace image before deployment...', flush=True)
     with modal.enable_output():
-        image = asyncio.run(build_workspace_image(Settings()))
+        image = asyncio.run(build_workspace_image(settings))
     print(f'Workspace image ready: {image.object_id}', flush=True)
 
 

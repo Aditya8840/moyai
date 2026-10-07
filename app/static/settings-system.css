@@ -334,3 +334,10 @@
 }
 
 .settings-view .environment-dialog { width: min(760px,calc(100% - 32px)); }
+
+.settings-view .sandbox-connection { margin-block-end: 24px; }
+.settings-view #sandbox-connection-form { max-width: 640px; display: grid; gap: 16px; }
+.settings-view #sandbox-connection-fields { display: grid; gap: 16px; }
+.settings-view #sandbox-connection-fields .field { display: grid; gap: 8px; }
+.settings-view #sandbox-connection-fields :is(input,textarea) { width: 100%; min-width: 0; }
+.settings-view .sandbox-public-key { white-space: pre-wrap; overflow-wrap: anywhere; }

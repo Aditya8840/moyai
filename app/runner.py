@@ -4,6 +4,7 @@ import re
 import secrets
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import modal
 from fastapi import HTTPException
@@ -41,6 +42,7 @@ class RunManager:
     """Single-process durable admission; interrupted work is never silently replayed."""
     def __init__(self, store, settings):
         self.store, self.settings = store, settings
+        store.sandbox_provider = lambda: settings.sandbox_provider
         self.jobs = {}
         self.sandboxes = {}
         self.slots = asyncio.Semaphore(settings.max_concurrent_runs)
@@ -103,12 +105,20 @@ class RunManager:
             self.store.execute("UPDATE approvals SET status='uncertain' WHERE run_id=? AND status='executing'", (row["id"],))
             self.store.execute("UPDATE messages SET status='interrupted' WHERE run_id=? AND status IN ('running','queued','injected')", (row["id"],))
             self.store.event(row["id"], "error", "Workspace restarted. Received answers were preserved; unfinished messages were interrupted and not replayed.")
-            if row["sandbox_id"] and self.settings.modal_token_id and self.settings.modal_token_secret:
+            if row["sandbox_id"] and not self.settings.missing_sandbox(row.get("sandbox_provider")):
                 try:
-                    sandbox = await modal.Sandbox.from_id.aio(row["sandbox_id"], client=await self.client())
+                    sandbox = await self.provider(row).get(row["sandbox_id"])
                     await self.terminate(sandbox)
                 except Exception:
-                    self.store.event(row["id"], "error", "Could not confirm sandbox cleanup. Check Modal; its configured timeout still applies.")
+                    self.store.event(row["id"], "error", "Could not confirm sandbox cleanup. Check the sandbox provider; its configured timeout still applies.")
+
+    def provider(self, run=None, *, identity='', name=None):
+        from .sandboxes import provider, provider_for_id
+        selected = name or (provider_for_id(identity) if identity else (run or {}).get('sandbox_provider'))
+        backend = provider(self.settings, selected)
+        if backend.name == 'modal':
+            backend.client, backend.image = self.client, self.image
+        return backend
 
     async def client(self):
         return await modal.Client.from_credentials.aio(self.settings.modal_token_id, self.settings.modal_token_secret)
@@ -244,7 +254,7 @@ class RunManager:
                     await self.terminate(sandbox)
                     self.store.event(run_id, "status", "Sandbox terminated")
                 except Exception:
-                    self.store.event(run_id, "error", "Sandbox cleanup was not confirmed. Check Modal; the sandbox timeout still applies.")
+                    self.store.event(run_id, "error", "Sandbox cleanup was not confirmed. Check the sandbox provider; the sandbox timeout still applies.")
             row = self.store.run(run_id)
             if row["status"] == "stopping":
                 self.store.update_run(run_id, status="cancelled")
@@ -344,23 +354,15 @@ class RunManager:
         project = self.environments.context(self.store.run(run_id)) if self.environments else {}
         fresh = self.store.run(run_id)
         run = {**run, 'repo_url': fresh['repo_url'], 'environment_build_id': fresh['environment_build_id']}
-        client = await self.client()
-        app = await modal.App.lookup.aio(self.settings.modal_app_name, create_if_missing=True, client=client)
+        backend = self.provider(run)
         if self.stopped(run_id):
             return
         token = secrets.token_urlsafe(48)
         self.store.update_run(run_id, token_hash=digest(token))
-        secret = modal.Secret.from_dict({"WORKSPACE_RUN_TOKEN": token})
-        # Shield provisioning so cancellation cannot discard a successfully-created sandbox ID.
         snapshot_id = run.get("snapshot_id") or project.get("snapshot_id")
-        image = modal.Image.from_id(snapshot_id, client=client) if snapshot_id else self.image()
-        provision = asyncio.create_task(modal.Sandbox.create.aio(
-            app=app, client=client, image=image, secrets=[secret],
-            env={"PYTHONUNBUFFERED": "1", "PYTHONPATH": "/opt/hermes", "HERMES_HOME": "/tmp/hermes-home",
-                 "HERMES_RUNTIME_DIR": "/opt/hermes-tools", "HERMES_PYTHON": "/opt/hermes-env/bin/python", "GIT_TERMINAL_PROMPT": "0"},
-            timeout=self.settings.sandbox_lifetime_seconds(), cpu=2, memory=4096,
-            experimental_options={"vm_runtime": True} if self.settings.modal_vm_runtime else {},
-        ))
+        provision = asyncio.create_task(backend.create(
+            name='moyai-' + run_id + '-' + uuid4().hex[:8], snapshot_id=snapshot_id or '', token=token,
+            timeout=self.settings.sandbox_lifetime_seconds()))
         try:
             sandbox = await asyncio.shield(provision)
         except asyncio.CancelledError:
@@ -462,7 +464,7 @@ class RunManager:
                 return True
             if not result or code != 0 or not result.get("completed"):
                 self.store.update_run(run_id, status="failed", error="Hermes did not complete the task.", summary=str((result or {}).get("message", "")))
-                self.store.event(run_id, "error", str((result or {}).get("message") or "Hermes exited before completing. Review Modal logs for startup or provider errors."))
+                self.store.event(run_id, "error", str((result or {}).get("message") or "Hermes exited before completing. Review sandbox logs for startup or provider errors."))
             else:
                 self.store.update_run(run_id, status="completed", summary=result["message"])
                 self.store.event(run_id, "result", result["message"])

@@ -1,4 +1,4 @@
-"""Render control plane; agent execution stays in Modal sandboxes.
+"""Render control plane; agent execution uses the configured sandbox provider.
 
 Initial deployments run a maintenance app. After the old web service is stopped,
 set RENDER_MIGRATION_STAGE=false to import its final Modal Volume checkpoint.

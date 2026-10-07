@@ -151,6 +151,8 @@ def create_app(settings: Settings | None = None):
                   max_pending_runs=settings.max_pending_runs)
     user_roles = UserRoles(store, settings)
     security = Security(settings, user_roles)
+    from .sandbox_settings import SandboxSettings
+    sandbox_settings = SandboxSettings(store, settings, security)
     connectors = Connectors(store, security, settings)
     if settings.temporal_enabled:
         from .temporal_runtime import TemporalRunManager
@@ -222,6 +224,8 @@ def create_app(settings: Settings | None = None):
             await checkpoints.flush()
 
     app = FastAPI(title="Moyai", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.sandbox_settings = sandbox_settings
+    app.include_router(sandbox_settings.routes())
     google = GoogleSignIn(settings, security, store)
     app.state.google_signin = google
     app.state.session_titles = session_titles
@@ -302,6 +306,8 @@ def create_app(settings: Settings | None = None):
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):
+        if request.url.path.startswith('/api/settings/sandboxes'):
+            return JSONResponse({'detail': 'Invalid sandbox connection form.'}, status_code=422)
         if request.url.path.startswith('/api/credentials'):
             return JSONResponse({'detail':'Invalid credential form. Choose who can use it and when it can be reused, then check the required fields.'},status_code=422)
         if request.url.path.startswith('/api/skills'):
@@ -356,8 +362,8 @@ def create_app(settings: Settings | None = None):
         response.delete_cookie("workspace_session", path="/")
         return response
 
-    def missing_cloud():
-        missing = settings.missing_cloud()
+    def missing_cloud(provider=None):
+        missing = settings.missing_cloud(provider)
         if security.local:
             missing.append("PUBLIC_URL (reachable HTTPS address)")
         return missing
@@ -368,6 +374,7 @@ def create_app(settings: Settings | None = None):
         missing = missing_cloud()
         from .harnesses import choices
         return {"harnesses": choices(), "harness": settings.agent_harness, "cloud_ready": not missing, "missing": missing, "model": settings.harness_model(settings.agent_harness), "models": settings.model_choices(),
+                "sandbox_provider": settings.sandbox_provider, "sandbox_providers": sandbox_settings.view(False)["providers"],
                 "public_url": settings.public_url, "max_concurrent_runs": settings.max_concurrent_runs,
                 "max_parallel_agents": settings.max_parallel_agents, "parallel_agents_enabled": settings.temporal_enabled,
                 "max_concurrent_model_requests": settings.max_concurrent_model_requests,
@@ -485,7 +492,7 @@ def create_app(settings: Settings | None = None):
         run = store.run(run_id)
         if not run:
             raise HTTPException(404, "Session not found")
-        if run["mode"] == "modal" and missing_cloud():
+        if run["mode"] == "modal" and missing_cloud(run.get("sandbox_provider")):
             raise HTTPException(503, "Cloud setup is incomplete. See Runtime.")
         try:
             # Omitted models use the session preference inside the enqueue

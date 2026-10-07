@@ -6,6 +6,8 @@ For a new installation, follow [Install Moyai and run your first real task](gett
 
 ## Enable cloud runs
 
+Modal is the default sandbox provider. To connect an existing Substrate cluster, follow [Substrate sandboxes](substrate.md). The web app deployment and persistent data directory are independent of the sandbox provider.
+
 With `deploy_modal.py`, you use the HTTPS URL assigned by Modal. Follow the [walkthrough](getting-started.md) for that setup. Set the values below if you host the web app on another service or a VM.
 
 The cloud sandbox calls back to this server for model and app tools, so `PUBLIC_URL` must be a **reachable HTTPS address**. Loopback URLs deliberately keep cloud execution disabled.

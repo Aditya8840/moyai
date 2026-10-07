@@ -239,7 +239,7 @@ class DurableRunner(RunManager):
 
     async def sandbox(self, state):
         try:
-            sandbox = await modal.Sandbox.from_id.aio(state['sandbox_id'], client=await self.client())
+            sandbox = await self.provider(identity=state['sandbox_id']).get(state['sandbox_id'])
         except modal.exception.NotFoundError:
             raise LostExecution() from None
         if await sandbox.poll.aio() is not None:
@@ -258,26 +258,16 @@ class DurableRunner(RunManager):
                     return True
                 state['phase'] = 'provision'
                 self.save(run_id, state)
-        client = await self.client()
+        backend = self.provider(self.store.run(run_id))
         name = f"moyai-{run_id}-{state['message_id']}-{state['segment']}"
         try:
-            sandbox = await modal.Sandbox.from_name.aio(self.settings.modal_app_name, name, client=client)
+            sandbox = await backend.find(name)
         except modal.exception.NotFoundError:
-            app = await modal.App.lookup.aio(self.settings.modal_app_name, create_if_missing=True, client=client)
-            snapshot_id = state['snapshot_id'] or project.get('snapshot_id')
-            image = modal.Image.from_id(snapshot_id, client=client) if snapshot_id else self.image()
             try:
-                sandbox = await modal.Sandbox.create.aio(
-                    app=app, client=client, name=name, image=image,
-                    secrets=[modal.Secret.from_dict({'WORKSPACE_RUN_TOKEN': self.token(run_id, state['message_id'])})],
-                    env={'PYTHONUNBUFFERED': '1', 'PYTHONPATH': '/opt/hermes', 'HERMES_HOME': '/tmp/hermes-home',
-                         'HERMES_RUNTIME_DIR': '/opt/hermes-tools', 'HERMES_PYTHON': '/opt/hermes-env/bin/python',
-                         'GIT_TERMINAL_PROMPT': '0'},
-                    timeout=86400, cpu=2, memory=4096,
-                    experimental_options={'vm_runtime': True} if self.settings.modal_vm_runtime else {},
-                )
+                sandbox = await backend.create(name=name, snapshot_id=state['snapshot_id'] or project.get('snapshot_id') or '',
+                                               token=self.token(run_id, state['message_id']))
             except modal.exception.AlreadyExistsError:
-                sandbox = await modal.Sandbox.from_name.aio(self.settings.modal_app_name, name, client=client)
+                sandbox = await backend.find(name)
         state.update(sandbox_id=sandbox.object_id, machine_started=time.time(), phase='install')
         self.save(run_id, state)
         self.store.update_run(run_id, sandbox_id=sandbox.object_id)
@@ -613,7 +603,7 @@ class DurableRunner(RunManager):
         if not state.get('sandbox_id'):
             return
         try:
-            sandbox = await modal.Sandbox.from_id.aio(state['sandbox_id'], client=await self.client())
+            sandbox = await self.provider(identity=state['sandbox_id']).get(state['sandbox_id'])
             if await sandbox.poll.aio() is None:
                 await self.terminate(sandbox)
         except modal.exception.NotFoundError:

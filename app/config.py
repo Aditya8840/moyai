@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 import base64
 import re
 
@@ -71,6 +72,16 @@ class Settings(BaseSettings):
     braintrust_parent: str = "project_name:moyai"
     agent_model: str = ""
     agent_harness: str = 'claude-agent-sdk'
+    sandbox_provider: Literal['modal', 'substrate'] = 'modal'
+    substrate_api_url: str = ''
+    substrate_router_url: str = ''
+    substrate_api_token: str = ''
+    substrate_token_file: str = ''
+    substrate_ca_cert: str = ''
+    substrate_atespace: str = 'moyai'
+    substrate_template: str = 'moyai'
+    substrate_signing_key: str = ''
+    substrate_egress_hosts: str = '*'
     modal_token_id: str = ""
     modal_token_secret: str = ""
     modal_app_name: str = "hermes-workspace"
@@ -248,12 +259,42 @@ class Settings(BaseSettings):
     def google_admins(self) -> set[str]:
         return {value.strip().lower() for value in self.google_admin_emails.split(",") if value.strip()}
 
-    def missing_cloud(self) -> list[str]:
-        required = {
-            "MODAL_TOKEN_ID": self.modal_token_id,
-            "MODAL_TOKEN_SECRET": self.modal_token_secret,
-            "LITELLM_API_BASE": self.litellm_api_base,
-            "LITELLM_API_KEY": self.litellm_api_key,
-            "AGENT_MODEL": self.agent_model,
-        }
+    @field_validator('substrate_api_url', 'substrate_router_url')
+    @classmethod
+    def substrate_endpoint(cls, value):
+        from urllib.parse import urlsplit
+        parsed = urlsplit(value)
+        if value and (not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment
+                      or parsed.path not in ('', '/') or (parsed.scheme != 'https' and not
+                      (parsed.scheme == 'http' and parsed.hostname in {'localhost', '127.0.0.1', '::1'}))):
+            raise ValueError('Use an HTTPS origin, or HTTP on loopback for a local port-forward.')
+        return value.rstrip('/')
+
+    @field_validator('substrate_atespace', 'substrate_template')
+    @classmethod
+    def substrate_name(cls, value):
+        if not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', value):
+            raise ValueError('Use a lowercase Substrate resource name, at most 63 characters.')
+        return value
+
+    @field_validator('substrate_signing_key')
+    @classmethod
+    def substrate_key(cls, value):
+        if value:
+            from sandbox.substrate_protocol import private_key
+            private_key(value)
+        return value
+
+    def missing_sandbox(self, provider=None) -> list[str]:
+        required = ({'MODAL_TOKEN_ID': self.modal_token_id, 'MODAL_TOKEN_SECRET': self.modal_token_secret}
+                    if (provider or self.sandbox_provider) == 'modal' else {
+                        'SUBSTRATE_API_URL': self.substrate_api_url, 'SUBSTRATE_ROUTER_URL': self.substrate_router_url,
+                        'SUBSTRATE_API_TOKEN': self.substrate_api_token or self.substrate_token_file,
+                        'SUBSTRATE_SIGNING_KEY': self.substrate_signing_key,
+                        'SUBSTRATE_ATESPACE': self.substrate_atespace, 'SUBSTRATE_TEMPLATE': self.substrate_template})
         return [key for key, value in required.items() if not value]
+
+    def missing_cloud(self, provider=None) -> list[str]:
+        required = {'LITELLM_API_BASE': self.litellm_api_base, 'LITELLM_API_KEY': self.litellm_api_key,
+                    'AGENT_MODEL': self.agent_model}
+        return self.missing_sandbox(provider) + [key for key, value in required.items() if not value]

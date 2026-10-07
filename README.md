@@ -46,6 +46,8 @@ Read the full story in the launch post: [Moyai is now open source](https://docs.
 
 ## Getting started
 
+Choose **Modal or [Substrate](docs/substrate.md)** for agent sandboxes in **Settings → Runtime**. Modal is the default. If you already run Substrate, follow the linked setup to connect your cluster.
+
 This setup runs Moyai on **Modal**, using **GPT-6 Astra + the Claude Agent SDK harness** through LiteLLM. You can [choose another model or harness](docs/getting-started.md#choose-a-harness).
 
 You'll need Git, Python 3.12+, [uv](https://docs.astral.sh/uv/getting-started/installation/), a [Modal account](https://modal.com/docs/guide), and a [LiteLLM gateway](docs/getting-started.md#3-configure-a-model-endpoint) with GPT-6 Astra enabled. Commands use a macOS/Linux shell; Windows users can use WSL.

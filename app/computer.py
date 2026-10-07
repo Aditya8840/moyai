@@ -47,7 +47,7 @@ class Computer:
     async def sandbox(self, run):
         if not run.get('sandbox_id'):
             return None
-        sandbox = await modal.Sandbox.from_id.aio(run['sandbox_id'], client=await self.manager.client())
+        sandbox = await self.manager.provider(run).get(run['sandbox_id'])
         return sandbox if await sandbox.poll.aio() is None else None
 
     async def execute(self, sandbox, *args, timeout=45):

@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -707,6 +707,7 @@ dependencies = [
     { name = "agentchat" },
     { name = "cryptography" },
     { name = "fastapi" },
+    { name = "grpclib" },
     { name = "httpx" },
     { name = "itsdangerous" },
     { name = "modal" },
@@ -715,6 +716,7 @@ dependencies = [
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
     { name = "pillow" },
+    { name = "protobuf" },
     { name = "pydantic-settings" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "temporalio" },
@@ -733,6 +735,7 @@ requires-dist = [
     { name = "agentchat", git = "https://github.com/BerriAI/agentchat.git?rev=8876e361c4071b4906916452ff3e6c35b1a9c78b" },
     { name = "cryptography", specifier = ">=44" },
     { name = "fastapi", specifier = ">=0.115,<1" },
+    { name = "grpclib", specifier = ">=0.4.9,<1" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "itsdangerous", specifier = ">=2.2,<3" },
     { name = "modal", specifier = ">=1.4,<2" },
@@ -741,6 +744,7 @@ requires-dist = [
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.39,<2" },
     { name = "opentelemetry-sdk", specifier = ">=1.39,<2" },
     { name = "pillow", specifier = ">=11.3,<13" },
+    { name = "protobuf", specifier = ">=6.33.6,<7" },
     { name = "pydantic-settings", specifier = ">=2.8,<3" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10,<3" },
     { name = "temporalio", specifier = ">=1.20,<2" },

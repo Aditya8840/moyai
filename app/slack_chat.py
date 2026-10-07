@@ -224,6 +224,7 @@ class SlackChat:
                                  (run_id, prompt or original_prompt, 'idle' if command else 'queued', json.dumps(plugins), stamp, stamp, model, actor_id, harness))
                     conn.execute("INSERT INTO slack_events(event_id,run_id,channel,thread_ts,user_id,created_at,mention_ts,context_status) VALUES(?,?,?,?,?,?,?,'pending')",
                                  (event_id, run_id, channel, root, user, stamp, ts))
+                    conn.execute('UPDATE runs SET sandbox_provider=? WHERE id=?', (self.settings.sandbox_provider, run_id))
                     fresh = True
                 cursor = conn.execute('SELECT COALESCE(MAX(id),0) FROM messages WHERE run_id=?', (run_id,)).fetchone()[0]
                 conn.execute('INSERT INTO slack_threads(team_id,channel,thread_ts,run_id,started_ts,last_message_id,last_progress) VALUES(?,?,?,?,?,?,?)',

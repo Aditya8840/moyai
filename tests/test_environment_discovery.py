@@ -110,6 +110,10 @@ async def test_ready_environment_only_matches_its_repository(environments, monke
     resolved = json.loads(env.build(build_id)['recipe'])
     resolved.update(startup='service example start', instructions='Detected instructions')
     env.rpc = AsyncMock(return_value={'done': True, 'success': True, 'commit_sha': 'a'*40, 'recipe': resolved})
+    from app.sandboxes.modal import ModalProvider
+    backend = ModalProvider(env.settings)
+    backend.client = env.manager.client
+    env.manager.provider = lambda **kw: backend
     await env.advance(env.build(build_id))
     assert (await env.prepare(run['id']))['startup'] == 'service example start'
     assert (await env.prepare(new_run(env)['id']))['snapshot_id'] == 'im-ready'

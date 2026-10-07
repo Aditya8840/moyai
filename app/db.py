@@ -133,7 +133,7 @@ class Store:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             if 'github_repository_id' not in {r['name'] for r in conn.execute('PRAGMA table_info(runs)')}:
                 conn.execute('ALTER TABLE runs ADD COLUMN github_repository_id INTEGER')
-            for name, default in [('environment_id', 'auto'), ('environment_build_id', ''), ('harness', 'hermes')]:
+            for name, default in [('environment_id', 'auto'), ('environment_build_id', ''), ('harness', 'hermes'), ('sandbox_provider', 'modal')]:
                 if name not in {row['name'] for row in conn.execute('PRAGMA table_info(runs)')}:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
             columns = {row['name'] for row in conn.execute('PRAGMA table_info(users)')}
@@ -251,7 +251,8 @@ class Store:
         row["plugins"] = json.loads(row["plugins"])
         return row
 
-    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None):
+    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None, sandbox_provider=None):
+        sandbox_provider = sandbox_provider or getattr(self, 'sandbox_provider', lambda: 'modal')()
         run_id = uuid4().hex
         stamp = now()
         model = model or self.default_model
@@ -260,9 +261,9 @@ class Store:
         with self.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             if client_id:
-                previous = conn.execute("SELECT m.*,r.repo_url,r.github_repository_id,r.mode,r.plugins,r.environment_id,r.side_chat_of,r.harness FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
+                previous = conn.execute("SELECT m.*,r.repo_url,r.github_repository_id,r.mode,r.plugins,r.environment_id,r.side_chat_of,r.harness,r.sandbox_provider FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
                 if previous:
-                    if (previous['harness'] != harness or previous['content'] != prompt or previous['model'] != model or (previous['github_repository_id'] != github_repository_id if github_repository_id else previous['repo_url'] != repo_url)
+                    if (previous['sandbox_provider'] != sandbox_provider or previous['harness'] != harness or previous['content'] != prompt or previous['model'] != model or (previous['github_repository_id'] != github_repository_id if github_repository_id else previous['repo_url'] != repo_url)
                             or previous['mode'] != mode or json.loads(previous['plugins']) != plugins or previous['environment_id'] != environment_id or previous['side_chat_of'] != side_chat_of
                             or self.attachments.message_ids(conn, previous['id']) != set(attachment_ids or [])):
                         raise ValueError('That submission ID was already used for different content.')
@@ -289,6 +290,7 @@ class Store:
                 "INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,active_model,owner_id,active_user_id,environment_id,harness,github_repository_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (run_id, prompt, repo_url, mode, "queued", json.dumps(plugins), stamp, stamp, chat_enabled, model, model, user_id, user_id, environment_id, harness, github_repository_id),
             )
+            conn.execute('UPDATE runs SET sandbox_provider=? WHERE id=?', (sandbox_provider, run_id))
             if side_chat_of:
                 conn.execute('UPDATE runs SET side_chat_of=?,side_chat_context=?,agent_label=? WHERE id=?', (side_chat_of, context, 'Side chat · ' + prompt[:70], run_id))
             if chat_enabled:
@@ -316,6 +318,7 @@ class Store:
                 raise ValueError("The session queue is full.")
             conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,owner_id,harness) VALUES(?,?,'','modal','queued',?,?,?,1,?,?,?)",
                          (run_id, prompt, json.dumps(plugins), stamp, stamp, model, actor_id, harness))
+            conn.execute('UPDATE runs SET sandbox_provider=? WHERE id=?', (getattr(self, 'sandbox_provider', lambda: 'modal')(), run_id))
             message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)", (run_id, prompt, stamp, model, actor_id)).lastrowid
             self.slack_mentions.queue_in(conn, message_id, team_id, prompt)
             if file_ids:
