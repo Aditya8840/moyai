@@ -5,7 +5,7 @@ const vm=require('node:vm');
 const source=fs.readFileSync('app/static/app.js','utf8');
 const functions=source.slice(source.indexOf('function harnessPicker('),source.indexOf('\nfunction setSidebar('));
 function setup(){
-  const context={state:{config:{harnesses:[{id:'hermes',name:'Hermes'},{id:'claude-agent-sdk',name:'Claude Code · LiteLLM',model_prefix:'anthropic/claude-'}],models:[{id:'openai/gpt-6-astra',name:'Astra'},{id:'anthropic/claude-opus-5-5',name:'Opus'}]}},esc:s=>String(s)};
+  const context={state:{config:{harnesses:[{id:'hermes',name:'Hermes'},{id:'claude-agent-sdk',name:'Claude Code · LiteLLM',model_prefix:'anthropic/claude-'}],models:[{id:'openai/gpt-6-astra',name:'Astra'},{id:'anthropic/claude-opus-5-5',name:'Opus'}]}},esc:s=>String(s),MoyaiProviderLogos:require('../app/static/provider-logos.js')};
   vm.createContext(context);vm.runInContext(functions,context);return context;
 }
 test('harness picker defaults to Hermes and retains an explicit Claude choice',()=>{

@@ -95,7 +95,8 @@ function sessionIndicator(run){
 function modelName(model=state.config.model){return (state.config.models||[]).find(m=>m.id===model)?.name||model||'Hermes Agent';}
 function harnessPicker(selected='hermes'){return `<label class="model-picker"><span class="sr-only">Agent harness</span><select id="new-harness" aria-label="Agent harness">${(state.config.harnesses||[{id:'hermes',name:'Hermes'}]).map(h=>`<option value="${esc(h.id)}" ${h.id===selected?'selected':''}>${esc(h.name)}</option>`).join('')}</select></label>`;}
 function harnessModels(harness){const prefix=(state.config.harnesses||[]).find(h=>h.id===harness)?.model_prefix||'';return (state.config.models||[]).filter(m=>m.id.startsWith(prefix));}
-function modelPicker(id,selected,disabled=false,harness='hermes'){return `<label class="model-picker"><span class="sr-only">Model for next message</span><select id="${id}" aria-label="Model for next message" ${disabled?'disabled':''}>${harnessModels(harness).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}</select></label>`;}
+function providerLogo(model){const url=MoyaiProviderLogos.src(model);return `<img class="provider-logo" alt="" width="16" height="16" ${url?`src="${esc(url)}"`:'hidden'}>`;}
+function modelPicker(id,selected,disabled=false,harness='hermes'){return `<label class="model-picker">${providerLogo(selected)}<span class="sr-only">Model for next message</span><select id="${id}" aria-label="Model for next message" ${disabled?'disabled':''}>${harnessModels(harness).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}</select></label>`;}
 
 function openSessionSearch(){$('.session-search').hidden=false;$('#search-sessions').setAttribute('aria-expanded','true');$('#session-search').focus();}
 function closeSessionSearch(){if($('#session-search').value)return;$('.session-search').hidden=true;$('#search-sessions').setAttribute('aria-expanded','false');}
@@ -218,7 +219,7 @@ async function renderHome(){
   if(draft.mode&&($('#mode option[value="'+draft.mode+'"]').disabled===false))$('#mode').value=draft.mode;
   const saveDraft=()=>{state.newDraft={prompt:$('#prompt').value,repo:$('#repo').value,environment_id:$('#project-environment').value,mode:$('#mode').value,model:$('#new-model').value,harness:$('#new-harness').value,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value)};};
   $('#task-form').oninput=saveDraft;$('#task-form').onchange=saveDraft;$('#task-form').onsubmit=submitTask;
-  $('#new-harness').onchange=()=>{const picker=$('#new-model'),selected=picker.value;picker.innerHTML=harnessModels($('#new-harness').value).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('');saveDraft();};
+  $('#new-harness').onchange=()=>{const picker=$('#new-model'),selected=picker.value;picker.innerHTML=harnessModels($('#new-harness').value).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('');MoyaiProviderLogos.sync(picker.parentElement.querySelector('.provider-logo'),picker.value);saveDraft();};
   $('#mode').addEventListener('change',()=>{$('#new-model').disabled=$('#mode').value==='demo';$('#mode-note').textContent=$('#mode').value==='demo'?'Demo responses · audio uses transcription':'Your own cloud workspace';});
   $('#mode').dispatchEvent(new Event('change'));
   bindComposer($('#prompt'),$('#task-form'));
@@ -337,7 +338,7 @@ function connectChatStream(run){
 function updateChatStatus(run){
   if(state.chatRun){Object.assign(state.chatRun,run);state.messageQueue?.render(state.chatRun);MoyaiActivity.sync($('#conversation'),state.chatRun,{markdown:renderMarkdown,copy:copyText});savedFiles.decorate($('#conversation'));}
   run=state.chatRun||run;
-  if(run.model&&$('#chat-model')&&!state.modelDrafts[state.selected])$('#chat-model').value=run.model;
+  if(run.model&&$('#chat-model')&&!state.modelDrafts[state.selected]){$('#chat-model').value=run.model;MoyaiProviderLogos.sync($('#chat-model').parentElement.querySelector('.provider-logo'),run.model);}
   $('#run-status').innerHTML=statusLabel(run.status);
   const busy=!terminal.has(run.status)||run.active;
   $('#stop-response').hidden=!busy;$('#stop-response').disabled=run.status==='stopping';
@@ -547,6 +548,7 @@ function registerWebMCP(){
   tools.forEach(tool=>{try{Promise.resolve(document.modelContext.registerTool(tool,{signal:abort.signal})).catch(()=>{});}catch{}});
 }
 matchMedia('(max-width:850px)').addEventListener('change',()=>setSidebar(false));
+document.addEventListener('change',e=>{const picker=e.target.closest?.('.model-picker select'),logo=picker?.parentElement.querySelector('.provider-logo');if(logo)MoyaiProviderLogos.sync(logo,picker.value);});
 setInterval(()=>{if(state.authenticated&&!document.hidden)refreshRuns().catch(()=>{});},15000);
 boot();
 
