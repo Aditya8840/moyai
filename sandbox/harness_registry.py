@@ -5,16 +5,10 @@ capabilities here; implement Moyai's lifecycle contract in that adapter.
 """
 from dataclasses import dataclass
 from importlib import import_module
-from typing import Protocol
-
-
-class AgentHarness(Protocol):
-    """Contract consumed by agent.py, independent of native SDK/session types."""
-    def validate(self) -> None: ...
-    def run_conversation(self, prompt: str, *, conversation_history: list,
-                         system_message: str) -> dict: ...
-    def interrupt(self) -> None: ...
-    def close(self) -> None: ...
+try:
+    from .harness_agent import HarnessAgent
+except ImportError:
+    from harness_agent import HarnessAgent
 
 
 @dataclass(frozen=True)
@@ -31,7 +25,7 @@ class HarnessDefinition:
     def accepts(self, model):
         return not self.model_prefix or model.startswith(self.model_prefix)
 
-    def create(self, **context) -> AgentHarness:
+    def create(self, **context) -> HarnessAgent:
         module = import_module('.' + self.module, __package__) if __package__ else import_module(self.module)
         return getattr(module, self.factory)(definition=self, **context)
 

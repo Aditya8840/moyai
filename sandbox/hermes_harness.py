@@ -1,9 +1,13 @@
 """Hermes-specific setup lives outside the harness-neutral session lifecycle."""
 import os
 import sys
+try:
+    from .harness_agent import HarnessAgent
+except ImportError:
+    from harness_agent import HarnessAgent
 
 
-class HermesAgent:
+class HermesAgent(HarnessAgent):
     def __init__(self, *, spec, relay, config, activity, step, cwd, definition=None):
         from run_agent import AIAgent
         from tools.mcp_tool_discovery import discover_mcp_tools
@@ -31,3 +35,12 @@ class HermesAgent:
 
     def __getattr__(self, name):
         return getattr(self.agent, name)
+
+    def run_conversation(self, prompt, *, conversation_history, system_message):
+        return self.agent.run_conversation(prompt, conversation_history=conversation_history, system_message=system_message)
+
+    def interrupt(self):
+        return self.agent.interrupt()
+
+    def close(self):
+        self.agent.close()

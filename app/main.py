@@ -803,6 +803,19 @@ def create_app(settings: Settings | None = None):
     async def slack_events(request: Request):
         return await slack.receive(request, missing_cloud())
 
+    from .harness_gateway import HarnessGateway
+    harness_gateway = HarnessGateway(settings=settings, store=store, spend=spend,
+        checkpoints=checkpoints, require_run=require_run, read_body=broker_body,
+        model_slots=model_slots, memory=memory, skills=skills, tracing=tracing)
+
+    @app.post('/broker/{run_id}/v1/messages')
+    async def messages_proxy(run_id: str, request: Request):
+        return await harness_gateway.forward(run_id, request, '/v1/messages')
+
+    @app.post('/broker/{run_id}/v1/responses')
+    async def responses_proxy(run_id: str, request: Request):
+        return await harness_gateway.forward(run_id, request, '/v1/responses')
+
     @app.post("/broker/{run_id}/v1/chat/completions")
     async def model_proxy(run_id: str, request: Request):
         require_run(run_id, request)

@@ -6,7 +6,6 @@ import httpx
 import pytest
 
 from app.db import Store
-from sandbox.anthropic_bridge import to_completion, from_completion, message_events
 from sandbox.broker_relay import BrokerRelay
 from sandbox.broker_transport import unseal
 from test_workspace import workspace
@@ -64,16 +63,14 @@ def test_slack_harness_with_initial_task(slack_app):
     assert app.state.store.messages(submitted[0]['id'])[0]['content'] == 'Read the repository'
 
 
-def test_protocol_preserves_tool_receipts_and_images():
-    payload = to_completion({'system': [{'type': 'text', 'text': 'system'}], 'messages': [
-        {'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 't1', 'name': 'Read', 'input': {'file_path': '/workspace/a'}}]},
-        {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 't1', 'content': 'saved result'}, {'type': 'text', 'text': 'continue'}]}]})
-    assert payload['messages'][1]['tool_calls'][0]['id'] == 't1'
-    assert payload['messages'][2] == {'role': 'tool', 'tool_call_id': 't1', 'content': 'saved result'}
-    result = from_completion({'choices': [{'finish_reason': 'tool_calls', 'message': {'tool_calls': [{'id': 't1', 'function': {'name': 'Read', 'arguments': '{"file_path":"/workspace/a"}'}}]}}]})
-    assert result['stop_reason'] == 'tool_use'
-    events = b''.join(message_events(result)).decode()
-    assert 'input_json_delta' in events and 'message_stop' in events
+def test_journal_retains_completed_tool_receipts():
+    from sandbox.harness_agent import TurnJournal
+    journal = TurnJournal([], 'request')
+    journal.tool_started('one', 'Write', {'path': 'proof.py'})
+    assert journal.pending == {'one'}
+    journal.tool_finished('one', 'written')
+    assert not journal.pending
+    assert journal.messages[-1]['tool_call_id'] == 'one'
 
 
 def test_sdk_wire_uses_existing_sealed_model_broker():
@@ -81,12 +78,12 @@ def test_sdk_wire_uses_existing_sealed_model_broker():
     class Edge(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
         def do_POST(self):
-            assert self.path == '/broker/run/v1/chat/completions'
-            value = json.loads(unseal('test-token', '/v1/chat/completions', self.rfile.read(int(self.headers['Content-Length']))))
+            assert self.path == '/broker/run/v1/messages'
+            value = json.loads(unseal('test-token', '/v1/messages', self.rfile.read(int(self.headers['Content-Length']))))
             calls.append(value)
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(json.dumps({'choices': [{'message': {'content': 'test fixture'}, 'finish_reason': 'stop'}]}).encode())
+            self.wfile.write(b'event: message_stop\ndata: {"type":"message_stop"}\n\n')
     edge = ThreadingHTTPServer(('127.0.0.1', 0), Edge)
     threading.Thread(target=edge.serve_forever, daemon=True).start()
     relay = BrokerRelay(f'http://127.0.0.1:{edge.server_port}/broker/run', 'test-token').start()
@@ -96,8 +93,8 @@ def test_sdk_wire_uses_existing_sealed_model_broker():
             assert client.post('/v1/messages', json=payload).status_code == 401
             response = client.post('/v1/messages?beta=true', headers={'x-api-key': 'test-token'}, json=payload)
             assert response.status_code == 200 and 'message_stop' in response.text
-            assert calls[0]['stream'] is False
-            relay.before_model = lambda messages: False
+            assert calls[0] == payload
+            relay.before_model = lambda: False
             assert client.post('/v1/messages', headers={'x-api-key': 'test-token'}, json=payload).status_code == 409
             assert len(calls) == 1
     finally:
@@ -113,18 +110,18 @@ def test_claude_boundary_preserves_receipts_without_recursive_history():
     from sandbox.continuation import RotationDeadline
     relay = SimpleNamespace(before_model=None)
     agent = LiteLLMAgent(spec={}, relay=relay, config={}, activity=None, step=lambda: None, cwd='/workspace', definition=resolve('claude-agent-sdk'))
-    agent.history = [{'role': 'user', 'content': 'previous'}, {'role': 'assistant', 'content': 'done'}]
-    agent.prompt = 'followup'
-    messages = [{'role': 'system', 'content': 'private'}, {'role': 'user', 'content': 'SAVED CONVERSATION REFERENCE: serialized history'},
-                {'role': 'assistant', 'tool_calls': [{'id': 'write1'}]},
-                {'role': 'tool', 'tool_call_id': 'write1', 'content': 'write completed'}]
-    agent.step = agent.interrupt
-    assert agent.before_model(messages) is False
-    assert agent.messages[2]['content'] == 'followup'
-    assert len(agent.messages) == 5
+    from sandbox.harness_agent import TurnJournal, HarnessContext
+    agent.journal = TurnJournal([{'role': 'user', 'content': 'previous'}, {'role': 'assistant', 'content': 'done'}], 'followup')
+    agent.context = HarnessContext({}, relay, {}, None, agent.interrupt, '/workspace')
+    agent.journal.tool_started('write1', 'Write', {})
+    assert agent.before_model() is True
+    agent.journal.tool_finished('write1', 'write completed')
+    assert agent.before_model() is False
+    assert agent.journal.messages[2]['content'] == 'followup'
+    assert len(agent.journal.messages) == 5
     deadline = RotationDeadline(0)
     deadline.requested = True
-    assert deadline.can_continue({'interrupted': True, 'messages': agent.messages})
+    assert deadline.can_continue({'interrupted': True, 'messages': agent.journal.messages})
     agent.close()
     assert relay.before_model is None
 
@@ -142,12 +139,12 @@ def test_claude_private_tool_prefixes_are_scrubbed():
     assert 'private note' not in json.dumps(events)
 
 
-def test_wire_image_and_unsupported_blocks():
-    value = to_completion({'messages': [{'role': 'user', 'content': [
-        {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': 'test-fixture'}}]}]})
-    assert value['messages'][0]['content'][0]['image_url']['url'] == 'data:image/png;base64,test-fixture'
-    with pytest.raises(ValueError, match='Unsupported'):
-        to_completion({'messages': [{'role': 'user', 'content': [{'type': 'unknown'}]}]})
+def test_native_images_are_not_translated():
+    from app.harness_gateway import authorized_payload
+    messages = [{'role': 'user', 'content': [{'type': 'image', 'source': {
+        'type': 'base64', 'media_type': 'image/png', 'data': 'fixture'}}]}]
+    result = authorized_payload({'messages': messages}, '/v1/messages', OPUS, '')
+    assert result['messages'] == messages
 
 
 def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, monkeypatch):
@@ -229,24 +226,16 @@ def test_catalog_covers_upstream_harness_enum():
     assert {h.litellm_harness for h in HARNESSES.values() if h.litellm_harness} == {h.name for h in litellm.Harness}
 
 
-def test_responses_wire_conversion():
-    pytest.importorskip('litellm.harness')
-    from sandbox.responses_bridge import to_completion, from_completion, message_events
-    request = {'model': 'openai/test', 'instructions': 'test instructions', 'input': [
-        {'role': 'user', 'content': 'hello'},
-        {'type': 'function_call', 'call_id': 'call_one', 'name': 'read_file', 'arguments': '{"path":"a"}'},
-        {'type': 'function_call_output', 'call_id': 'call_one', 'output': 'saved receipt'}],
-        'tools': [{'type': 'function', 'name': 'read_file', 'parameters': {'type': 'object', 'properties': {'path': {'type': 'string'}}}}]}
-    payload = to_completion(request)
-    assert payload['stream'] is False
-    assert any(m.get('tool_call_id') == 'call_one' and m['content'] == 'saved receipt' for m in payload['messages'])
-    response = from_completion({'id': 'chatcmpl-test', 'model': 'openai/test', 'choices': [
-        {'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': 'done'}}],
-        'usage': {'prompt_tokens': 10, 'completion_tokens': 2, 'total_tokens': 12}}, request)
-    assert response['status'] == 'completed'
-    assert b'response.completed' in b''.join(message_events(response))
-    with pytest.raises(ValueError, match='full conversation'):
-        to_completion({'previous_response_id': 'resp_old'})
+def test_responses_input_is_not_translated():
+    from app.harness_gateway import authorized_payload
+    from fastapi import HTTPException
+    items = [{'type': 'function_call_output', 'call_id': 'one', 'output': 'saved receipt'}]
+    result = authorized_payload({'input': items, 'api_key': 'untrusted'}, '/v1/responses', 'openai/test', 'context')
+    assert result['input'] == items
+    assert result['instructions'] == 'context\n\n'
+    assert 'api_key' not in result
+    with pytest.raises(HTTPException):
+        authorized_payload({'input': [], 'previous_response_id': 'foreign'}, '/v1/responses', 'openai/test', '')
 
 
 @pytest.mark.parametrize('name', ['moyai_memory_save', 'mcp__moyai__memory_save', 'workspace_call'])

@@ -51,7 +51,7 @@ class BrokerRelay:
                 if self.path == '/v1/messages?beta=true':
                     self.path = '/v1/messages'
                 claude_request = self.path == '/v1/messages'
-                responses_request = self.path == '/v1/responses'
+
                 credential_route = re.fullmatch(r'/credentials/([0-9a-f]{32})/v1(/models|/chat/completions|/completions|/embeddings|/messages)',self.path)
                 authorized = hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + token)
                 if credential_route or claude_request:
@@ -67,20 +67,8 @@ class BrokerRelay:
                         return self.error(413, 'Broker request is too large.')
                     raw = self.rfile.read(size) if self.command == 'POST' else b''
                     route,method = self.path,self.command
-                    claude_stream = False
-                    if claude_request or responses_request:
-                        try:
-                            from . import anthropic_bridge, responses_bridge
-                        except ImportError:
-                            import anthropic_bridge, responses_bridge
-                        bridge = responses_bridge if responses_request else anthropic_bridge
-                        value = json.loads(raw)
-                        wire_request = value
-                        claude_stream = bool(value.get('stream'))
-                        raw = json.dumps(bridge.to_completion(value)).encode()
-                        route = '/v1/chat/completions'
-                    if route == '/v1/chat/completions':
-                        if relay.before_model and not relay.before_model(json.loads(raw)['messages']):
+                    if route in {'/v1/chat/completions', '/v1/messages', '/v1/responses'}:
+                        if relay.before_model and not relay.before_model():
                             return self.error(409, 'Saving at a complete tool boundary.')
                     if credential_route:
                         try:
@@ -130,12 +118,13 @@ class BrokerRelay:
                                 return self.error(409, 'This model request was superseded by a queued message.')
                             data = seal(token, route, raw) if method == 'POST' else None
                             request = urllib.request.Request(remote.rstrip('/') + route, data=data,
-                                headers={'Authorization': 'Bearer ' + token, 'Content-Type': CONTENT_TYPE}, method=method)
+                                headers={'Authorization': 'Bearer ' + token, 'Content-Type': CONTENT_TYPE,
+                                         **{k: self.headers[k] for k in ('anthropic-version', 'anthropic-beta') if k in self.headers}}, method=method)
                             try:
                                 response = urllib.request.urlopen(request, timeout=940)
                                 break
                             except urllib.error.HTTPError as exc:
-                                if (route != '/v1/chat/completions' or exc.code != 429
+                                if (route not in {'/v1/chat/completions', '/v1/messages', '/v1/responses'} or exc.code != 429
                                         or exc.headers.get('X-Moyai-Model-Queue') != '1'):
                                     raise
                                 exc.close()
@@ -144,17 +133,7 @@ class BrokerRelay:
                                 # before admission, so no gateway call was made.
                                 time.sleep(3 + random.random())
                     with response:
-                        if claude_request or responses_request:
-                            body = response.read(MAX_BODY + 1)
-                            if len(body) > MAX_BODY:
-                                raise ValueError('Model response exceeds size limit')
-                            value = bridge.from_completion(json.loads(body), wire_request) if responses_request else bridge.from_completion(json.loads(body))
-                            self.send_response(response.status)
-                            self.send_header('Content-Type', 'text/event-stream' if claude_stream else 'application/json')
-                            self.end_headers()
-                            self.wfile.write(b''.join(bridge.message_events(value)) if claude_stream else json.dumps(value).encode())
-                            relay.last_error = ''
-                            return
+
                         if steering and hasattr(steering, 'cancelled') and steering.cancelled(generation):
                             return  # A redirected request may complete/bill later; discard its output.
                         self.send_response(response.status)
@@ -173,7 +152,7 @@ class BrokerRelay:
                                 relay.wait_credential = credential
                             self.wfile.write(body)
                         else:
-                            while chunk := response.read(65536):
+                            while chunk := response.read1(65536):
                                 if steering and hasattr(steering, 'cancelled') and steering.cancelled(generation):
                                     return
                                 self.wfile.write(chunk)

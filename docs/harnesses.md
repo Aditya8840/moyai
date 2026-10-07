@@ -11,16 +11,20 @@ include Hermes in its `Harness` enum.
 - `sandbox/agent.py` owns shared workspace preparation, prompts, activity,
   steering, waits, checkpointing and final delivery. It calls a registry factory,
   not a Hermes/Claude conditional.
-- Each adapter implements `validate()`, `run_conversation(...)`, `interrupt()`
+- `sandbox/harness_agent.py` defines the **HarnessAgent** abstract base class and
+  typed **HarnessContext**. Both HermesAgent and LiteLLMAgent implement it.
+  Each adapter implements `validate()`, `run_conversation(...)`, `interrupt()`
   and `close()`. Results carry completion/failure/interruption flags and saved
   transcript messages. Live-steering adapters additionally expose the Hermes
   redirect/steer contract; boundary-only adapters declare that capability false.
 - `sandbox/hermes_harness.py` encapsulates Hermes imports, discovery and callbacks.
 - `sandbox/litellm_harness.py` calls **`litellm.aagent_session()`**, selects the
-  registered **`Harness` enum**, checks `agent_capabilities()`, and consumes typed
+  registered **`Harness` enum**, and consumes typed
   `Text`, `ToolCall`, `ToolResult`, `Approval` and final result events. Private
   `Reasoning` events never enter public activity.
-- Runtime launch/MCP configuration is a binding separate from the shared LiteLLM
+- `sandbox/harness_bindings.py` contains named, typed runtime bindings rather than
+  anonymous factory tuples and dynamic `__import__` lambdas.
+  Runtime launch/MCP configuration is separate from the shared LiteLLM
   event loop. The Claude binding uses a `LocalSandbox` subclass inside the
   existing isolated Modal sandbox. LiteLLM owns CLI execution and event parsing.
 
@@ -79,12 +83,15 @@ older snapshots install missing dependencies before starting the selected harnes
 
 LiteLLM receives `model='litellm_proxy/' + selected_model`, the loopback broker
 URL and only the short-lived run capability. Its local endpoint forwards to
-Moyai's authenticated relay, which translates Claude's Messages and Codex's
-Responses wire formats to the existing sealed model broker. Responses conversion
-uses LiteLLM's maintained transforms. OpenCode and the in-process harnesses use
-Chat Completions. All inference paths retain model pinning, limits and authorized
-skills/memory. Image injection, spend and traces stay on the server; no provider key enters the
-runtime. There is no silent fallback to Hermes.
+Moyai's authenticated relay. The relay seals and forwards each native route:
+`/v1/messages` stays Messages, `/v1/responses` stays Responses. **LiteLLM AI Gateway
+owns protocol unification**. No local Messages/Responses conversion or synthetic
+SSE generation remains. OpenCode and the in-process harnesses use Chat Completions.
+`app/harness_gateway.py` handles only run authorization, model pinning, context,
+attachments, limits and accounting; native response bytes stream unchanged.
+Native model trace spans record usage/status only, avoiding reasoning or tool
+payload capture; public tool traces remain separate. Provider keys stay server-side.
+There is no silent fallback to Hermes.
 
 Only the explicitly authorized MCP configuration is loaded. The server is named
 `moyai` because Claude reserves `workspace`. The Claude launch binding applies a
@@ -94,13 +101,15 @@ tool payloads remain scrubbed from public activity and traces.
 
 ## Continuation and limitations
 
-Each app turn creates a fresh LiteLLM session using saved transcript/tool receipts,
-not a foreign runtime's native resume ID. Steering, credential/delegation waits
+Each app turn creates a fresh LiteLLM session using saved transcript/tool receipts.
+**TurnJournal** records typed runtime tool events and final text; it no longer
+extracts history from inference requests. This keeps lifecycle code independent
+of Messages, Responses and Chat Completions schemas. It does not reuse
+another runtime's native resume ID. Steering, credential/delegation waits
 and machine renewal are handled at complete tool-round boundaries. Claude does
 not redirect an in-flight inference like Hermes. Stop still revokes the capability
-and terminates the sandbox. Text/images/tool calls/results are supported; extended
-thinking, provider-native tool search and prompt caching are not forwarded by the
-wire adapter. Unsupported content blocks fail explicitly.
+and terminates the sandbox. Native content blocks pass through to the gateway;
+provider feature support belongs to the gateway/runtime, not a Moyai translator.
 Codex nested OS sandboxing is disabled only because it runs within Moyai's
 isolated Modal machine, not on the web host. Python harness tools execute in that
 same isolated machine. Tool Loop file tools reject paths outside the workspace;
@@ -112,6 +121,8 @@ server-side `previous_response_id` is rejected; saved full input is used instead
 `python -m pytest tests/test_harnesses.py` covers selection, registry extension,
 model restrictions, idempotency, Slack routing, entrypoint dispatch, checkpoint
 receipts and privacy. `node --test tests/test_harness_picker.cjs` covers the picker.
+`tests/test_harness_gateway.py` asserts native request schemas and byte-identical
+stream/nonstream responses, model pinning, revocation, and native usage accounting.
 
 Opt-in real inference: make the pinned source importable (for example through
 `PYTHONPATH` pointing to a checkout at the exact revision), install the pinned
