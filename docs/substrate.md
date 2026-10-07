@@ -55,9 +55,11 @@ SUBSTRATE_SIGNING_KEY=<base64 Ed25519 private key matching the template public k
 
 Settings saved through Runtime take precedence over these environment defaults. Back up the database and `ENCRYPTION_KEY` (or the generated key in `DATA_DIR`) together. API tokens can be rotated in Runtime. To move to another Substrate cluster, use a separate Moyai installation: actor and snapshot references belong to their original cluster.
 
+On Render, also set `SANDBOX_PROVIDER=substrate` in the service environment to skip Modal's image prebuild during deployment. Render's predeploy command cannot read provider settings from the mounted database. The Substrate cluster runs separately from the Render web service.
+
 ## Persistence and isolation
 
-Moyai takes FULL Substrate snapshots so workspace files, installed packages, and root filesystem changes survive. It freezes other guest processes before taking a snapshot. Restoring the original actor resumes those processes; creating a child or replacement actor kills the frozen processes and removes their saved command credentials before starting new work. Each new agent gets its own run capability. The actor's UID is projected by Substrate through a read-only identity volume and binds every signed execution request to that actor.
+Moyai takes FULL Substrate snapshots so workspace files, installed packages, and root filesystem changes survive. It freezes other guest processes before taking a snapshot. Restoring the original actor resumes those processes; creating a child or replacement actor kills the frozen processes, removes their saved command credentials, and restarts the execution service to discard inherited request memory before starting new work. Each new agent gets its own run capability. The actor's UID is projected by Substrate through a read-only identity volume and binds every signed execution request to that actor.
 
 Snapshots are retained as Substrate tags after their actor is deleted. Keep tags while sessions or environment builds reference them. Their storage is billed by your cluster's object-storage provider. Infrastructure billing remains provider-specific; Modal's billing API cannot report Kubernetes costs. LLM usage tracking works for either provider.
 

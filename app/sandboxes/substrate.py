@@ -22,6 +22,10 @@ from sandbox.substrate_protocol import VERSION, MAX_BODY, CHUNK, canonical, priv
 _ACTOR_LOCKS = WeakValueDictionary()
 
 
+class GuestUnavailable(RuntimeError):
+    pass
+
+
 class operation:
     """Expose the async operation under the handle contract's .aio entry point."""
     def __init__(self, method):
@@ -169,6 +173,20 @@ class Sandbox:
             return await self._request(path, data)
 
     async def _request(self, path, data):
+        if path != '/activate':
+            return await self._request_once(path, data)
+        # Clones exec their guest service before accepting commands to discard
+        # parent credentials from memory. Its in-flight activation disconnects.
+        async with asyncio.timeout(90):
+            for attempt in range(20):
+                try:
+                    return await self._request_once(path, data)
+                except (httpx.TransportError, GuestUnavailable):
+                    if attempt == 19:
+                        raise
+                    await asyncio.sleep(.5)
+
+    async def _request_once(self, path, data):
         body = json.dumps(data, separators=(',', ':')).encode()
         stamp, nonce = str(int(time.time())), uuid4().hex
         signature = private_key(self.provider.settings.substrate_signing_key).sign(
@@ -182,6 +200,8 @@ class Sandbox:
             async with client.stream('POST', settings.substrate_router_url.rstrip('/') + path, content=body, headers=headers) as response:
                 if response.status_code == 404:
                     raise FileNotFoundError('Sandbox file or execution not found')
+                if response.status_code in {502, 503, 504}:
+                    raise GuestUnavailable(f'Substrate sandbox returned HTTP {response.status_code}')
                 if response.status_code != 200:
                     raise RuntimeError(f'Substrate sandbox returned HTTP {response.status_code}')
                 result = bytearray()

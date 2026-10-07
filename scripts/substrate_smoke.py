@@ -95,6 +95,7 @@ async def main():
         original = await backend.create(name='moyai-smoke-' + uuid4().hex, token='parent-test-capability', timeout=900)
         actors.append(original)
         print('PASS create, authentication, resume', flush=True)
+        original_boot = (await original.request('/activate', {}))['boot_id']
         await original.filesystem.write_text.aio('persisted ✓', '/workspace/proof.txt')
         assert (await original.filesystem.read_bytes.aio('/workspace/proof.txt')).decode() == 'persisted ✓'
         assert 'out ✓' in await execute(original, 'import sys; print("out ✓"); print("err", file=sys.stderr)')
@@ -103,13 +104,15 @@ async def main():
         await execute(original, 'from pathlib import Path; Path("/usr/local/rootfs-proof").write_text("rootfs")')
         print('PASS command, stdout/stderr, file read/write', flush=True)
         await original.exec.aio('/usr/local/bin/python', '-c',
-            'import time; from pathlib import Path\np=Path("/workspace/counter")\nwhile True:\n p.write_text(str(int(p.read_text() if p.exists() else "0")+1)); time.sleep(.1)', timeout=120)
+            'import time; from pathlib import Path\np=Path("/workspace/counter"); tmp=p.with_suffix(".next")\nwhile True:\n tmp.write_text(str(int(p.read_text() if p.exists() else "0")+1)); tmp.replace(p); time.sleep(.1)', timeout=300)
         await asyncio.sleep(1)
         snapshot = await original.snapshot_filesystem.aio(timeout=300)
         tags.append(snapshot.object_id)
         parent_before = await execute(original, 'from pathlib import Path; print(Path("/workspace/counter").read_text())')
         clone = await backend.create(name='moyai-clone-' + uuid4().hex, snapshot_id=snapshot.object_id, token='child-test-capability', timeout=900)
         actors.append(clone)
+        assert (await clone.request('/activate', {}))['boot_id'] != original_boot, 'Clone retained parent server memory!'
+        assert (await original.request('/activate', {}))['boot_id'] == original_boot
         assert await clone.filesystem.read_bytes.aio('/usr/local/rootfs-proof') == b'rootfs'
         value = await clone.filesystem.read_bytes.aio('/workspace/counter')
         await asyncio.sleep(1)

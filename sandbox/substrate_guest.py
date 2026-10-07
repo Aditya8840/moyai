@@ -27,6 +27,7 @@ ROOT = Path('/var/lib/moyai-runtime')
 IDENTITY = Path('/run/moyai/uid')
 LOCK = threading.RLock()
 NONCES = {}
+BOOT_ID = os.urandom(16).hex()
 
 
 def atomic(path, value):
@@ -52,7 +53,7 @@ def process_identity(pid):
 def activate():
     marker = ROOT / 'frozen.json'
     if not marker.exists():
-        return
+        return False
     saved = json.loads(marker.read_text())
     clone = saved['uid'] != IDENTITY.read_text().strip()
     for pid, start in saved['processes'].items():
@@ -64,7 +65,22 @@ def activate():
     if clone:
         # Per-exec environments can contain the parent's run capability.
         shutil.rmtree(ROOT / 'jobs', ignore_errors=True)
+        # Keep commands blocked until exec has discarded the HTTP server's
+        # inherited heap, which can also contain previous request credentials.
+        return True
     marker.unlink()
+    return False
+
+
+def finish_restart(uid):
+    if uid != IDENTITY.read_text().strip():
+        raise RuntimeError('Actor identity changed during restart')
+    (ROOT / 'frozen.json').unlink(missing_ok=True)
+
+
+def restart_guest():
+    os.execv(sys.executable, [sys.executable, __file__, 'restarted', IDENTITY.read_text().strip()])
+    raise RuntimeError('Guest restart did not replace the process')
 
 
 def freeze():
@@ -106,14 +122,15 @@ def job_path(value):
 def dispatch(path, body):
     with LOCK:
         if path == '/activate':
-            activate()
+            if activate():
+                restart_guest()
             if body.get('expires_at'):
                 uid = IDENTITY.read_text().strip()
                 lease_file = ROOT / 'lease.json'
                 lease = json.loads(lease_file.read_text()) if lease_file.exists() else {}
                 if lease.get('uid') != uid:
                     atomic(lease_file, {'uid': uid, 'expires_at': min(float(body['expires_at']), time.time() + 86400)})
-            return {'version': VERSION}
+            return {'version': VERSION, 'boot_id': BOOT_ID}
         if path == '/freeze':
             freeze()
             return {'ok': True}
@@ -263,6 +280,8 @@ if __name__ == '__main__':
         run(Path(sys.argv[2]))
     else:
         ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if len(sys.argv) == 3 and sys.argv[1] == 'restarted':
+            finish_restart(sys.argv[2])
         public_key(os.environ['MOYAI_SUBSTRATE_PUBLIC_KEY'])
         threading.Thread(target=expire, daemon=True).start()
         ThreadingHTTPServer(('0.0.0.0', 80), Handler).serve_forever()

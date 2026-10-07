@@ -210,9 +210,15 @@ def test_clone_activation_kills_frozen_processes_and_erases_parent_capabilities(
     monkeypatch.setattr(guest, 'process_identity', lambda pid: ('start', 'T'))
     calls = []
     monkeypatch.setattr(guest.os, 'kill', lambda pid, sig: calls.append((pid, sig)))
-    guest.activate()
+    assert guest.activate() is True
     assert calls == [(42, guest.signal.SIGKILL)]
     assert not (root / 'jobs').exists()
+    assert (root / 'frozen.json').exists()
+    with pytest.raises(RuntimeError, match='checkpoint'):
+        guest.dispatch('/file/stat', {'path': str(identity)})
+    with pytest.raises(RuntimeError, match='identity changed'):
+        guest.finish_restart('parent')
+    guest.finish_restart('child')
     assert not (root / 'frozen.json').exists()
 
 
@@ -225,8 +231,44 @@ def test_original_activation_resumes_processes_and_ignores_reused_pids(tmp_path,
     monkeypatch.setattr(guest, 'process_identity', lambda pid: ('start', 'T'))
     calls = []
     monkeypatch.setattr(guest.os, 'kill', lambda pid, sig: calls.append((pid, sig)))
-    guest.activate()
+    assert guest.activate() is False
     assert calls == [(42, guest.signal.SIGCONT)]
+
+
+async def test_activation_retries_guest_restart_but_not_authentication_failures(transport, monkeypatch):
+    sandbox, _ = transport
+    original = guest.Handler.do_POST
+    nonces = []
+    def post(handler):
+        nonces.append(handler.headers['X-Moyai-Nonce'])
+        if len(nonces) == 1:
+            handler.close_connection = True
+            return
+        if len(nonces) == 2:
+            handler.reply(503, {'error': 'restarting'})
+            return
+        original(handler)
+    monkeypatch.setattr(guest.Handler, 'do_POST', post)
+    assert (await sandbox.request('/activate', {}))['boot_id'] == guest.BOOT_ID
+    assert len(set(nonces)) == 3
+    sandbox.actor.metadata.uid = 'wrong-actor'
+    with pytest.raises(RuntimeError, match='401'):
+        await sandbox.request('/activate', {})
+    assert len(nonces) == 4
+
+
+def test_clone_dispatch_restarts_before_accepting_work(tmp_path, monkeypatch):
+    identity = tmp_path / 'identity'
+    identity.write_text('child')
+    guest.atomic(tmp_path / 'frozen.json', {'uid': 'parent', 'processes': {}})
+    monkeypatch.setattr(guest, 'ROOT', tmp_path)
+    monkeypatch.setattr(guest, 'IDENTITY', identity)
+    calls = []
+    monkeypatch.setattr(guest.os, 'execv', lambda *args: calls.append(args))
+    with pytest.raises(RuntimeError, match='did not replace'):
+        guest.dispatch('/activate', {})
+    assert calls == [(sys.executable, [sys.executable, guest.__file__, 'restarted', 'child'])]
+    assert (tmp_path / 'frozen.json').exists()
 
 
 async def test_checkpoint_always_thaws_original_after_failed_tag():
