@@ -1,0 +1,20 @@
+# Sign-in and user roles
+
+[Documentation](README.md) · [Project overview](../README.md)
+
+> This guide retains the detailed reference material from the original README.
+> Dated acceptance reports describe past checks, not a current deployment or test result.
+
+## Google Workspace sign-in
+
+**Live and verified September 29, 2026:** Google-only sign-in is enabled. A real `tin@berri.ai` login reached the existing workspace as an administrator; all 14 saved chats and three organization connections were retained. The previous password and previously issued password sessions were verified to return no access. The dedicated Internal OAuth app is in BerriAI’s `protean-chassis-510202-k5` project. The 74 automated tests pass.
+
+Moyai supports Google OpenID Connect login restricted to configured Google Workspace domains. Create an **Internal** OAuth app in BerriAI’s Google Cloud organization, then a **Web application** client with the exact redirect URI `https://moyai-devin-litellm.onrender.com/auth/google/callback`. Configure `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_ALLOWED_DOMAINS=berri.ai`, and `GOOGLE_ADMIN_EMAILS=tin@berri.ai` privately on Render. Additional administrator emails are comma-separated. Other verified BerriAI identities become members and use the existing shared connections without individual provider authorization.
+
+Administrators can manage roles inside Moyai under **Users**. Search teammates, choose **Change role**, and save **Admin** or **Internal user**. **Add user** can assign a role to an allowed-domain email before its first sign-in; it sends no invitation and does not create a Google account. The person still needs verified Google SSO. Known eligible Slack profiles also appear, without granting Slack identities web authentication.
+
+Roles saved in the app take precedence over `GOOGLE_ADMIN_EMAILS`. That environment list remains the default for emails with no saved assignment, preserving existing admins on rollout. App assignments and their audit trail live in the durable workspace database and survive deploys. Updating the environment alone does not undo an explicit app demotion. Keep at least one valid bootstrap admin configured; use the Users page for day-to-day changes. Role changes take effect on the next authenticated request (refresh an open page to update its controls), including agent organization-skill writes. Admin-only API checks, CSRF protection, stale-edit detection, and a serialized last-admin check prevent unauthorized promotion and concurrent lockout. Admins can demote themselves after another admin is available. Personal skills and secrets keep their existing ownership rules.
+
+Keep `PASSWORD_LOGIN_ENABLED=true` for initial setup. After a real Google administrator login succeeds, set it to `false` and redeploy; this disables password login and invalidates existing password sessions. Preserve `SESSION_SECRET` and `ENCRYPTION_KEY` and existing data during the change. Domain, OAuth client, and administrator-policy changes are checked on subsequent requests. Google sessions last at most 12 hours; Google account suspension is checked on the next Google authentication, not through directory synchronization.
+
+The server verifies Google’s signature, issuer, audience, expiry, nonce, verified email, and hosted-domain claim. Login state is single-use, expires in ten minutes, is bound to the initiating browser, and uses PKCE. Return destinations are restricted to known local app routes. Google login requests only `openid email profile`; Google API access and refresh tokens are not stored. Passwords, authorization codes, and identity tokens must not appear in logs or screenshots. Connection policies apply to all sessions. All enabled connected-app tools, including newly added tools, execute without per-use approval for members and admins. Read-only and paused connection settings, provider permissions and session scope still apply.
