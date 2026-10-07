@@ -1,6 +1,6 @@
 # Moyai Devin
 
-Moyai Devin is a self-hosted AI coding agent that works on tasks in the background. Give it a task in your browser or Slack—such as fixing a bug or implementing a feature—and it can investigate your codebase, make changes, run tests, and open a pull request for you to review. It works in an isolated cloud workspace and can use context from GitHub, Linear, Slack, and Notion. You can follow its progress, give feedback, and return later to continue with the same conversation and files.
+Moyai Devin is a self-hosted AI coding agent for background engineering work. Ask it to fix a bug or build a feature from your browser or Slack. The agent works in an isolated cloud workspace, where it can edit code, run tests, and open a pull request for your review. Connect GitHub, Linear, Slack, or Notion to give it access to your code and team context. You can check its progress and send corrections while it works, or resume the task with your saved conversation and files.
 
 <!-- Add the recorded local-demo GIF here once uploaded to the repository.
 Suggested path: docs/assets/getting-started.gif
@@ -33,9 +33,9 @@ Try the local demo without API keys or cloud accounts. You'll need **Git**, **Py
 
 4. **Send your first task.** Open [localhost:8787](http://127.0.0.1:8787), type a message, and click **Start session**. Open **Activity** to follow the demo, then send a follow-up in the same chat.
 
-Ready to execute real tasks? Follow the **[cloud setup guide](docs/deployment.md#enable-cloud-runs)** to connect Modal and a model gateway, then **[connect your apps](docs/integrations.md)**. The local demo does not run an AI model or change repository files.
+To run real tasks, **[set up cloud execution](docs/deployment.md#enable-cloud-runs)** with Modal and a model gateway, then **[connect your apps](docs/integrations.md)**. In the local demo, you receive simulated responses without model calls or repository changes.
 
-Already on the BerriAI team? [Open the hosted workspace](https://moyai-devin-litellm.onrender.com) and sign in with your `@berri.ai` Google account.
+BerriAI teammates can [open the hosted workspace](https://moyai-devin-litellm.onrender.com) and sign in with an `@berri.ai` Google account.
 
 ## More information
 
