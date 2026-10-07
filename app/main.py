@@ -54,6 +54,7 @@ AttachmentId = Annotated[str, Field(pattern=r'^[0-9a-f]{32}$')]
 
 class NewRun(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    harness: str = Field(default='hermes', min_length=1, max_length=80)
     prompt: str = Field(default="", max_length=16000)
     repo_url: str = Field(default="", max_length=500)
     mode: Literal["demo", "modal"] = "demo"
@@ -364,7 +365,8 @@ def create_app(settings: Settings | None = None):
     async def config(request: Request):
         security.require(request)
         missing = missing_cloud()
-        return {"cloud_ready": not missing, "missing": missing, "model": settings.resolve_model(), "models": settings.model_choices(),
+        from .harnesses import choices
+        return {"harnesses": choices(), "harness": "hermes", "cloud_ready": not missing, "missing": missing, "model": settings.resolve_model(), "models": settings.model_choices(),
                 "public_url": settings.public_url, "max_concurrent_runs": settings.max_concurrent_runs,
                 "max_parallel_agents": settings.max_parallel_agents, "parallel_agents_enabled": settings.temporal_enabled,
                 "max_concurrent_model_requests": settings.max_concurrent_model_requests,
@@ -421,6 +423,8 @@ def create_app(settings: Settings | None = None):
                 raise HTTPException(422, 'Side chats require a chat session.')
         try:
             model = settings.resolve_model(body.model)
+            from .harnesses import validate_harness
+            validate_harness(body.harness, model)
         except ValueError as exc:
             raise HTTPException(422, str(exc))
         if body.mode == "modal":
@@ -434,7 +438,7 @@ def create_app(settings: Settings | None = None):
         user_id = store.identity(security.session_info(request))
         try:
             run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id,
-                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of)
+                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=body.harness)
         except ValueError as exc:
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()
@@ -457,7 +461,7 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(404, "Task not found")
         owners = store.rows('SELECT id,email,name FROM users WHERE id=?', (run['owner_id'],))
         project = environments.context(run)
-        messages = store.messages(run_id)
+        messages = public_messages(run, store.messages(run_id))
         identities.wake.set()  # Resolve newly discovered mentions in saved Slack history.
         return {**public_run(run), "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": messages,
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
@@ -481,6 +485,8 @@ def create_app(settings: Settings | None = None):
             selected_model = settings.resolve_model(body.model) if body.model is not None else None
             if selected_model is None:
                 settings.resolve_model(fallback=run['model'])
+            from .harnesses import validate_harness
+            validate_harness(run['harness'], selected_model or run['model'])
         except ValueError as exc:
             raise HTTPException(422, str(exc))
         try:
@@ -825,6 +831,19 @@ def create_app(settings: Settings | None = None):
     async def slack_events(request: Request):
         return await slack.receive(request, missing_cloud())
 
+    from .harness_gateway import HarnessGateway
+    harness_gateway = HarnessGateway(settings=settings, store=store, spend=spend,
+        checkpoints=checkpoints, require_run=require_run, read_body=broker_body,
+        model_slots=model_slots, memory=memory, skills=skills, tracing=tracing)
+
+    @app.post('/broker/{run_id}/v1/messages')
+    async def messages_proxy(run_id: str, request: Request):
+        return await harness_gateway.forward(run_id, request, '/v1/messages')
+
+    @app.post('/broker/{run_id}/v1/responses')
+    async def responses_proxy(run_id: str, request: Request):
+        return await harness_gateway.forward(run_id, request, '/v1/responses')
+
     @app.post("/broker/{run_id}/v1/chat/completions")
     async def model_proxy(run_id: str, request: Request):
         require_run(run_id, request)
@@ -936,6 +955,32 @@ def create_app(settings: Settings | None = None):
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app
+
+
+def public_messages(run: dict[str, object], messages: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Show a durable answer receipt while its canonical turn is still saving."""
+    raw = run.get('pending_result')
+    if not isinstance(raw, str) or not raw:
+        return messages
+    try:
+        result = json.loads(raw)
+    except ValueError:
+        return messages
+    message_id = run.get('active_message_id')
+    active = next((m for m in messages if m['id'] == message_id and m['role'] == 'user' and m['status'] == 'running'), None)
+    if (not active or not isinstance(message_id, int) or not isinstance(result, dict)
+            or result.get('message_id') != message_id or result.get('completed') is not True
+            or any(result.get(key) for key in ('continuation', 'steer_message_id', 'startup_retry', 'wait_group', 'wait_credential'))
+            or not isinstance(result.get('message'), str) or not result['message'].strip()):
+        return messages
+    # Keep settlement, model history and Slack delivery owned by finish_message.
+    # Its user-status update removes this projection, even across a stale run read.
+    reply = {'id': -message_id, 'role': 'assistant', 'content': run.get('summary') or result['message'],
+             'status': 'save_failed' if result.get('save_failed') else 'saving',
+             'model': run.get('active_model') or active.get('model', ''),
+             'created_at': run['updated_at'], 'attachments': []}
+    index = next((i for i, m in enumerate(messages) if m['role'] == 'user' and m['status'] == 'queued'), len(messages))
+    return messages[:index] + [reply] + messages[index:]
 
 
 def public_run(run):

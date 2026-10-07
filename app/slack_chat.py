@@ -152,8 +152,23 @@ class SlackChat:
     def accept(self, *, team, event_id, channel, ts, root, user, prompt, mentioned, missing_cloud, direct_message=False, file_ids=()):
         """Reserve the physical Slack message and queue its turn atomically."""
         original_prompt, selected_model, model_error = prompt, None, ''
+        selected_harness, harness_error = None, ''
+        harness_directive = re.fullmatch(r'/?harness(?:[ \t]+([^\n]+))?(?:\n([\s\S]*))?', prompt.strip(), re.I)
+        if harness_directive:
+            from .harnesses import HARNESSES
+            selected_harness = (harness_directive[1] or '').strip().lower()
+            if selected_harness not in HARNESSES:
+                harness_error = 'Choose a harness in a new thread: ' + ', '.join('`harness ' + name + '`' for name in HARNESSES) + '.'
+                selected_harness = None
+            elif HARNESSES[selected_harness].model_prefix:
+                selected_model = next((m for m in self.settings.allowed_models() if HARNESSES[selected_harness].accepts(m)), None)
+                if not selected_model:
+                    harness_error = 'No compatible model is configured for this harness. Ask an administrator to enable one.'
+            prompt = (harness_directive[2] or '').strip()
         command = prompt.strip().lower().lstrip('/')
         command = command if command in COMMANDS else ''
+        if harness_directive and (not prompt or harness_error):
+            command = 'harness'
         directive = re.fullmatch(r'/?model(?:[ \t]+([^\n]+))?(?:\n([\s\S]*))?', prompt.strip(), re.I)
         if directive:
             try:
@@ -187,7 +202,7 @@ class SlackChat:
                 # messages are never backfilled into Slack on deployment.
                 old = conn.execute('SELECT r.id FROM slack_events s JOIN runs r ON r.id=s.run_id WHERE s.channel=? AND s.thread_ts=? AND r.chat_enabled=1 ORDER BY s.created_at DESC LIMIT 1',
                                    (channel, root)).fetchone()
-                if command and command != 'model' and not old:
+                if command and command not in {'model', 'harness'} and not old:
                     return None
                 if missing_cloud and not command:
                     raise ValueError('Cloud sessions are not configured.')
@@ -202,8 +217,8 @@ class SlackChat:
                         raise ValueError('The session queue is full.')
                     run_id, stamp = uuid4().hex, now()
                     plugins = [x['id'] for x in self.owner.connectors.list() if x['connected'] and x['enabled']]
-                    conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,owner_id) VALUES(?,?,'','modal',?,?,?,?,1,?,?)",
-                                 (run_id, prompt or original_prompt, 'idle' if command else 'queued', json.dumps(plugins), stamp, stamp, selected_model or self.settings.resolve_model(), actor_id))
+                    conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,owner_id,harness) VALUES(?,?,'','modal',?,?,?,?,1,?,?,?)",
+                                 (run_id, prompt or original_prompt, 'idle' if command else 'queued', json.dumps(plugins), stamp, stamp, selected_model or self.settings.resolve_model(), actor_id, selected_harness if not harness_error and selected_harness else 'hermes'))
                     conn.execute("INSERT INTO slack_events(event_id,run_id,channel,thread_ts,user_id,created_at,mention_ts,context_status) VALUES(?,?,?,?,?,?,?,'pending')",
                                  (event_id, run_id, channel, root, user, stamp, ts))
                     fresh = True
@@ -224,6 +239,16 @@ class SlackChat:
                 conn.execute('UPDATE slack_threads SET last_message_id=(SELECT COALESCE(MAX(id),0) FROM messages WHERE run_id=?) WHERE run_id=?', (run_id, run_id))
                 self.collect_progress_in(conn, binding, False)
             message_id, submit = None, False
+            current = conn.execute('SELECT harness,model FROM runs WHERE id=?', (run_id,)).fetchone()
+            if selected_harness and current['harness'] != selected_harness:
+                command = 'harness'
+                harness_error = 'Harness is fixed for this session. Start a new thread to choose another harness.'
+            if selected_model and not harness_error:
+                from .harnesses import validate_harness
+                try:
+                    validate_harness(current['harness'], selected_model)
+                except ValueError as exc:
+                    command, model_error = 'model', str(exc)
             if command:
                 if command == 'model' and not model_error:
                     conn.execute('UPDATE runs SET model=?,updated_at=? WHERE id=?', (selected_model, now(), run_id))
@@ -248,7 +273,8 @@ class SlackChat:
                             'stop': 'Stopping the current response and clearing queued follow-ups. You can send another message once it has stopped.',
                             'wake': 'I’m listening again. Send your next message here.',
                             'status': 'This thread is paused.' if binding['paused'] else self.status_text(status),
-                            'model': model_error or f'New messages in this session will use *{model_name}*. Running and already queued replies keep their original model.'}[command]
+                            'model': model_error or f'New messages in this session will use *{model_name}*. Running and already queued replies keep their original model.',
+                            'harness': harness_error or f"This session uses *{current['harness']}*. Send your task here; the harness stays fixed for this session."}[command]
                 if fresh and direct_message:
                     response += '\nThis conversation also appears in Moyai, where signed-in BerriAI teammates can view it.'
                 self.queue(conn, run_id, 'command:' + event_id, 'control', response + '\n' + self.link(run_id))

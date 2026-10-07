@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 import urllib.request
 import uuid
 
@@ -128,12 +129,14 @@ def run_agent(spec, relay):
     (home / "config.yaml").write_text(json.dumps(config))  # JSON is valid YAML.
     os.environ["OPENAI_API_KEY"] = os.environ["WORKSPACE_RUN_TOKEN"]
     os.environ["OPENAI_BASE_URL"] = relay.url + "/v1"
-    from run_agent import AIAgent
-    # Programmatic Hermes callers own MCP discovery; AIAgent does not start
-    # configured servers automatically. Do this before its tool snapshot.
-    from tools.mcp_tool_discovery import discover_mcp_tools
-    discovered = discover_mcp_tools(allowed_mcp_names=["workspace"])
-    print("Discovered workspace tools:", discovered, file=sys.stderr, flush=True)
+    harness = spec.get('harness', 'hermes')
+    try:
+        from .harness_registry import resolve, create_agent
+        from .continuation import AgentSteer
+    except ImportError:
+        from harness_registry import resolve, create_agent
+        from continuation import AgentSteer
+    definition = resolve(harness)
     rotation = RotationDeadline(spec.get("rotation_seconds", 0))
     waiting = AgentWait(relay)
     goal = GoalLoop(Path('/session/goal.json'), spec['run_id'],
@@ -147,6 +150,8 @@ def run_agent(spec, relay):
     steering = ActiveTurnSteering(relay, lambda item: prepare_attachments(
         {**spec, 'attachments': item.get('attachments', [])}, os.environ['WORKSPACE_RUN_TOKEN']),
         on_input=lambda item: goal.steer(item['content']))
+    if not definition.live_steering:
+        steering = AgentSteer(relay)
     activity = ActivityReporter(emit, tracing=bool(spec.get('tracing_enabled')))
     def tool_complete(call_id, name, args, result):
         activity.complete(call_id, name, args, result)
@@ -161,18 +166,9 @@ def run_agent(spec, relay):
             goal.step(agent)
         if not waiting.requested and not rotation.requested and not steering.requested:
             emit('status', 'Preparing the next step', {'activity_version': 1, 'phase': 'processing'})
-    agent = AIAgent(
-        model=spec["model"], provider="custom", api_mode="chat_completions",
-        base_url=relay.url + "/v1", api_key=os.environ["WORKSPACE_RUN_TOKEN"],
-        enabled_toolsets=["terminal", "file", "mcp-workspace"],
-        max_iterations=spec["max_iterations"] or sys.maxsize, run_budget_seconds=spec["timeout"],
-        skip_memory=True, skip_background_review=True, quiet_mode=True, cwd=str(workspace),
-        tool_start_callback=activity.start,
-        tool_complete_callback=tool_complete,
-        interim_assistant_callback=activity.commentary,
-        step_callback=step,
-        clarify_callback=lambda *args, **kwargs: "Ask the user for the missing information in your final response, then wait for their next chat message.",
-    )
+    harness_activity = SimpleNamespace(start=activity.start, complete=tool_complete, commentary=activity.commentary)
+    agent = create_agent(harness, spec=spec, relay=relay, config=config, activity=harness_activity, step=step,
+                         cwd=str(workspace))
     result = {}
     history_path = Path("/session/conversation.json")
     history = spec.get("history_fallback", [])
@@ -180,16 +176,7 @@ def run_agent(spec, relay):
         history = json.loads(history_path.read_text())
     history = scrub_memory_history(history)
     try:
-        from model_tools import get_tool_definitions
-        workspace_tools = get_tool_definitions(enabled_toolsets=["mcp-workspace"],
-            quiet_mode=True, skip_tool_search_assembly=True)
-        if not any("browser_open" in tool["function"]["name"] for tool in workspace_tools):
-            print("Available agent tools:", sorted(agent.valid_tool_names), file=sys.stderr, flush=True)
-            if relay.startup_failure:
-                raise relay.startup_failure
-            raise RuntimeError("Workspace MCP tools were not loaded")
-        if not {"tool_search", "tool_describe", "tool_call"}.issubset(agent.valid_tool_names):
-            raise RuntimeError("Workspace tool discovery was not enabled")
+        agent.validate()
         prompt = conversation_prompt(spec, has_history=bool(history))
         if spec.get("continuation"):
             if not history_path.exists() or not history:
@@ -207,7 +194,7 @@ def run_agent(spec, relay):
         relay.steering = steering
         def steering_update():
             global ACTIVITY_INPUT_ID
-            if steering.latest_input_id is not None:
+            if getattr(steering, 'latest_input_id', None) is not None:
                 ACTIVITY_INPUT_ID = steering.latest_input_id
             emit('status', 'Updating the current task with your message.' if not steering.requested else
                  'Saving before switching requester or model.', {'activity_version': 1, 'phase': 'steering'})
@@ -368,11 +355,11 @@ def run_agent(spec, relay):
                    "Access is needed. Connect securely through the form in this session, not in chat." if continuing and wait_credential else
                    "Parallel agents are working; the coordinator will resume with their results." if continuing and wait_group else
                    "Work is checkpointed for cloud machine renewal; the task is not finished yet." if continuing else
-                   split_focus(str((relay.last_error if not completed else '') or result.get("final_response") or "Hermes ended without a final response."))[1])
+                   split_focus(str((relay.last_error if not completed else '') or result.get("final_response") or "Agent ended without a final response."))[1])
         # The control plane durably stores this before any filesystem saving or
         # archive work can fail. A nonzero exit still marks the turn incomplete.
         emit("final", summary, completed=completed, continuation=bool(continuing), wait_group=wait_group, wait_credential=wait_credential, steer_message_id=steered,
-             steering_applied=steering.receipts())
+             steering_applied=steering.receipts() if hasattr(steering, 'receipts') else [])
         (artifacts / "result.md").write_text(summary)
         goal.save()
         if spec.get("chat_enabled"):

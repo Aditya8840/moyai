@@ -171,7 +171,7 @@ class Attachments:
             raise HTTPException(404, 'Attachment not found in this session.')
         return Response(rows[0]['data'], media_type='application/octet-stream')
 
-    def with_images(self, run, messages):
+    def with_images(self, run, messages, *, protocol='/v1/chat/completions'):
         # Keep image bytes out of sandbox transcripts, Temporal history and logs.
         # Only this run's sent attachments, up to its currently executing turn,
         # are eligible. Future queued messages cannot leak into the active turn.
@@ -183,15 +183,24 @@ class Attachments:
             if not isinstance(message, dict):
                 raise HTTPException(422, 'Each message must be an object.')
             content = message.get('content')
-            if message.get('role') != 'user' or not isinstance(content, str):
+            text = ('\n'.join(p.get('text', '') for p in content if isinstance(p, dict) and p.get('type') in {'text', 'input_text'})
+                    if isinstance(content, list) else content)
+            if message.get('role') != 'user' or not isinstance(text, str):
                 result.append(message)
                 continue
-            ids = dict.fromkeys(re.findall(r'\[moyai-attachment:([0-9a-f]{32})\]', content))
-            parts = [{'type': 'text', 'text': content}]
+            ids = dict.fromkeys(re.findall(r'\[moyai-attachment:([0-9a-f]{32})\]', text))
+            parts = list(content) if isinstance(content, list) else [{'type': 'input_text' if protocol == '/v1/responses' else 'text', 'text': text}]
+            before = len(parts)
             for attachment_id in ids:
                 if attachment_id in images:
-                    parts.append({'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,' + base64.b64encode(images.pop(attachment_id)).decode()}})
-            result.append({**message, 'content': parts} if len(parts) > 1 else message)
+                    encoded = base64.b64encode(images.pop(attachment_id)).decode()
+                    if protocol == '/v1/messages':
+                        parts.append({'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': encoded}})
+                    elif protocol == '/v1/responses':
+                        parts.append({'type': 'input_image', 'image_url': 'data:image/jpeg;base64,' + encoded})
+                    else:
+                        parts.append({'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,' + encoded}})
+            result.append({**message, 'content': parts} if len(parts) > before else message)
         return list(reversed(result))
 
     def routes(self, security, settings):

@@ -5,7 +5,7 @@ import re
 
 
 def private_memory(name):
-    return re.sub(r'^mcp[_-]+workspace[_-]+', '', str(name)).startswith('memory_')
+    return re.sub(r'^(?:mcp[_-]+)?(?:workspace|moyai)[_-]+', '', str(name)).startswith('memory_') or name == 'workspace_call'
 
 
 def scrub_memory_history(messages):

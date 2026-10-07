@@ -54,6 +54,14 @@ class RunManager:
     async def persist(self):
         """Replaced by the cloud checkpoint callback when hosted on Modal."""
 
+    def receive_result(self, run_id: str, result: dict[str, object]) -> None:
+        """Persist the answer and wake browser readers without settling its turn."""
+        serialized = json.dumps(result)
+        if self.store.run(run_id)['pending_result'] == serialized:
+            return
+        self.store.update_run(run_id, summary=str(result.get('message', '')), pending_result=serialized)
+        self.store.event(run_id, 'chat', 'Response received', {'message_id': result.get('message_id')})
+
     def preserve_answer(self, run_id, reason=SAVE_WARNING):
         """Called on failure/restart; never turn an unsaved workspace into success."""
         row = self.store.run(run_id)
@@ -277,10 +285,12 @@ class RunManager:
                 .env({"HERMES_RUNTIME_DIR": "/opt/hermes-tools", "PYTHONPATH": "/opt/hermes"})
                 .run_commands(f"git init /opt/hermes && cd /opt/hermes && git remote add origin https://github.com/NousResearch/hermes-agent.git && git fetch --depth 1 origin {revision} && git checkout --detach FETCH_HEAD",
                               "cd /opt/hermes && python -m pm.build_env --source /opt/hermes --out /opt/hermes-env --no-install-project --extra mcp",
+                              "/opt/hermes-env/bin/python -m pip install claude-agent-sdk==0.2.163 'mcp<2'",
                               "cd /opt/hermes && /opt/hermes-env/bin/python -c 'from run_agent import AIAgent; import mcp; from cryptography.fernet import Fernet'")
                 .add_local_dir(SANDBOX_FILES, remote_path="/opt/workspace-runner", copy=True)
                 .run_commands("python /opt/workspace-runner/hermes_compat.py")
-                .run_commands("python /opt/workspace-runner/install_access_tools.py")
+                .run_commands("python /opt/workspace-runner/install_access_tools.py",
+                              "/opt/hermes-env/bin/python /opt/workspace-runner/harness_dependencies.py")
                 .env({"PYTHONUNBUFFERED": "1", "PYTHONPATH": "/opt/hermes", "HERMES_PYTHON": "/opt/hermes-env/bin/python", "HERMES_HOME": "/tmp/hermes-home", "GIT_TERMINAL_PROMPT": "0"}))
 
     def is_active(self, run_id):
@@ -297,7 +307,7 @@ class RunManager:
         with self.store.connect() as conn:
             activity_input_id = active_input(conn, run_id, run.get('message_id') or 0)
         spec = {"run_id": run_id, "prompt": run["prompt"], "repo_url": run["repo_url"],
-                "attachments": uploads,
+                "attachments": uploads, "harness": run.get('harness', 'hermes'),
                 "attachment_context": attachment_context(by_message.get(run.get('message_id'), [])),
                 "github_repository": self.settings.allowed_github_repositories()[0] if 'github' in run['plugins'] else '',
                 "github_repositories": self.settings.allowed_github_repositories() if 'github' in run['plugins'] else [],
@@ -412,7 +422,7 @@ class RunManager:
                             # Store the answer independently of artifacts and the Modal
                             # checkpoint. Recovery can finish this exact turn after a crash.
                             result["message_id"] = run.get("message_id")
-                            self.store.update_run(run_id, summary=str(result.get("message", "")), pending_result=json.dumps(result))
+                            self.receive_result(run_id, result)
                             await self.persist()
                         elif event.get('kind') == 'trace' and self.store.tracing:
                             self.store.tracing.tool(run_id, event.get('data'))

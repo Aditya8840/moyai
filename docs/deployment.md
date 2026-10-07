@@ -2,10 +2,11 @@
 
 [Documentation](README.md) · [Project overview](../README.md)
 
-> This guide retains the detailed reference material from the original README.
-> Dated acceptance reports describe past checks, not a current deployment or test result.
+For a new installation, follow [Install Moyai and run your first real task](getting-started.md). Use this reference to operate the service or choose another host. The dated reports below record checks on earlier deployments.
 
 ## Enable cloud runs
+
+With `deploy_modal.py`, you use the HTTPS URL assigned by Modal. Follow the [walkthrough](getting-started.md) for that setup. Set the values below if you host the web app on another service or a VM.
 
 The cloud sandbox calls back to this server for model and app tools, so `PUBLIC_URL` must be a **reachable HTTPS address**. Loopback URLs deliberately keep cloud execution disabled.
 
@@ -39,7 +40,7 @@ The deploy command reads `.env`, generates missing workspace/session/encryption 
 
 SQLite runs on the container's local disk. Complete database snapshots and the latest per-session result archives are committed to the `hermes-workspace-state` Modal Volume. API mutations are checkpointed before acknowledgement, and background activity is checkpointed every two seconds. A hard failure can lose the newest background events. Starting a replacement restores the last snapshot and interrupts unfinished tasks without replaying external writes. Do not scale the service above one container or use rolling deployments; a distributed worker/database design is needed for multiple writers. Redeployments interrupt active tasks.
 
-The authorized Modal token expires on **October 6, 2026**. Sandbox provisioning uses this token. Replace it privately in the Render environment and local `.env`, then deploy when sessions are idle before expiry to keep cloud tasks working. Use a managed service identity and your own operational policies for a longer-lived team deployment.
+Track your Modal token's expiry and replace it in the deployment's secret store and deployment `.env` before it expires. Redeploy with no active sessions. For a team installation, follow your organization's service identity policy.
 
 ### Alternative: Docker on an existing cloud host
 

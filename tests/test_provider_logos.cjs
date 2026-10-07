@@ -29,3 +29,21 @@ test('sync hides the logo for unknown providers and shows it again on switch',()
   assert.equal(img.hidden,false);
   assert.equal(img.src,logos.src('fireworks_ai/glm'));
 });
+test('Claude Code and Codex harnesses resolve to shipped logos and other harnesses get none',()=>{
+  for(const id of ['claude-agent-sdk','codex']){
+    const src=logos.harness(id);
+    assert.ok(src,`no logo for ${id}`);
+    assert.ok(fs.existsSync(path.join(__dirname,'..','app',src)),`${src} is missing`);
+  }
+  assert.notEqual(logos.harness('claude-agent-sdk'),logos.harness('codex'));
+  assert.equal(logos.harness('hermes'),null);
+  assert.equal(logos.harness('unknown'),null);
+});
+test('sync uses the harness lookup when given one',()=>{
+  const img={hidden:true,removeAttribute(key){delete this[key];}};
+  logos.sync(img,'codex',logos.harness);
+  assert.equal(img.hidden,false);
+  assert.equal(img.src,logos.harness('codex'));
+  logos.sync(img,'hermes',logos.harness);
+  assert.equal(img.hidden,true);
+});
