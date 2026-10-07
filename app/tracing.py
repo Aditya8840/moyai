@@ -13,6 +13,7 @@ from opentelemetry.trace import SpanContext, SpanKind, Status, StatusCode, Trace
 
 from sandbox.trace_content import trace_content
 from sandbox.memory_history import private_memory as is_memory_tool
+from .slack_mentions import MENTION
 from .trace_outbox import RaindropEventOutbox, TraceOutbox
 
 log = logging.getLogger(__name__)
@@ -241,8 +242,26 @@ class AgentTracing:
         self.emit(run, message_id, 'moyai', '', datetime.fromisoformat(started).timestamp() * 1e9,
                   time.time_ns(), {'gen_ai.operation.name': 'invoke_agent',
                   'openinference.span.kind': 'AGENT', 'input.value': self.content('\n\n'.join(inputs)),
-                  'output.value': self.content(output), 'moyai.status': status}, root=True,
+                  'output.value': self.content(output), 'moyai.status': status,
+                  **self.slack_source(run_id, rows)}, root=True,
                   failed=status not in {'completed', 'steered'}, connection=connection)
+
+    def slack_source(self, run_id, rows):
+        """Link the turn to its Slack thread with the Lens `lens.source.*` contract."""
+        events = rows('SELECT thread_ts,context_json FROM slack_events WHERE run_id=?', (run_id,))
+        if not events:
+            return {}
+        context = json.loads(events[0]['context_json'] or '{}')
+        url = context.get('permalink', '')
+        if not url:
+            return {}
+        root = next((m['text'] for m in context.get('messages', []) if m.get('ts') == events[0]['thread_ts']), '')
+        mentioned = sorted(set(MENTION.findall(root)))
+        names = {row['user_id']: row['name'] for row in rows(
+            f"SELECT user_id,name FROM slack_mention_names WHERE name!='' AND user_id IN ({','.join('?' * len(mentioned))})",
+            tuple(mentioned))}
+        title = MENTION.sub(lambda match: '@' + names.get(match[1], 'someone'), root)
+        return {'lens.source.url': url, 'lens.source.title': self.content(' '.join(title.split()))[:200]}
 
     @best_effort
     def tool(self, run_id, data):
