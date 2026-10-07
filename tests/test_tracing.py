@@ -106,6 +106,26 @@ def test_server_drops_memory_payload_even_if_sandbox_did_not_scrub_it(tmp_path, 
     assert 'private-memory-marker' not in str(processor.spans[0].attributes)
 
 
+def test_slack_turn_root_span_links_its_thread_for_lens(tmp_path):
+    store, tracing, processor, web_run, web_message = setup(tmp_path)
+    permalink = 'https://acme.slack.com/archives/C0123ABCD/p1759870000000100'
+    run = store.create_slack_run('evt-1', 'Add Nate to the retro', [], 'C0123ABCD', '1759870000.000100',
+                                 'U0AAAAAAA', team_id='T0AAAAAAA')
+    store.execute('INSERT INTO slack_mention_names(team_id,user_id,name) VALUES(?,?,?)',
+                  ('T0AAAAAAA', 'U0BBBBBBB', 'Mateo Wang'))
+    store.execute('UPDATE slack_events SET context_status=?,context_json=? WHERE run_id=?', ('ready', json.dumps({
+        'permalink': permalink, 'messages': [
+            {'ts': '1759870000.000100', 'text': '<@U0BBBBBBB> can you add me\n to the   guestlist?'},
+            {'ts': '1759870000.000200', 'text': 'a later reply'}]}), run['id']))
+    message = store.claim_message(run['id'])
+    store.finish_message(run['id'], message['id'], 'Done')
+    store.finish_message(web_run['id'], web_message['id'], 'Done')
+    slack_root, web_root = processor.spans
+    assert slack_root.attributes['lens.source.url'] == permalink
+    assert slack_root.attributes['lens.source.title'] == '@Mateo Wang can you add me to the guestlist?'
+    assert not any(key.startswith('lens.source.') for key in web_root.attributes)
+
+
 def test_disabled_and_broken_capture_cannot_break_agent_work(tmp_path):
     store, tracing, processor, run, message = setup(tmp_path)
     def broken(span):
