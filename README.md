@@ -53,7 +53,7 @@ Open the printed **Workspace URL**. Sign in with `WORKSPACE_PASSWORD` from `.env
 
 ### 4. Run your first task
 
-Start a new session. Under **Context & tools**, choose **Cloud session** and leave the repository empty. Select **Hermes** and **gpt-4.1**, then send:
+Start a new session. Under **Context & tools**, choose **Cloud session** and leave the repository empty. Select **a harness** and **a model**, then send:
 
 > Create `/workspace/hello.py` that prints `Hello from Moyai`, run it, and show me the output.
 
