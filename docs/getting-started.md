@@ -203,4 +203,16 @@ Do not include `.env`, model keys, Modal tokens, or PEM files in bug reports. In
 
 ## Optional: local UI development only
 
-In a separate checkout, follow the [local UI preview](../README.md#local-ui-preview-not-a-working-agent). It uses simulated responses and persists preview history in `.data/workspace.db`. Do not use it as proof that cloud execution, model credentials, or repository access work.
+For UI development, use a separate checkout with an unmodified `.env.example`:
+
+```sh
+cp .env.example .env
+uv sync --frozen
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8787 --workers 1
+```
+
+Open [localhost:8787](http://127.0.0.1:8787). The preview uses simulated responses and saves history in `.data/workspace.db`. It does not call a model, start an agent machine, or change a repository. Use one server process.
+
+## Existing BerriAI installation
+
+BerriAI teammates can [open the hosted workspace](https://moyai-devin-litellm.onrender.com) and sign in with an `@berri.ai` Google account instead of deploying another copy.
