@@ -160,10 +160,6 @@ class SlackChat:
             if selected_harness not in HARNESSES:
                 harness_error = 'Choose a harness in a new thread: ' + ', '.join('`harness ' + name + '`' for name in HARNESSES) + '.'
                 selected_harness = None
-            elif HARNESSES[selected_harness].model_prefix:
-                selected_model = next((m for m in self.settings.allowed_models() if HARNESSES[selected_harness].accepts(m)), None)
-                if not selected_model:
-                    harness_error = 'No compatible model is configured for this harness. Ask an administrator to enable one.'
             prompt = (harness_directive[2] or '').strip()
         command = prompt.strip().lower().lstrip('/')
         command = command if command in COMMANDS else ''

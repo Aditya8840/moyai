@@ -7,7 +7,7 @@ include Hermes in its `Harness` enum.
 ## Architecture
 
 - `sandbox/harness_registry.py` is the single catalog used by the sandbox,
-  API validation, UI choices/model filtering and Slack selection.
+  API validation, UI choices and Slack selection.
 - `sandbox/agent.py` owns shared workspace preparation, prompts, activity,
   steering, waits, checkpointing and final delivery. It calls a registry factory,
   not a Hermes/Claude conditional.
@@ -41,8 +41,10 @@ New sessions have an **Agent harness** picker beside the model picker:
 
 - **Hermes** (default): existing runtime and all configured model choices.
 - **Claude Code**: `Harness.CLAUDE_CODE`, Claude's native file/shell tools
-  and Moyai MCP tools; requires an allowed `anthropic/claude-*` model.
-- **Codex**: `Harness.CODEX`, requires an allowed `openai/*` model.
+  and Moyai MCP tools; supports configured models through the gateway's Messages API,
+  including `openai/gpt-6-astra`. The gateway must support the model and tool calls
+  on that API; selecting a model does not verify provider compatibility.
+- **Codex**: `Harness.CODEX`, uses configured models through the gateway's Responses API.
   This is the Codex runtime, not the separate OpenAI Agents SDK.
 - **OpenCode**: `Harness.OPENCODE`, native tools and configured Moyai MCP server.
 - **Deep Agents**: `Harness.DEEPAGENTS`, LangChain runtime with LiteLLM's sandbox
@@ -119,7 +121,7 @@ server-side `previous_response_id` is rejected; saved full input is used instead
 ## Verification
 
 `python -m pytest tests/test_harnesses.py` covers selection, registry extension,
-model restrictions, idempotency, Slack routing, entrypoint dispatch, checkpoint
+cross-provider models, configured-model authorization, idempotency, Slack routing, entrypoint dispatch, checkpoint
 receipts and privacy. `node --test tests/test_harness_picker.cjs` covers the picker.
 `tests/test_harness_gateway.py` asserts native request schemas and byte-identical
 stream/nonstream responses, model pinning, revocation, and native usage accounting.

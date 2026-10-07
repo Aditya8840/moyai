@@ -16,7 +16,8 @@ from test_workspace import workspace
                    'tools': [{'type': 'custom', 'name': 'apply_patch', 'format': {'type': 'text'}}]},
      b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_test","status":"completed","usage":{"input_tokens":11,"output_tokens":3}}}\n\n'),
 ])
-def test_native_gateway_preserves_protocol_stream_and_pins_access(workspace, monkeypatch, route, body, wire):
+@pytest.mark.parametrize('model', ['openai/gpt-6-astra', 'anthropic/claude-opus-5-5', 'fireworks_ai/glm-5p3'])
+def test_native_gateway_preserves_protocol_stream_and_pins_access(workspace, monkeypatch, route, body, wire, model):
     app, client = workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
     app.state.settings.litellm_api_key = 'server-only-key'
@@ -29,13 +30,13 @@ def test_native_gateway_preserves_protocol_stream_and_pins_access(workspace, mon
         field = 'messages' if route == 'messages' else 'input'
         assert payload[field] == body[field]
         assert payload['tools'] == body['tools']
-        assert payload['model'] == 'anthropic/claude-opus-5-5'
+        assert payload['model'] == model
         assert payload['stream'] is True
         assert 'api_base' not in payload and 'api_key' not in payload
         return httpx.Response(200, content=wire, headers={'Content-Type': 'text/event-stream'})
     actual = httpx.AsyncClient
     monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(transport=httpx.MockTransport(upstream), **kw))
-    run = app.state.store.create_run('native gateway', '', 'modal', [], model='anthropic/claude-opus-5-5')
+    run = app.state.store.create_run('native gateway', '', 'modal', [], model=model)
     app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
     url = f"/broker/{run['id']}/v1/{route}"
     payload = {**body, 'stream': True, 'model': 'override', 'api_key': 'override', 'api_base': 'https://evil.example'}

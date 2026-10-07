@@ -6,9 +6,9 @@ Bring your own model and choose a harness: **Hermes, Claude Code, Codex, OpenCod
 
 ## Getting started
 
-This setup runs Moyai on **Modal**, using **Hermes + OpenAI** for your first task. You can [use a LiteLLM gateway or another model](docs/getting-started.md#3-configure-a-model-endpoint) instead.
+This setup runs Moyai on **Modal**, using **GPT-6 Astra + the Claude Code harness** through LiteLLM. You can [choose another model or harness](docs/getting-started.md#choose-a-harness).
 
-You'll need Git, Python 3.12+, [uv](https://docs.astral.sh/uv/getting-started/installation/), a [Modal account](https://modal.com/docs/guide), and an [OpenAI API key with billing enabled](https://platform.openai.com/docs/quickstart). Commands use a macOS/Linux shell; Windows users can use WSL.
+You'll need Git, Python 3.12+, [uv](https://docs.astral.sh/uv/getting-started/installation/), a [Modal account](https://modal.com/docs/guide), and a [LiteLLM gateway](docs/getting-started.md#3-configure-a-model-endpoint) with GPT-6 Astra enabled. Commands use a macOS/Linux shell; Windows users can use WSL.
 
 ### 1. Install
 
@@ -33,13 +33,13 @@ Open `~/.modal.toml` in a private editor window. Copy your workspace's `token_id
 ```dotenv
 MODAL_TOKEN_ID=<your Modal token_id>
 MODAL_TOKEN_SECRET=<your Modal token_secret>
-LITELLM_API_BASE=https://api.openai.com/v1
-LITELLM_API_KEY=<your OpenAI API key>
-AGENT_MODEL=gpt-4.1
+LITELLM_API_BASE=https://your-gateway.example.com/v1
+LITELLM_API_KEY=<your LiteLLM gateway key>
+AGENT_MODEL=openai/gpt-6-astra
 SESSION_TITLES_ENABLED=false
 ```
 
-Use `gpt-4.1` if your API project has access. Keep the `LITELLM_*` names even for OpenAI. Leave the other settings unchanged for now, and keep `.env` out of Git and chat.
+Ask your gateway administrator for the URL and a key with access to `openai/gpt-6-astra` through the Messages API. Leave the other settings unchanged for now, and keep `.env` out of Git and chat.
 
 ### 3. Deploy and sign in
 
@@ -53,7 +53,7 @@ Open the printed **Workspace URL**. Sign in with `WORKSPACE_PASSWORD` from `.env
 
 ### 4. Run your first task
 
-Start a new session. Under **Context & tools**, choose **Cloud session** and leave the repository empty. Select **a harness** and **a model**, then send:
+Start a new session. Under **Context & tools**, choose **Cloud session** and leave the repository empty. Select **Claude Code** in the harness picker and **GPT-6 Astra** in the model picker, then send:
 
 > Create `/workspace/hello.py` that prints `Hello from Moyai`, run it, and show me the output.
 

@@ -20,7 +20,7 @@ def test_session_harness_validation_persistence_and_idempotency(workspace, monke
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
     assert len(client.get('/api/config').json()['harnesses']) == 6
     assert client.post('/api/runs', json={'prompt': 'bad choice', 'harness': 'unknown'}).status_code == 422
-    assert client.post('/api/runs', json={'prompt': 'bad model', 'harness': 'claude-agent-sdk'}).status_code == 422
+    assert client.post('/api/runs', json={'prompt': 'bad model', 'harness': 'claude-agent-sdk', 'model': 'unconfigured/model'}).status_code == 422
     body = {'prompt': 'SDK task', 'harness': 'claude-agent-sdk', 'model': OPUS, 'client_id': 'harness-test-1'}
     response = client.post('/api/runs', json=body)
     assert response.status_code == 201, response.text
@@ -31,7 +31,7 @@ def test_session_harness_validation_persistence_and_idempotency(workspace, monke
     reopened = Store(app.state.settings.data_dir)
     assert reopened.run(run['id'])['harness'] == 'claude-agent-sdk'
     endpoint = f"/api/runs/{run['id']}/messages"
-    assert client.post(endpoint, json={'content': 'follow up', 'client_id': 'harness-followup', 'model': 'astra'}).status_code == 422
+    assert client.post(endpoint, json={'content': 'follow up', 'client_id': 'harness-followup-astra', 'model': 'astra'}).status_code == 202
     assert client.post(endpoint, json={'content': 'follow up', 'client_id': 'harness-followup'}).status_code == 202
     assert app.state.manager.spec(app.state.store.run(run['id']))['harness'] == 'claude-agent-sdk'
     legacy = client.post('/api/runs', json={'prompt': 'default task'}).json()
@@ -44,22 +44,25 @@ def test_slack_harness_command_and_followups(slack_app):
     assert client.post('/hooks/slack/events', **signed(body)).status_code == 200
     assert not submitted
     run = app.state.store.rows('SELECT * FROM runs')[0]
-    assert run['harness'] == 'claude-agent-sdk' and run['model'] == OPUS
+    assert run['harness'] == 'claude-agent-sdk' and run['model'] == app.state.settings.resolve_model()
     send(client, 1, '<@U99999999> Read the repository')
     assert submitted[-1]['harness'] == 'claude-agent-sdk'
     send(client, 2, '<@U99999999> harness hermes')
     assert app.state.store.run(run['id'])['harness'] == 'claude-agent-sdk'
     assert 'fixed' in app.state.store.rows("SELECT text FROM slack_outbox WHERE dedupe_key='command:EvChat2'")[0]['text']
     send(client, 3, '<@U99999999> model astra')
-    assert app.state.store.run(run['id'])['model'] == OPUS
+    assert app.state.store.run(run['id'])['model'] == 'openai/gpt-6-astra'
 
 
-def test_slack_harness_with_initial_task(slack_app):
+@pytest.mark.parametrize('harness', ['hermes', 'claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop'])
+def test_slack_harness_with_initial_task(slack_app, harness):
     app, client, submitted, _ = slack_app
-    body = event(text='<@U99999999> harness claude-agent-sdk\nRead the repository')
+    app.state.settings.agent_model = 'custom-provider-alias'
+    body = event(text=f'<@U99999999> harness {harness}\nRead the repository')
     assert client.post('/hooks/slack/events', **signed(body)).status_code == 200
     assert len(submitted) == 1
-    assert submitted[0]['harness'] == 'claude-agent-sdk'
+    assert submitted[0]['harness'] == harness
+    assert submitted[0]['model'] == 'custom-provider-alias'
     assert app.state.store.messages(submitted[0]['id'])[0]['content'] == 'Read the repository'
 
 
@@ -187,12 +190,12 @@ def test_registry_extension_reaches_api_without_changing_entrypoint(workspace, m
     app, client = workspace
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
     definition = HarnessDefinition('test-adapter', 'Test adapter', 'litellm_harness', 'LiteLLMAgent',
-                                   model_prefix='openai/', litellm_harness='CODEX', runtime_binding='test')
+                                   litellm_harness='CODEX', runtime_binding='test')
     monkeypatch.setitem(HARNESSES, definition.id, definition)
     assert definition.public() in client.get('/api/config').json()['harnesses']
     run = client.post('/api/runs', json={'prompt': 'registry test', 'harness': definition.id}).json()
     assert run['harness'] == definition.id
-    assert client.post('/api/runs', json={'prompt': 'invalid model', 'harness': definition.id, 'model': OPUS}).status_code == 422
+    assert client.post('/api/runs', json={'prompt': 'other provider', 'harness': definition.id, 'model': OPUS}).status_code == 201
     marker = object()
     monkeypatch.setattr(litellm_harness, 'LiteLLMAgent', lambda **context: (context['definition'], marker))
     assert create_agent(definition.id) == (definition, marker)
@@ -209,15 +212,17 @@ def test_unregistered_litellm_binding_fails_before_startup():
         agent.validate()
 
 
-@pytest.mark.parametrize('harness,model', [
-    ('claude-agent-sdk', OPUS), ('codex', 'openai/gpt-6-astra'),
-    ('opencode', OPUS), ('deepagents', OPUS), ('tool-loop', OPUS)])
+@pytest.mark.parametrize('harness', ['hermes', 'claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop'])
+@pytest.mark.parametrize('model', [OPUS, 'openai/gpt-6-astra', 'fireworks_ai/glm-5p3', 'custom-alias'])
 def test_all_litellm_harnesses_can_be_selected(workspace, monkeypatch, harness, model):
     app, client = workspace
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+    app.state.settings.agent_model = 'custom-alias'
     result = client.post('/api/runs', json={'prompt': 'run this harness', 'harness': harness, 'model': model})
     assert result.status_code == 201, result.text
     assert result.json()['harness'] == harness
+    assert result.json()['model'] == model
+    assert client.post('/api/runs', json={'prompt': 'reject unconfigured model', 'harness': harness, 'model': 'not-enabled'}).status_code == 422
     assert app.state.manager.spec(app.state.store.run(result.json()['id']))['harness'] == harness
 
 

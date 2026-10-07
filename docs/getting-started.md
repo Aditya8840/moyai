@@ -2,7 +2,7 @@
 
 [Documentation](README.md) · [Project overview](../README.md)
 
-Deploy a new Moyai installation on Modal, configure your model, and run a task. You can choose a harness before starting each session. Use Hermes for the first check below, or follow the compatibility table to configure another harness.
+Deploy a new Moyai installation on Modal, configure your model, and run a task. The default walkthrough uses GPT-6 Astra with the Claude Code harness through LiteLLM. You can choose any configured model with any harness.
 
 ## Deployment layout
 
@@ -67,22 +67,16 @@ Edit these entries in `.env`:
 ```dotenv
 LITELLM_API_BASE=https://your-gateway.example.com/v1
 LITELLM_API_KEY=<dedicated gateway key>
-AGENT_MODEL=<exact gateway model alias>
+AGENT_MODEL=openai/gpt-6-astra
 ```
 
-For Hermes, supply the API base without `/chat/completions`; Moyai appends that path. Use a gateway address reachable from Modal. After deployment, `localhost:4000` refers to the cloud container. To host your own gateway, follow the [LiteLLM gateway setup guide](https://docs.litellm.ai/docs/proxy/quick_start) and expose it at a protected endpoint.
+Ask your gateway administrator to enable `openai/gpt-6-astra` and grant your key access through the Messages API for Claude Code. Supply the API base ending in `/v1`, without `/messages`. Use an address reachable from Modal; `localhost:4000` refers to the cloud container after deployment. To host your own gateway, follow the [LiteLLM gateway setup guide](https://docs.litellm.ai/docs/proxy/quick_start) and expose it at a protected endpoint.
 
-### Option B: Hermes with the OpenAI API
+### Option B: set up your own LiteLLM gateway
 
-Follow the [OpenAI API quickstart](https://platform.openai.com/docs/quickstart) to create a project API key and configure API billing. A ChatGPT subscription does not supply API access. Then set:
+Follow the [LiteLLM gateway setup guide](https://docs.litellm.ai/docs/proxy/quick_start). Add your provider API key to the gateway's secret store and expose a model alias named `openai/gpt-6-astra`. Create a dedicated gateway key with access to that alias and the Messages API, then use the settings from Option A. Your gateway needs a protected HTTPS address reachable from Modal.
 
-```dotenv
-LITELLM_API_BASE=https://api.openai.com/v1
-LITELLM_API_KEY=<your OpenAI project API key>
-AGENT_MODEL=gpt-4.1
-```
-
-Choose `gpt-4.1` if your project has access, or another Chat Completions model supporting tool calling and the agent's request parameters. Keep the `LITELLM_*` variable names and use the provider's exact model ID. This example uses Hermes; to use Claude Code or Codex, configure the gateway protocols and model prefixes below. Route Anthropic and other provider APIs through a compatible gateway.
+The provider key stays on the gateway. Put the gateway key in Moyai's `.env`; do not point the Claude Code harness at OpenAI's API, which does not expose the Messages protocol.
 
 ### Choose a harness
 
@@ -91,15 +85,15 @@ Use the **Harness** picker beside **Model** in a new session. You can bring any 
 | Harness | Model selection | Required API |
 | --- | --- | --- |
 | Hermes (default) | Any configured compatible model | Chat Completions |
-| Claude Code | Configured `anthropic/claude-*` model | Messages |
-| Codex | Configured `openai/*` model | Responses |
+| Claude Code | Any configured compatible model | Messages |
+| Codex | Any configured compatible model | Responses |
 | OpenCode | Any configured compatible model | Chat Completions |
 | Deep Agents | Any configured compatible model | Chat Completions |
 | Tool Loop | Any configured compatible model | Chat Completions |
 
 For Claude Code or Codex, use a LiteLLM gateway that exposes the required native API. Moyai forwards Messages and Responses requests without converting them to Chat Completions. Confirm that your key permits the selected model and protocol.
 
-Keep the chosen harness for the session; start a new session to change it. You can change models within the harness's compatibility rules. Automations use Hermes in this version. To add another harness, register an adapter and runtime binding using the [harness extension guide](harnesses.md). The six listed harnesses have built-in adapters; additional harnesses need an integration.
+Keep the chosen harness for the session; start a new session to change it. You can switch between configured models without provider-prefix restrictions. The gateway must support the selected model's tool calls on the harness's API; this is not a guarantee that every provider implements every feature. Automations use Hermes in this version. To add another harness, register an adapter and runtime binding using the [harness extension guide](harnesses.md).
 
 ### Finish the first-run configuration
 
@@ -146,7 +140,7 @@ Edit credentials in `.env`: its values override shell variables, including blank
 
 1. Open **Settings → Runtime** and check for **Cloud ready**. The badge checks for required settings; you still need to test the credentials.
 2. Start a new session. In **Context & tools**, select **Execution → Cloud session** and leave **GitHub repository** empty.
-3. Choose **Hermes** in the harness picker for this first check, then select your configured `AGENT_MODEL`. To test another harness, use a compatible model and endpoint from the table above.
+3. Choose **Claude Code** in the harness picker and **GPT-6 Astra** in the model picker. To test another combination, select any configured model and a harness whose API your gateway supports.
 4. Send:
 
    > Use the terminal to create `/workspace/setup-check.txt` containing `moyai setup works`. Read it back with a tool and report the contents. Do not connect apps or publish anything.
@@ -187,7 +181,7 @@ After the tests pass, request a small change and ask for a pull request. Review 
 | Web app cannot reach gateway | A local-only gateway is not reachable from Modal. Use a reachable protected endpoint; the app appends `/chat/completions` to `LITELLM_API_BASE`. |
 | Agent fails to call back to a separately hosted app | Use HTTPS and the exact configured origin; proxies must preserve Host and allow `/broker/` requests authenticated by run tokens, without an extra browser-only login. The Modal-hosted path configures its origin for you. |
 | Responses say demo/simulated | Start a new session with **Cloud session** selected. Existing demo sessions keep their mode after configuration changes. |
-| Harness has no models or rejects your selection | Claude Code requires an enabled `anthropic/claude-*` model; Codex requires `openai/*`. Set a compatible `AGENT_MODEL` and redeploy. Check that the gateway exposes Messages or Responses for the chosen harness. |
+| Model missing or gateway rejects a harness request | Set the gateway alias as `AGENT_MODEL` and redeploy. All harnesses offer the configured models. Check that your gateway/key supports the model through Messages (Claude Code), Responses (Codex), or Chat Completions (other harnesses). |
 | GitHub shows BerriAI's repository / wrong repositories | Change the allowlist in `.env`, redeploy, then reconnect/install the App for exactly those repositories. |
 | GitHub connected but missing from an old session | Start a new session and explicitly check GitHub in **Context & tools**. Check that the connection is enabled and healthy. |
 | Changed `.env`, but nothing changed in the app | Redeploy for Modal hosting; restart for a locally hosted control plane. Preserve existing secrets and wait for active turns to settle first. |
