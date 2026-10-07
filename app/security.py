@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import secrets
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -13,6 +14,35 @@ from .config import Settings
 
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def same(a: str, b: str) -> bool:
+    # compare_digest raises TypeError on non-ASCII str, so compare bytes.
+    return hmac.compare_digest(a.encode(), b.encode())
+
+
+def client_ip(request: Request) -> str:
+    # Render and Modal append the real client as the last X-Forwarded-For hop;
+    # earlier hops are client-supplied and ignored.
+    forwarded = request.headers.get("x-forwarded-for", "")
+    return forwarded.rpartition(",")[2].strip() or (request.client.host if request.client else "")
+
+
+class Throttle:
+    """Sliding one-minute limit per client, so one client cannot lock out everyone."""
+
+    def __init__(self, limit: int):
+        self.limit, self.hits = limit, {}
+
+    def blocked(self, key: str) -> bool:
+        cutoff = time.monotonic() - 60
+        for other in [k for k, stamps in self.hits.items() if stamps[-1] <= cutoff]:
+            del self.hits[other]
+        return len([t for t in self.hits.get(key, []) if t > cutoff]) >= self.limit
+
+    def record(self, key: str):
+        now = time.monotonic()
+        self.hits[key] = [t for t in self.hits.get(key, []) if t > now - 60] + [now]
 
 
 def local_secret(path: Path, generate) -> str:
@@ -49,15 +79,13 @@ class Security:
         if settings.workspace_member_password and (
             len(settings.workspace_member_password) < 16
             or not settings.workspace_password
-            or hmac.compare_digest(settings.workspace_member_password, settings.workspace_password)
+            or same(settings.workspace_member_password, settings.workspace_password)
         ):
             raise ValueError("WORKSPACE_MEMBER_PASSWORD must be at least 16 characters and different from the administrator password.")
 
     def session_info(self, request: Request) -> dict | None:
         try:
             info = self.signer.loads(request.cookies.get("workspace_session", ""), max_age=43200)
-            # Sessions from the original single-password deployment belong to
-            # its administrator. New member sessions always carry a role/tag.
             role = info.get("role", "admin")
             if role not in {"admin", "member"} or not isinstance(info.get("sid"), str):
                 return None
@@ -75,11 +103,11 @@ class Security:
                     return None
             elif method != "password" or not self.settings.password_login_enabled:
                 return None
-            elif role == "member" and (
-                not self.settings.workspace_member_password or not hmac.compare_digest(
-                    info.get("password_tag", ""), digest(self.settings.workspace_member_password))
-            ):
-                return None
+            else:
+                # Password sessions end when their password is rotated or removed.
+                password = self.settings.workspace_password if role == "admin" else self.settings.workspace_member_password
+                if not password or not same(info.get("password_tag", ""), self.password_tag(password)):
+                    return None
             return {**info, "role": role}
         except (BadSignature, SignatureExpired, KeyError, TypeError, AttributeError):
             return None
@@ -100,6 +128,10 @@ class Security:
         info = self.session_info(request)
         return info["role"] if info else None
 
+    def password_tag(self, password: str) -> str:
+        # Keyed, so the readable (signed, not encrypted) cookie does not carry a plain password hash.
+        return hmac.new(self.secret.encode(), f"password:{password}".encode(), hashlib.sha256).hexdigest()
+
     def csrf(self, sid: str) -> str:
         return hmac.new(self.secret.encode(), f"csrf:{sid}".encode(), hashlib.sha256).hexdigest()
 
@@ -111,7 +143,7 @@ class Security:
             raise HTTPException(403, "An organization administrator must perform this action.")
         if mutation:
             self.check_origin(request)
-            if not hmac.compare_digest(request.headers.get("x-csrf-token", ""), self.csrf(sid)):
+            if not same(request.headers.get("x-csrf-token", ""), self.csrf(sid)):
                 raise HTTPException(403, "Refresh the page and try again.")
         return sid
 
@@ -124,8 +156,9 @@ class Security:
         info = {"sid": sid, "role": role, "method": "google" if identity else "local" if local else "password"}
         if identity:
             info.update(identity=identity, client_id=self.settings.google_client_id)
-        elif role == "member":
-            info["password_tag"] = digest(self.settings.workspace_member_password)
+        elif not local:
+            info["password_tag"] = self.password_tag(
+                self.settings.workspace_password if role == "admin" else self.settings.workspace_member_password)
         response.set_cookie("workspace_session", self.signer.dumps(info), max_age=43200,
                             httponly=True, secure=not self.local, samesite="lax", path="/")
         return sid

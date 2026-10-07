@@ -14,7 +14,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from .security import digest
+from .security import Throttle, client_ip, digest
 
 AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -33,7 +33,7 @@ class GoogleSignIn:
         self.keys_expire = 0
         self.last_key_fetch = 0
         self.key_lock = asyncio.Lock()
-        self.attempts = []
+        self.attempts = Throttle(30)
 
     @property
     def callback(self):
@@ -99,11 +99,10 @@ class GoogleSignIn:
             self.security.check_origin(request)
             if not self.settings.google_enabled():
                 raise HTTPException(409, "Google sign-in is not configured yet.")
-            now = time.monotonic()
-            self.attempts[:] = [stamp for stamp in self.attempts if stamp > now - 60]
-            if len(self.attempts) >= 30:
+            client = client_ip(request)
+            if self.attempts.blocked(client):
                 raise HTTPException(429, "Too many sign-in attempts. Wait a minute.")
-            self.attempts.append(now)
+            self.attempts.record(client)
             state, browser, nonce, verifier = (secrets.token_urlsafe(32) for _ in range(4))
             return_to = body.return_to if re.fullmatch(r"/#(?:tasks|connections|runtime|spend|users|run=[a-f0-9]{32})", body.return_to) else "/#tasks"
             self.store.execute("DELETE FROM login_states WHERE expires<?", (time.time(),))

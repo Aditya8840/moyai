@@ -350,3 +350,28 @@ def test_linear_issue_creation_runs_directly_for_admins_and_members(workspace, m
     assert tool['annotations']['readOnlyHint'] is False
     if role == 'member':
         assert client.patch('/api/connections/linear/policy', json={'enabled':True,'read_only':False}).status_code == 403
+
+
+def test_password_sign_in_resists_lockout_rotation_and_non_ascii(workspace):
+    app, client = workspace
+    app.state.settings.workspace_password = "organization-admin-pässwörd"
+    attacker = {"X-Forwarded-For": "203.0.113.9"}
+    for _ in range(10):
+        assert client.post("/api/login", json={"password": "wrong-ü"}, headers=attacker).status_code == 401
+    assert client.post("/api/login", json={"password": "wrong"}, headers=attacker).status_code == 429
+    # A spoofed earlier hop does not dodge the limit; another client is unaffected.
+    assert client.post("/api/login", json={"password": "wrong"},
+                       headers={"X-Forwarded-For": "198.51.100.1, 203.0.113.9"}).status_code == 429
+    assert client.post("/api/login", json={"password": "organization-admin-pässwörd"}).json()["role"] == "admin"
+    assert client.get("/api/session").json()["role"] == "admin"
+    app.state.settings.workspace_password = "rotated-admin-password"
+    assert client.get("/api/connections").status_code == 401
+
+
+def test_non_ascii_csrf_and_slack_signatures_are_rejected_not_crashed(workspace):
+    app, client = workspace
+    assert client.post("/api/logout", headers={"X-CSRF-Token": "é".encode("latin-1")}).status_code == 403
+    app.state.settings.slack_signing_secret = "signing-secret"
+    response = client.post("/hooks/slack/events", content=b"{}", headers={
+        "x-slack-request-timestamp": str(int(time.time())), "x-slack-signature": "v0=é".encode("latin-1")})
+    assert response.status_code == 401

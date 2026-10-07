@@ -24,7 +24,7 @@ from .connectors import Connectors, ConnectorError, TOOLS
 from .db import Store, now
 from .runner import RunManager, TERMINAL
 from .persistence import Checkpoints, restore_checkpoint
-from .security import Security, digest
+from .security import Security, Throttle, client_ip, digest, same
 from .google_sso import GoogleSignIn
 from .user_roles import UserRoles
 from .user_preferences import UserPreferences
@@ -198,7 +198,7 @@ def create_app(settings: Settings | None = None):
     model_tools = ModelTools(store, settings)
     manager.automations = automations
     slack.automation_events = automations.events
-    login_attempts = []
+    login_attempts = Throttle(10)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -357,15 +357,15 @@ def create_app(settings: Settings | None = None):
         security.check_origin(request)
         if not settings.password_login_enabled:
             raise HTTPException(403, "Use Google to sign in to this workspace.")
-        login_attempts[:] = [stamp for stamp in login_attempts if stamp > time.monotonic() - 60]
-        if len(login_attempts) >= 10:
+        client = client_ip(request)
+        if login_attempts.blocked(client):
             raise HTTPException(429, "Too many sign-in attempts. Wait a minute.")
-        login_attempts.append(time.monotonic())
-        if settings.workspace_password and hmac.compare_digest(body.password, settings.workspace_password):
+        if settings.workspace_password and same(body.password, settings.workspace_password):
             role = "admin"
-        elif settings.workspace_member_password and hmac.compare_digest(body.password, settings.workspace_member_password):
+        elif settings.workspace_member_password and same(body.password, settings.workspace_member_password):
             role = "member"
         else:
+            login_attempts.record(client)
             raise HTTPException(401, "Incorrect workspace password.")
         response = JSONResponse({"authenticated": True, "role": role})
         security.new_session(response, role)
