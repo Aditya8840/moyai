@@ -5,7 +5,8 @@
 if(process.argv.includes('--serve')){
   const http=require('node:http'),fs=require('node:fs'),path=require('node:path');
   const root=path.resolve(__dirname,'../app/static');
-  let titled=false;
+  let titled=false,finished=false,revision=0;
+  const indicators=process.argv.includes('--indicators');
   const parent='a'.repeat(32),child='b'.repeat(32),side='c'.repeat(32);
   const run=(id,prompt,status,extra={})=>({id,prompt,status,mode:'demo',chat_enabled:true,parent_run_id:'',plugins:[],events:[],messages:[],approvals:[],credential_requests:[],repo_url:'https://github.com/example/project',updated_at:'2026-10-06T12:00:00Z',...extra});
   const rows=()=>[
@@ -13,13 +14,14 @@ if(process.argv.includes('--serve')){
     run(side,'- can you explain the title refresh?','idle',{side_chat_of:parent,display_title:titled?'Explain background title refresh':'',children:[]}),
     run('d'.repeat(32),'## **Investigate upload errors**','waiting_credential',{children:[]}),
     run('e'.repeat(32),'https://example.com/task\n- fix `display_title` fallback','completed',{children:[]}),
-  ];
+  ].map((row,index)=>indicators&&index===0?{...row,status:finished?'idle':'running',updated_at:new Date(1791374400000+revision*60000).toISOString(),display_title:'Polish session navigation'}:row);
   const send=(response,status,body,type='application/json')=>{response.writeHead(status,{'Content-Type':type});response.end(type==='application/json'?JSON.stringify(body):body);};
   const server=http.createServer((request,response)=>{
     const url=new URL(request.url,'http://localhost');
     if(url.pathname==='/'){
       let html=fs.readFileSync(path.join(root,'index.html'),'utf8');
       html=html.replace('</body>',`<button id="fixture-poll" style="position:fixed;right:20px;bottom:20px;z-index:99">Test fixture: deliver generated titles</button><script>document.addEventListener('DOMContentLoaded',()=>{document.querySelector('#fixture-poll').onclick=async()=>{await fetch('/fixture/title',{method:'POST'});await refreshRuns();document.querySelector('#fixture-poll').textContent='Fixture API poll applied';};});</script></body>`);
+      if(indicators)html=html.replace('</body>',`<script>document.addEventListener('DOMContentLoaded',()=>{const button=document.querySelector('#fixture-poll');button.textContent=${JSON.stringify(finished?'Test fixture: start follow-up':'Test fixture: finish work')};button.onclick=async()=>{const result=await (await fetch('/fixture/work',{method:'POST'})).json();await refreshRuns();button.textContent=result.finished?'Test fixture: start follow-up':'Test fixture: finish work';};});</script></body>`);
       return send(response,200,html,'text/html');
     }
     if(url.pathname.startsWith('/static/')){
@@ -29,6 +31,7 @@ if(process.argv.includes('--serve')){
       return send(response,200,fs.readFileSync(file),type);
     }
     if(url.pathname==='/fixture/title'){titled=true;return send(response,200,{fixture:true});}
+    if(url.pathname==='/fixture/work'){finished=!finished;revision++;return send(response,200,{fixture:true,finished});}
     if(url.pathname==='/api/session')return send(response,200,{authenticated:true,local:true,csrf:'fixture',role:'admin',user_id:'fixture'});
     if(url.pathname==='/api/config')return send(response,200,{missing:[],models:[],cloud_ready:false});
     if(url.pathname==='/api/organization')return send(response,200,{name:'Frontend test fixture'});
@@ -44,5 +47,6 @@ if(process.argv.includes('--serve')){
     }
     return send(response,404,{detail:'Not provided by the local frontend fixture'});
   });
-  server.listen(8766,'0.0.0.0',()=>console.log('Frontend fixture ready on port 8766; API data is synthetic test input.'));
+  const port=Number(process.env.PORT||8766);
+  server.listen(port,'0.0.0.0',()=>console.log(`Frontend fixture ready on port ${port}; API data is synthetic test input.`));
 }

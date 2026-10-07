@@ -70,7 +70,17 @@
 .session-list .session-link-title{font-size:13px;font-weight:500;line-height:1.45;white-space:normal;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;overflow-wrap:anywhere;color:#35313d}
 .session-list .selected .session-link-title{color:#4f376a;font-weight:600}
 .session-link-meta{display:flex;align-items:center;flex-wrap:wrap;gap:3px 10px;margin-top:6px;font-size:11px;line-height:1.5;color:#6e6878;font-weight:400}
-.session-state{display:inline-flex;align-items:center;gap:6px}
+.session-title-row{display:flex;align-items:flex-start;gap:8px}
+.session-title-row .session-link-title{flex:1;min-width:0}
+.session-indicator{display:flex;align-items:center;justify-content:center;flex:0 0 12px;width:12px;height:18px;color:var(--purple)}
+.session-completion{width:7px;height:7px;border-radius:50%;background:currentColor}
+.session-completion.is-read{animation:session-read-fade .35s ease-out forwards}
+.session-attention{font-size:12px;font-weight:600;color:#ad7929}
+.session-attention.failed,.session-attention.interrupted{color:#b35b65}
+.session-spinner{width:10px;height:10px;flex:0 0 10px;border:1.5px solid currentColor;border-right-color:transparent;border-radius:50%;animation:session-working-spin .8s linear infinite}
+@keyframes session-working-spin{to{transform:rotate(360deg)}}
+@keyframes session-read-fade{from{opacity:1}to{opacity:0}}
+@media(prefers-reduced-motion:reduce){.session-spinner{animation:none}.session-completion.is-read{animation:none;opacity:0}}
 .session-state .session-dot{margin:0;flex:0 0 6px}
 .session-updated{white-space:nowrap;font-variant-numeric:tabular-nums;color:#746d7e}
 .session-link-context{display:block;margin-top:3px;font-size:11px;font-weight:400;line-height:1.5;color:#746d7e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
