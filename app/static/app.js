@@ -95,7 +95,7 @@ function sessionIndicator(run){
 function modelName(model=state.config.model){return (state.config.models||[]).find(m=>m.id===model)?.name||model||'Hermes Agent';}
 function harnessLogo(harness){const url=MoyaiProviderLogos.harness(harness);return `<img class="provider-logo harness-logo" alt="" width="16" height="16" ${url?`src="${esc(url)}"`:'hidden'}>`;}
 function harnessPicker(selected='hermes'){return `<label class="model-picker harness-picker"><span class="picker-caption" aria-hidden="true">Harness</span>${harnessLogo(selected)}<span class="sr-only">Agent harness</span><select id="new-harness" aria-label="Agent harness">${(state.config.harnesses||[{id:'hermes',name:'Hermes'}]).map(h=>`<option value="${esc(h.id)}" ${h.id===selected?'selected':''}>${esc(h.name)}</option>`).join('')}</select></label>`;}
-function harnessModels(harness){const prefix=(state.config.harnesses||[]).find(h=>h.id===harness)?.model_prefix||'';return (state.config.models||[]).filter(m=>m.id.startsWith(prefix));}
+function harnessModels(harness){return state.config.models||[];}
 function providerLogo(model){const url=MoyaiProviderLogos.src(model);return `<img class="provider-logo" alt="" width="16" height="16" ${url?`src="${esc(url)}"`:'hidden'}>`;}
 function modelPicker(id,selected,disabled=false,harness='hermes'){return `<label class="model-picker"><span class="picker-caption" aria-hidden="true">Model</span>${providerLogo(selected)}<span class="sr-only">Model for next message</span><select id="${id}" aria-label="Model for next message" ${disabled?'disabled':''}>${harnessModels(harness).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}</select></label>`;}
 

@@ -13,11 +13,13 @@ test('harness picker defaults to Hermes and retains an explicit Claude choice',(
   assert.match(c.harnessPicker('claude-agent-sdk'),/value="claude-agent-sdk" selected/);
   assert.match(c.harnessPicker(),/aria-label="Agent harness"/);
 });
-test('Claude harness offers only Claude models without changing Hermes choices',()=>{
+test('every harness offers all configured models even with stale provider metadata',()=>{
   const c=setup();assert.equal(c.harnessModels('hermes').length,2);
-  assert.equal(c.harnessModels('claude-agent-sdk').length,1);
-  const html=c.modelPicker('model','anthropic/claude-opus-5-5',false,'claude-agent-sdk');
-  assert.match(html,/Opus/);assert.doesNotMatch(html,/Astra/);
+  for(const harness of ['hermes','claude-agent-sdk','codex','opencode','deepagents','tool-loop']){
+    assert.equal(c.harnessModels(harness).length,2);
+    const html=c.modelPicker('model','openai/gpt-6-astra',false,harness);
+    assert.match(html,/Opus/);assert.match(html,/value="openai\/gpt-6-astra" selected/);
+  }
 });
 test('harness picker shows the selected harness logo and hides it for harnesses without one',()=>{
   const c=setup();
