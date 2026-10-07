@@ -47,7 +47,7 @@ def main():
             # Reuse the installed sandbox demo's storage scheme and worker pool.
             existing = await backend.rpc('GetActorTemplate', {'actor_template': {'atespace': 'ate-demo-sandbox', 'name': 'sandbox-template'}})
             config = template(image='localhost:5001/moyai-sandbox:test', storage=existing.snapshot_config.storage_location,
-                              public_key=public, atespace='ate-demo-sandbox', memory='1Gi', workload='sandbox')
+                              public_key=public, atespace='ate-demo-sandbox', memory='1536Mi', workload='sandbox')
             message = ParseDict(config, pb.ActorTemplate())
             await backend.rpc('CreateActorTemplate', {'actor_template': message})
             await smoke()

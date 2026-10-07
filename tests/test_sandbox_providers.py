@@ -142,6 +142,40 @@ async def test_real_http_streaming_drains_multiple_chunks_and_nonzero_exit(trans
     assert await process.wait.aio() == 7
 
 
+async def test_chunked_unicode_writes_and_empty_overwrite(transport):
+    sandbox, tmp = transport
+    path = str(tmp / 'large.txt')
+    value = '✓' * 800000
+    await sandbox.filesystem.write_text.aio(value, path)
+    assert (await sandbox.filesystem.read_bytes.aio(path)).decode() == value
+    await sandbox.filesystem.write_text.aio('', path)
+    assert await sandbox.filesystem.read_bytes.aio(path) == b''
+
+
+async def test_checkpoint_blocks_other_handle_requests_until_thawed():
+    actor = pb.Actor(metadata={'atespace': 'tests', 'name': 'lock-test', 'uid': 'actor-lock-test'})
+    backend = SubstrateProvider(Settings(_env_file=None))
+    entered, release, read = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    async def rpc(method, data, **kwargs):
+        if method == 'CreateTag':
+            entered.set()
+            await release.wait()
+    backend.rpc = AsyncMock(side_effect=rpc)
+    original, reconnected = Sandbox(backend, actor), Sandbox(backend, actor)
+    original._request = AsyncMock(return_value={})
+    async def read_request(*args):
+        read.set()
+    reconnected._request = read_request
+    checkpoint = asyncio.create_task(original.snapshot_filesystem.aio())
+    await entered.wait()
+    reader = asyncio.create_task(reconnected.request('/read', {}))
+    await asyncio.sleep(0)
+    assert not read.is_set()
+    release.set()
+    await asyncio.gather(checkpoint, reader)
+    assert read.is_set()
+
+
 async def test_actor_identity_and_signing_key_are_enforced(transport):
     sandbox, _ = transport
     sandbox.actor.metadata.uid = 'other-actor'
@@ -192,8 +226,81 @@ async def test_checkpoint_always_thaws_original_after_failed_tag():
             raise RuntimeError('tag failure')
     backend.rpc = AsyncMock(side_effect=rpc)
     sandbox = Sandbox(backend, actor)
-    sandbox.request = AsyncMock(return_value={})
+    sandbox._request = AsyncMock(return_value={})
     with pytest.raises(RuntimeError, match='tag failure'):
         await sandbox.snapshot_filesystem.aio()
     assert [call.args[0] for call in backend.rpc.call_args_list] == ['SuspendActor', 'CreateTag', 'ResumeActor']
-    assert [call.args[0] for call in sandbox.request.call_args_list] == ['/freeze', '/activate']
+    assert [call.args[0] for call in sandbox._request.call_args_list] == ['/freeze', '/activate']
+
+
+async def test_retry_initializes_partial_actor_without_deleting_it_on_failure():
+    from modal.exception import AlreadyExistsError
+    actor = pb.Actor(metadata={'atespace': 'tests', 'name': 'one', 'uid': 'actor-one'})
+    backend = SubstrateProvider(Settings(_env_file=None))
+    async def rpc(method, data, **kwargs):
+        if method == 'CreateActor':
+            raise AlreadyExistsError('exists')
+        return actor
+    backend.rpc = AsyncMock(side_effect=rpc)
+    backend.initialize = AsyncMock(side_effect=RuntimeError('temporary router outage'))
+    with pytest.raises(RuntimeError):
+        await backend.create(name='one')
+    assert [call.args[0] for call in backend.rpc.call_args_list] == ['CreateActor', 'GetActor']
+    backend.initialize.reset_mock(side_effect=True)
+    sandbox = await backend.find('one', initialize=True, token='retry-token')
+    assert sandbox.env['WORKSPACE_RUN_TOKEN'] == 'retry-token'
+    backend.initialize.assert_awaited_once()
+    backend.initialize.reset_mock()
+    await backend.find('one')
+    backend.initialize.assert_not_awaited()
+
+
+def test_repeated_activation_does_not_extend_original_lease(transport):
+    sandbox, _ = transport
+    guest.dispatch('/activate', {'expires_at': 1234})
+    guest.dispatch('/activate', {'expires_at': 5678})
+    assert json.loads((guest.ROOT / 'lease.json').read_text())['expires_at'] == 1234
+
+
+def test_initial_signing_key_does_not_pin_environment_defaults(workspace):
+    app, _ = workspace
+    from app.sandbox_settings import SandboxSettings
+    settings = Settings(_env_file=None, data_dir=app.state.settings.data_dir, modal_token_id='new-env-token')
+    SandboxSettings(app.state.store, settings, app.state.security)
+    assert settings.modal_token_id == 'new-env-token'
+
+
+async def test_control_tls_negotiates_http2_and_verifies_private_ca(tmp_path):
+    import datetime
+    import ssl
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from grpclib.exceptions import StreamTerminatedError
+    private = ec.generate_private_key(ec.SECP256R1())
+    subject = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, 'localhost')])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject).public_key(private.public_key())
+            .serial_number(x509.random_serial_number()).not_valid_before(now - datetime.timedelta(minutes=1))
+            .not_valid_after(now + datetime.timedelta(minutes=10))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName('localhost')]), critical=False)
+            .sign(private, hashes.SHA256()))
+    certificate = cert.public_bytes(serialization.Encoding.PEM).decode()
+    (tmp_path / 'cert.pem').write_text(certificate)
+    (tmp_path / 'key.pem').write_bytes(private.private_bytes(serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(tmp_path / 'cert.pem', tmp_path / 'key.pem')
+    context.set_alpn_protocols(['h2'])
+    negotiated = asyncio.get_running_loop().create_future()
+    async def connected(reader, writer):
+        negotiated.set_result(writer.get_extra_info('ssl_object').selected_alpn_protocol())
+        writer.close()
+        await writer.wait_closed()
+    server = await asyncio.start_server(connected, '127.0.0.1', 0, ssl=context)
+    async with server:
+        settings = Settings(_env_file=None, substrate_api_url=f'https://localhost:{server.sockets[0].getsockname()[1]}',
+                            substrate_ca_cert=certificate)
+        with pytest.raises(StreamTerminatedError):
+            await SubstrateProvider(settings).rpc('GetActorTemplate', {'actor_template': {'atespace':'tests','name':'one'}}, timeout=5)
+        assert await negotiated == 'h2'

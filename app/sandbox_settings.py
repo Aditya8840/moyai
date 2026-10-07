@@ -42,9 +42,15 @@ class SandboxSettings:
                 settings.substrate_signing_key = base64.b64encode(Ed25519PrivateKey.generate().private_bytes_raw()).decode()
             self.save(0)
 
-    def save(self, revision):
-        values = {key: getattr(self.settings, key) for fields in FIELDS.values() for key in fields}
-        values.update(sandbox_provider=self.settings.sandbox_provider, substrate_signing_key=self.settings.substrate_signing_key)
+    def save(self, revision, provider_name=None):
+        rows = self.store.rows('SELECT encrypted FROM sandbox_settings WHERE id=1')
+        values = json.loads(self.security.decrypt(rows[0]['encrypted'])) if rows else {}
+        values['substrate_signing_key'] = self.settings.substrate_signing_key
+        if provider_name:
+            values.update({key: getattr(self.settings, key) for key in FIELDS[provider_name]})
+            values['sandbox_provider'] = provider_name
+            if provider_name == 'substrate':
+                values['substrate_token_file'] = self.settings.substrate_token_file
         self.store.execute('INSERT INTO sandbox_settings VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,encrypted=excluded.encrypted',
                            (revision, self.security.encrypt(json.dumps(values))))
 
@@ -58,12 +64,16 @@ class SandboxSettings:
             for name, fields in FIELDS.items():
                 result['providers'][name]['values'] = {key: getattr(self.settings, key) for key in fields if key not in SECRETS}
                 result['providers'][name]['secrets'] = {key: bool(getattr(self.settings, key)) for key in fields if key in SECRETS}
+            if self.settings.substrate_token_file:
+                result['providers']['substrate']['secrets']['substrate_api_token'] = True
         return result
 
     def candidate(self, body):
         if set(body.values) - set(FIELDS[body.provider]):
             raise HTTPException(422, 'Unknown sandbox connection setting.')
         changes = {key: value for key, value in body.values.items() if key not in SECRETS or value}
+        if body.provider == 'substrate' and changes.get('substrate_api_token'):
+            changes['substrate_token_file'] = ''
         try:
             candidate = Settings(_env_file=None, **{**self.settings.model_dump(), **changes, 'sandbox_provider': body.provider})
         except Exception:
@@ -73,8 +83,9 @@ class SandboxSettings:
         # An existing actor/snapshot cannot be moved to another cluster by
         # editing credentials. Switching defaults between providers is safe.
         if any(getattr(candidate, key) != getattr(self.settings, key) for key in
-               ('substrate_api_url', 'substrate_router_url', 'substrate_atespace')) and self.store.rows(
-                "SELECT 1 FROM runs WHERE sandbox_provider='substrate' AND (snapshot_id!='' OR sandbox_id!='') LIMIT 1"):
+               ('substrate_api_url', 'substrate_router_url', 'substrate_atespace')) and (self.store.rows(
+                "SELECT 1 FROM runs WHERE sandbox_provider='substrate' AND (snapshot_id!='' OR sandbox_id!='') LIMIT 1") or self.store.rows(
+                "SELECT 1 FROM environment_builds WHERE sandbox_provider='substrate' AND (snapshot_id!='' OR sandbox_id!='') LIMIT 1")):
             raise HTTPException(409, 'Existing Substrate sessions belong to this cluster. Use a separate Moyai installation for another cluster.')
         return candidate
 
@@ -100,8 +111,10 @@ class SandboxSettings:
                     raise HTTPException(502, 'Connection test failed. Check credentials, endpoints, worker capacity, and the Moyai actor template. Your saved connection was not changed.') from None
                 for key in FIELDS[body.provider]:
                     setattr(self.settings, key, getattr(candidate, key))
+                if body.provider == 'substrate':
+                    self.settings.substrate_token_file = candidate.substrate_token_file
                 self.settings.sandbox_provider = body.provider
-                self.save(body.revision + 1)
+                self.save(body.revision + 1, body.provider)
                 return {**self.view(True), 'message': message}
 
         return router

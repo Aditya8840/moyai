@@ -74,18 +74,20 @@ def freeze():
     saved = {'uid': IDENTITY.read_text().strip(), 'processes': {}}
     try:
         for _ in range(10):
+            found = False
             for entry in Path('/proc').iterdir():
                 if not entry.name.isdigit() or int(entry.name) in {1, os.getpid()}:
                     continue
                 start, state = process_identity(entry.name)
                 if start and state != 'Z' and entry.name not in saved['processes']:
+                    found = True
                     saved['processes'][entry.name] = start
                     atomic(marker, saved)
                     try:
                         os.kill(int(entry.name), signal.SIGSTOP)
                     except ProcessLookupError:
                         pass
-            if all(process_identity(pid)[1] in {None, 'T', 't', 'Z'} for pid in saved['processes']):
+            if not found and all(process_identity(pid)[1] in {None, 'T', 't', 'Z'} for pid in saved['processes']):
                 atomic(marker, saved)
                 return
             time.sleep(.02)
@@ -106,8 +108,11 @@ def dispatch(path, body):
         if path == '/activate':
             activate()
             if body.get('expires_at'):
-                atomic(ROOT / 'lease.json', {'uid': IDENTITY.read_text().strip(),
-                                            'expires_at': min(float(body['expires_at']), time.time() + 86400)})
+                uid = IDENTITY.read_text().strip()
+                lease_file = ROOT / 'lease.json'
+                lease = json.loads(lease_file.read_text()) if lease_file.exists() else {}
+                if lease.get('uid') != uid:
+                    atomic(lease_file, {'uid': uid, 'expires_at': min(float(body['expires_at']), time.time() + 86400)})
             return {'version': VERSION}
         if path == '/freeze':
             freeze()
@@ -143,7 +148,12 @@ def dispatch(path, body):
         if path == '/file/write':
             target = Path(body['path'])
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(base64.b64decode(body['data'], validate=True))
+            offset = int(body.get('offset', 0))
+            if offset < 0:
+                raise ValueError('Invalid offset')
+            with target.open('r+b' if offset else 'wb') as stream:
+                stream.seek(offset)
+                stream.write(base64.b64decode(body['data'], validate=True))
             return {'ok': True}
         if path == '/file/stat':
             return {'size': Path(body['path']).stat().st_size}

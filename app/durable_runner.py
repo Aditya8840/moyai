@@ -261,13 +261,13 @@ class DurableRunner(RunManager):
         backend = self.provider(self.store.run(run_id))
         name = f"moyai-{run_id}-{state['message_id']}-{state['segment']}"
         try:
-            sandbox = await backend.find(name)
+            sandbox = await backend.find(name, initialize=True, token=self.token(run_id, state['message_id']))
         except modal.exception.NotFoundError:
             try:
                 sandbox = await backend.create(name=name, snapshot_id=state['snapshot_id'] or project.get('snapshot_id') or '',
                                                token=self.token(run_id, state['message_id']))
             except modal.exception.AlreadyExistsError:
-                sandbox = await backend.find(name)
+                sandbox = await backend.find(name, initialize=True, token=self.token(run_id, state['message_id']))
         state.update(sandbox_id=sandbox.object_id, machine_started=time.time(), phase='install')
         self.save(run_id, state)
         self.store.update_run(run_id, sandbox_id=sandbox.object_id)

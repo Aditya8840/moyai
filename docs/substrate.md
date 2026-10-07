@@ -70,4 +70,4 @@ With Substrate settings available in the environment:
 uv run python scripts/substrate_smoke.py
 ```
 
-This uses real Substrate actors to check commands, stdout/stderr, file transfers, root filesystem snapshots, clone process isolation, reconnection, Chromium screenshots, and deletion. It cleans up its actors and tags. It does not send model requests. The GitHub workflow runs this on a disposable cluster and separately builds the full image with the pinned harness dependencies.
+This uses real Substrate actors to check commands, stdout/stderr, file transfers, root filesystem snapshots, clone process isolation, reconnection, Chromium screenshots, and deletion. It cleans up its actors and tags. It does not send model requests to external providers. The GitHub workflow uses the full agent image and additionally runs the actual agent SDK/MCP transport against a local inference fixture, builds a public GitHub project environment, and restores its snapshot into a new sandbox. Set `MOYAI_SMOKE_FULL_IMAGE=1` to include those checks on your installation.

@@ -4,6 +4,8 @@ Never substitutes a fake control plane. All actors and tags created here are
 deleted in finally blocks. No model or third-party account credentials needed.
 """
 import asyncio
+import json
+import os
 from pathlib import Path
 import sys
 from uuid import uuid4
@@ -20,12 +22,45 @@ async def execute(sandbox, code):
     return out
 
 
+async def verify_agent_image(sandbox):
+    """Run the real SDK and MCP bridge with deterministic, local inference."""
+    tests = Path(__file__).resolve().parents[1] / 'tests/test_claude_sdk_transport.py'
+    await sandbox.filesystem.write_text.aio(tests.read_text(), '/opt/validation/tests/test_claude_sdk_transport.py')
+    process = await sandbox.exec.aio('sh', '-ec',
+        'ln -s /opt/workspace-runner /opt/validation/sandbox; '
+        '/opt/hermes-env/bin/python -m pip install pytest; '
+        'PYTHONPATH=/opt/validation:/opt/hermes /opt/hermes-env/bin/python -m pytest -q '
+        '/opt/validation/tests/test_claude_sdk_transport.py -k "new-session or durable-checkpoint"', timeout=240)
+    out, err = await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
+    assert await process.wait.aio() == 0, out + '\n' + err
+    assert '6 passed' in out, out
+    print('PASS real agent SDK, MCP tools, and durable conversation continuation (local inference fixture)', flush=True)
+
+
+async def verify_environment_build(sandbox):
+    recipe = {'repository': 'octocat/Hello-World', 'ref': 'master', 'setup_mode': 'manual',
+              'setup': 'printf prepared > /usr/local/moyai-environment-proof',
+              'startup': '', 'verify': 'test -f README', 'shutdown': ''}
+    await sandbox.filesystem.write_text.aio(json.dumps(recipe), '/tmp/moyai-environment.json')
+    await execute(sandbox, 'import sys; sys.path.insert(0,"/opt/workspace-runner"); import environment_build; environment_build.main("start")')
+    async with asyncio.timeout(240):
+        while True:
+            result = json.loads(await execute(sandbox,
+                'import sys,json; sys.path.insert(0,"/opt/workspace-runner"); import environment_build; print(json.dumps(environment_build.main("status")))'))
+            if result.get('done'):
+                assert result.get('success'), result
+                break
+            await asyncio.sleep(1)
+    assert await sandbox.filesystem.read_bytes.aio('/usr/local/moyai-environment-proof') == b'prepared'
+    print('PASS outbound GitHub access and real environment build supervisor', flush=True)
+
+
 async def main():
     settings = Settings()
     backend = SubstrateProvider(settings)
     actors, tags = [], []
     try:
-        original = await backend.create(name='moyai-smoke-' + uuid4().hex, token='parent-test-capability', timeout=300)
+        original = await backend.create(name='moyai-smoke-' + uuid4().hex, token='parent-test-capability', timeout=900)
         actors.append(original)
         print('PASS create, authentication, resume', flush=True)
         await original.filesystem.write_text.aio('persisted ✓', '/workspace/proof.txt')
@@ -39,7 +74,7 @@ async def main():
         snapshot = await original.snapshot_filesystem.aio(timeout=300)
         tags.append(snapshot.object_id)
         parent_before = await execute(original, 'from pathlib import Path; print(Path("/workspace/counter").read_text())')
-        clone = await backend.create(name='moyai-clone-' + uuid4().hex, snapshot_id=snapshot.object_id, token='child-test-capability', timeout=300)
+        clone = await backend.create(name='moyai-clone-' + uuid4().hex, snapshot_id=snapshot.object_id, token='child-test-capability', timeout=900)
         actors.append(clone)
         assert await clone.filesystem.read_bytes.aio('/usr/local/rootfs-proof') == b'rootfs'
         value = await clone.filesystem.read_bytes.aio('/workspace/counter')
@@ -55,6 +90,16 @@ async def main():
         assert output.strip() == 'Moyai'
         assert (await clone.filesystem.read_bytes.aio('/workspace/browser.png')).startswith(b'\x89PNG')
         print('PASS real Chromium and screenshot artifact', flush=True)
+        if os.environ.get('MOYAI_SMOKE_FULL_IMAGE'):
+            await verify_agent_image(clone)
+            await verify_environment_build(clone)
+            await original.terminate.aio()
+            prepared = await clone.snapshot_filesystem.aio(timeout=300)
+            tags.append(prepared.object_id)
+            from_environment = await backend.create(snapshot_id=prepared.object_id, timeout=120)
+            actors.append(from_environment)
+            assert await from_environment.filesystem.read_bytes.aio('/usr/local/moyai-environment-proof') == b'prepared'
+            print('PASS new sandbox from prepared environment snapshot', flush=True)
         await clone.terminate.aio()
         from modal.exception import NotFoundError
         try:

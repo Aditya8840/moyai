@@ -43,12 +43,12 @@ jobs:
         run: hack/install-ate-kind.sh --deploy-ate-system --credential-provider='{"enabled":false}' --deploy-demo-sandbox
       - name: Build Moyai runtime image
         run: |
-          docker build -f Dockerfile.sandbox --target transport -t localhost:5001/moyai-sandbox:test .
+          docker build -f Dockerfile.sandbox -t localhost:5001/moyai-sandbox:test .
           docker push localhost:5001/moyai-sandbox:test
       - name: Configure template and run live lifecycle tests
+        env:
+          MOYAI_SMOKE_FULL_IMAGE: '1'
         run: uv run python scripts/substrate_ci.py
-      - name: Build full agent image and verify harness imports
-        run: docker build -f Dockerfile.sandbox -t moyai-agent:test .
       - name: Cluster diagnostics
         if: failure()
         run: |

@@ -326,7 +326,8 @@ class Environments:
             self.update(identity, sandbox_id='', **fields)
             return
         try:
-            sandbox = await backend.find(name)
+            sandbox = await backend.find(name, initialize=build['phase'] == 'queued',
+                                         timeout=3600, apt_packages=recipe['apt_packages'])
         except modal.exception.NotFoundError:
             if build['phase'] != 'queued':
                 self.update(identity, phase='failed', error='The build sandbox expired. Start a new build; the previous environment is unchanged.', finished_at=now())

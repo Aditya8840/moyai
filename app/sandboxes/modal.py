@@ -17,7 +17,7 @@ class ModalProvider:
     async def get(self, identity):
         return await modal.Sandbox.from_id.aio(identity, client=await self.client())
 
-    async def find(self, name):
+    async def find(self, name, *, initialize=False, token='', timeout=86400, apt_packages=()):
         return await modal.Sandbox.from_name.aio(self.settings.modal_app_name, name, client=await self.client())
 
     async def create(self, *, name=None, snapshot_id='', token='', timeout=86400, memory=4096, apt_packages=()):

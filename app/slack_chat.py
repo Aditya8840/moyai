@@ -149,6 +149,13 @@ class SlackChat:
         for index, chunk in enumerate(split_reply(slack_text(self.scrub(text)))):
             self.queue(conn, run_id, f"input:{message['id']}:revision:{message['revision']}:{index}", 'input_update', chunk + '\n' + self.link(run_id))
 
+    def cloud_missing(self, missing, provider):
+        if provider == self.settings.sandbox_provider:
+            return missing
+        # The webhook reports readiness for the current default. Follow-ups
+        # belong to their session's original provider, even after a switch.
+        return [key for key in missing if not key.startswith(('MODAL_', 'SUBSTRATE_'))] + self.settings.missing_sandbox(provider)
+
     def accept(self, *, team, event_id, channel, ts, root, user, prompt, mentioned, missing_cloud, direct_message=False, file_ids=()):
         """Reserve the physical Slack message and queue its turn atomically."""
         original_prompt, selected_model, model_error = prompt, None, ''
@@ -196,11 +203,12 @@ class SlackChat:
                     return None
                 # Explicit mention may reconnect a pre-upgrade thread. Old
                 # messages are never backfilled into Slack on deployment.
-                old = conn.execute('SELECT r.id FROM slack_events s JOIN runs r ON r.id=s.run_id WHERE s.channel=? AND s.thread_ts=? AND r.chat_enabled=1 ORDER BY s.created_at DESC LIMIT 1',
+                old = conn.execute('SELECT r.id,r.sandbox_provider FROM slack_events s JOIN runs r ON r.id=s.run_id WHERE s.channel=? AND s.thread_ts=? AND r.chat_enabled=1 ORDER BY s.created_at DESC LIMIT 1',
                                    (channel, root)).fetchone()
                 if command and command not in {'model', 'harness'} and not old:
                     return None
-                if missing_cloud and not command:
+                readiness = self.cloud_missing(missing_cloud, old['sandbox_provider']) if old else missing_cloud
+                if readiness and not command:
                     raise ValueError('Cloud sessions are not configured.')
                 if old:
                     run_id = old['id']
@@ -243,7 +251,7 @@ class SlackChat:
                 conn.execute('UPDATE slack_threads SET last_message_id=(SELECT COALESCE(MAX(id),0) FROM messages WHERE run_id=?) WHERE run_id=?', (run_id, run_id))
                 self.collect_progress_in(conn, binding, False)
             message_id, submit = None, False
-            current = conn.execute('SELECT harness,model FROM runs WHERE id=?', (run_id,)).fetchone()
+            current = conn.execute('SELECT harness,model,sandbox_provider FROM runs WHERE id=?', (run_id,)).fetchone()
             if selected_harness and current['harness'] != selected_harness:
                 command = 'harness'
                 harness_error = 'Harness is fixed for this session. Start a new thread to choose another harness.'
@@ -283,7 +291,7 @@ class SlackChat:
                     response += '\nThis conversation also appears in Moyai, where signed-in BerriAI teammates can view it.'
                 self.queue(conn, run_id, 'command:' + event_id, 'control', response + '\n' + self.link(run_id))
             else:
-                if missing_cloud:
+                if self.cloud_missing(missing_cloud, current['sandbox_provider']):
                     raise ValueError('Cloud sessions are not configured.')
                 try:
                     content = prompt if fresh else f'Slack reply from {user}:\n{prompt}'

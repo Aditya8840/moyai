@@ -8,6 +8,7 @@ import time
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from grpclib.client import Channel, UnaryUnaryMethod
 from grpclib.const import Status
@@ -16,7 +17,9 @@ import httpx
 from modal.exception import NotFoundError, AlreadyExistsError
 
 from .proto import ateapi_pb2 as pb
-from sandbox.substrate_protocol import VERSION, canonical, private_key
+from sandbox.substrate_protocol import VERSION, MAX_BODY, CHUNK, canonical, private_key
+
+_ACTOR_LOCKS = WeakValueDictionary()
 
 
 class operation:
@@ -41,6 +44,8 @@ class SubstrateProvider:
     async def rpc(self, method, data, timeout=120):
         url = urlsplit(self.settings.substrate_api_url)
         tls = ssl.create_default_context(cadata=self.settings.substrate_ca_cert or None) if url.scheme == 'https' else False
+        if tls:
+            tls.set_alpn_protocols(['h2'])
         channel = Channel(url.hostname, url.port or (443 if tls else 80), ssl=tls)
         descriptor = pb.DESCRIPTOR.services_by_name['Control'].methods_by_name[method]
         request_type = getattr(pb, descriptor.input_type.name)
@@ -70,9 +75,31 @@ class SubstrateProvider:
             raise NotFoundError('Substrate actor was replaced')
         return Sandbox(self, actor)
 
-    async def find(self, name):
+    async def find(self, name, *, initialize=False, token='', timeout=86400, apt_packages=()):
         actor = await self.rpc('GetActor', {'actor': ref(self.settings.substrate_atespace, name)})
-        return Sandbox(self, actor)
+        sandbox = Sandbox(self, actor, token=token)
+        if initialize:
+            await self.initialize(sandbox, timeout=timeout, apt_packages=apt_packages)
+        return sandbox
+
+    async def initialize(self, sandbox, *, timeout, apt_packages):
+        # Safe to repeat after the control plane accepted CreateActor but the
+        # provisioner lost its response. Finding an actor for cleanup is read-only.
+        try:
+            await self.rpc('CreateActorEgressPolicy', {
+                'actor': sandbox.ref, 'egress_policy': {'metadata': ref(sandbox.ref['atespace'], 'default'), 'rules': [
+                    {'http': {'hostnames': self.settings.substrate_egress_hosts.split(',')}},
+                    {'tls_passthrough': {'hostnames': self.settings.substrate_egress_hosts.split(',')}}]}})
+        except AlreadyExistsError:
+            pass
+        await self.rpc('ResumeActor', {'actor': sandbox.ref})
+        await sandbox.request('/activate', {'expires_at': time.time() + timeout})
+        if apt_packages:
+            process = await sandbox.exec.aio('sh', '-c', 'apt-get update && apt-get install -y --no-install-recommends "$@"',
+                                             'moyai-apt', *apt_packages, timeout=900)
+            await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
+            if await process.wait.aio():
+                raise RuntimeError('Substrate environment package installation failed')
 
     async def create(self, *, name=None, snapshot_id='', token='', timeout=86400, memory=4096, apt_packages=()):
         space, template = self.settings.substrate_atespace, self.settings.substrate_template
@@ -82,30 +109,19 @@ class SubstrateProvider:
             if kind != 'substrate' or tag_space != space:
                 raise ValueError('Snapshot belongs to another sandbox provider or Substrate atespace')
             actor_data.update(actor_template=ref(space, template), source_tag=ref(space, tag))
+        owned = True
         try:
             actor = await self.rpc('CreateActor', {'actor': actor_data})
         except AlreadyExistsError:
+            owned = False
             actor = await self.rpc('GetActor', {'actor': actor_data['metadata']})
         sandbox = Sandbox(self, actor, token=token)
         try:
-            try:
-                await self.rpc('CreateActorEgressPolicy', {
-                    'actor': sandbox.ref, 'egress_policy': {'metadata': ref(space, 'default'), 'rules': [
-                        {'http': {'hostnames': self.settings.substrate_egress_hosts.split(',')}},
-                        {'tls_passthrough': {'hostnames': self.settings.substrate_egress_hosts.split(',')}}]}})
-            except AlreadyExistsError:
-                pass
-            await self.rpc('ResumeActor', {'actor': sandbox.ref})
-            await sandbox.request('/activate', {'expires_at': time.time() + timeout})
-            if apt_packages:
-                process = await sandbox.exec.aio('sh', '-c', 'apt-get update && apt-get install -y --no-install-recommends "$@"',
-                                                  'moyai-apt', *apt_packages, timeout=900)
-                await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
-                if await process.wait.aio():
-                    raise RuntimeError('Substrate environment package installation failed')
+            await self.initialize(sandbox, timeout=timeout, apt_packages=apt_packages)
             return sandbox
         except BaseException:
-            await asyncio.shield(sandbox.terminate.aio())
+            if owned:
+                await asyncio.shield(sandbox.terminate.aio())
             raise
 
     async def check(self):
@@ -134,10 +150,17 @@ class Sandbox:
         self.provider, self.actor = provider, actor
         self.ref = ref(actor.metadata.atespace, actor.metadata.name)
         self.object_id = ':'.join(('substrate', actor.metadata.atespace, actor.metadata.name, actor.metadata.uid))
+        self.lock = _ACTOR_LOCKS.setdefault(self.object_id, asyncio.Lock())
         self.env = {'WORKSPACE_RUN_TOKEN': token} if token else {}
         self.filesystem = Filesystem(self)
 
     async def request(self, path, data):
+        # Stream readers and Computer can use different handles for one actor.
+        # Hold their requests while a checkpoint freezes the guest processes.
+        async with self.lock:
+            return await self._request(path, data)
+
+    async def _request(self, path, data):
         body = json.dumps(data, separators=(',', ':')).encode()
         stamp, nonce = str(int(time.time())), uuid4().hex
         signature = private_key(self.provider.settings.substrate_signing_key).sign(
@@ -148,12 +171,17 @@ class Sandbox:
         settings = self.provider.settings
         verify = ssl.create_default_context(cadata=settings.substrate_ca_cert or None)
         async with httpx.AsyncClient(timeout=60, verify=verify, follow_redirects=False) as client:
-            response = await client.post(settings.substrate_router_url.rstrip('/') + path, content=body, headers=headers)
-            if response.status_code == 404:
-                raise FileNotFoundError('Sandbox file or execution not found')
-            if response.status_code != 200:
-                raise RuntimeError(f'Substrate sandbox returned HTTP {response.status_code}')
-            return response.json()
+            async with client.stream('POST', settings.substrate_router_url.rstrip('/') + path, content=body, headers=headers) as response:
+                if response.status_code == 404:
+                    raise FileNotFoundError('Sandbox file or execution not found')
+                if response.status_code != 200:
+                    raise RuntimeError(f'Substrate sandbox returned HTTP {response.status_code}')
+                result = bytearray()
+                async for chunk in response.aiter_bytes():
+                    result.extend(chunk)
+                    if len(result) > MAX_BODY:
+                        raise ValueError('Sandbox response exceeds 2 MiB')
+                return json.loads(result)
 
     @operation
     async def poll(self):
@@ -181,14 +209,15 @@ class Sandbox:
     @operation
     async def snapshot_filesystem(self, timeout=180, ttl=None):
         tag = 'moyai-' + uuid4().hex
-        await self.request('/freeze', {})
-        try:
-            await self.provider.rpc('SuspendActor', {'actor': self.ref}, timeout=timeout)
-            await self.provider.rpc('CreateTag', {'tag': {'metadata': ref(self.ref['atespace'], tag),
-                                                        'scope': pb.TAG_SCOPE_ATESPACE, 'source_actor': self.ref}}, timeout=timeout)
-        finally:
-            await self.provider.rpc('ResumeActor', {'actor': self.ref}, timeout=timeout)
-            await self.request('/activate', {})
+        async with self.lock:
+            try:
+                await self._request('/freeze', {})
+                await self.provider.rpc('SuspendActor', {'actor': self.ref}, timeout=timeout)
+                await self.provider.rpc('CreateTag', {'tag': {'metadata': ref(self.ref['atespace'], tag),
+                                                            'scope': pb.TAG_SCOPE_ATESPACE, 'source_actor': self.ref}}, timeout=timeout)
+            finally:
+                await self.provider.rpc('ResumeActor', {'actor': self.ref}, timeout=timeout)
+                await self._request('/activate', {})
         return SimpleNamespace(object_id=':'.join(('substrate', self.ref['atespace'], self.actor.actor_template.name, tag)))
 
 
@@ -198,7 +227,10 @@ class Filesystem:
 
     @operation
     async def write_text(self, text, path):
-        await self.sandbox.request('/file/write', {'path': path, 'data': base64.b64encode(text.encode()).decode()})
+        data = text.encode()
+        for offset in range(0, max(1, len(data)), CHUNK):
+            await self.sandbox.request('/file/write', {'path': path, 'offset': offset,
+                'data': base64.b64encode(data[offset:offset + CHUNK]).decode()})
 
     @operation
     async def stat(self, path):
