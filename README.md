@@ -1,48 +1,45 @@
 # Moyai Devin
 
-An internal Devin-style agent workspace. Assign a task from the browser or by mentioning @Moyai in Slack, and a [Hermes Agent](https://github.com/NousResearch/hermes-agent) works on it in an isolated Modal sandbox with a terminal, Chromium, and access to Linear, Slack, Notion, and GitHub
+Moyai Devin is a self-hosted AI coding agent for background engineering work. Ask it to fix a bug or build a feature from your browser or Slack. The agent works in an isolated cloud workspace, where it can edit code, run tests, and open a pull request for your review. Connect GitHub, Linear, Slack, or Notion to give it access to your code and team context. You can check its progress and send corrections while it works, or resume the task with your saved conversation and files.
 
-Hosted at [moyai-devin-litellm.onrender.com](https://moyai-devin-litellm.onrender.com) (sign in with your @berri.ai Google account)
-
-## Architecture
-
-```mermaid
-flowchart LR
-  S[Slack mention] --> C[FastAPI control plane]
-  U[Browser workspace] --> C
-  C --> D[(SQLite: sessions, events, approvals)]
-  C --> M[Modal sandbox per session]
-  M --> H[Hermes Agent + terminal + Chromium]
-  H --> B[Run-scoped model and tool broker]
-  B --> L[LiteLLM gateway]
-  B --> A[Linear / Slack / Notion / GitHub]
-```
-
-The control plane (`app/`) runs as a single process on Render. It serves the UI, stores history in SQLite, keeps app credentials encrypted, and brokers every model and tool call. The agent (`sandbox/`) runs on Modal and only gets a short-lived token scoped to its run, never the raw provider or Modal credentials. External writes need approval in the UI
+<!-- Add the recorded local-demo GIF here once uploaded to the repository.
+Suggested path: docs/assets/getting-started.gif
+Caption: Local demo: submit a task, watch its activity, and view the saved result.
+Agent responses in this preview are simulated. -->
 
 ## Getting started
 
-Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/)
+Try the local demo without API keys or cloud accounts. You'll need **Git**, **Python 3.12+**, and **[uv](https://docs.astral.sh/uv/getting-started/installation/)**.
 
-```sh
-cp .env.example .env
-uv sync --frozen
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8787 --workers 1
-```
+1. **Clone the repository.**
 
-Open http://127.0.0.1:8787. With no accounts configured you can run demo tasks locally. Use exactly one server process
+   ```sh
+   git clone https://github.com/BerriAI/moyai-devin.git
+   cd moyai-devin
+   ```
 
-To run real agents, set these in `.env`. `PUBLIC_URL` must be a reachable HTTPS address because the sandbox calls back to it
+2. **Install dependencies.**
 
-```dotenv
-PUBLIC_URL=https://your-workspace.example.com
-MODAL_TOKEN_ID=
-MODAL_TOKEN_SECRET=
-LITELLM_API_BASE=https://your-gateway.example.com/v1
-LITELLM_API_KEY=
-AGENT_MODEL=
-```
+   ```sh
+   cp .env.example .env
+   uv sync --frozen
+   ```
 
-See `.env.example` for every option, `render.yaml` for the production deploy, and `docs/` for deeper design notes
+3. **Start Moyai.**
 
-Run tests with `uv run pytest`
+   ```sh
+   uv run uvicorn app.main:app --host 127.0.0.1 --port 8787 --workers 1
+   ```
+
+4. **Send your first task.** Open [localhost:8787](http://127.0.0.1:8787), type a message, and click **Start session**. Open **Activity** to follow the demo, then send a follow-up in the same chat.
+
+To run real tasks, **[set up cloud execution](docs/deployment.md#enable-cloud-runs)** with Modal and a model gateway, then **[connect your apps](docs/integrations.md)**. In the local demo, you receive simulated responses without model calls or repository changes.
+
+BerriAI teammates can [open the hosted workspace](https://moyai-devin-litellm.onrender.com) and sign in with an `@berri.ai` Google account.
+
+## More information
+
+- [All documentation](docs/README.md)
+- [Using Moyai](docs/usage.md) · [Slack](docs/slack.md) · [Skills](docs/skills.md) · [Automations](docs/automations.md)
+- [Deployment](docs/deployment.md) · [App connections](docs/integrations.md) · [Security and limitations](docs/security-and-scope.md)
+- [Architecture](docs/architecture.md) · [Testing](docs/verification.md) · [Costs](docs/costs.md) · [Tracing](docs/observability.md)
