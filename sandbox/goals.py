@@ -11,9 +11,9 @@ import time
 import uuid
 
 try:
-    from .activity import result_status
+    from .activity import result_status, public_text
 except ImportError:
-    from activity import result_status
+    from activity import result_status, public_text
 
 HELP = ('Use /goal <objective> to keep working until verified completion. '
         'Commands: /goal status, /goal pause, /goal resume, /goal clear. '
@@ -27,8 +27,9 @@ def command(text):
 
 
 class GoalLoop:
-    def __init__(self, path, run_id, *, restore=True, continuation=False, clock=time.time):
+    def __init__(self, path, run_id, *, restore=True, continuation=False, clock=time.time, on_change=lambda state: None):
         self.path, self.run_id, self.clock = path, run_id, clock
+        self.on_change = on_change
         self.lock = threading.RLock()
         self.state = None
         self.control_reply = None
@@ -53,7 +54,26 @@ class GoalLoop:
 
     def pause(self, reason, status='paused'):
         if self.state:
+            self.stop_timer()
             self.state.update(status=status, reason=reason)
+            self.publish()
+
+    def stop_timer(self):
+        if self.active:
+            self.state['elapsed_seconds'] = self.state.get('elapsed_seconds', 0) + max(
+                0, self.clock() - self.state.get('active_since', self.state['started']))
+            self.state['active_since'] = None
+
+    def publish(self):
+        """Emit only public lifecycle fields, never evidence or private guidance."""
+        with self.lock:
+            s = self.state
+            self.on_change(None if not s else {
+                'id': s['id'], 'objective': public_text(s['objective'], 16000),
+                'status': s['status'], 'reason': public_text(s.get('reason', ''), 500),
+                'elapsed_seconds': s.get('elapsed_seconds', 0),
+                'active_since': s.get('active_since', s['started']) if self.active else None,
+            })
 
     def status(self):
         if not self.state:
@@ -78,18 +98,22 @@ class GoalLoop:
                 reply = self.status()
             elif arg == 'clear':
                 self.state = None
+                self.publish()
                 reply = 'Goal cleared. Automatic continuation is off.'
             elif arg == 'resume':
                 if not self.state or self.state['status'] == 'completed':
                     reply = 'No unfinished goal to resume. ' + HELP
                 else:
+                    self.stop_timer()
                     self.state.update(status='active', reason='', continues=0, empty=0,
-                                      repeated=0, last_digest='', started=self.clock())
+                                      repeated=0, last_digest='', started=self.clock(), active_since=self.clock())
+                    self.publish()
                     return None
             else:
                 self.state = dict(id=uuid.uuid4().hex, objective=arg, status='active',
                                   reason='', continues=0, empty=0, repeated=0,
-                                  last_digest='', started=self.clock(), evidence={})
+                                  last_digest='', started=self.clock(), active_since=self.clock(), elapsed_seconds=0, evidence={})
+                self.publish()
                 return None
             self.control_reply = reply
             return reply
@@ -162,7 +186,9 @@ class GoalLoop:
             claims = re.findall(r'^\[goal:evidence:([^\]\n]+)\] ([^\n]+)$', text, re.M)
             if text.endswith(complete) and claims and all(
                     call_id in s['evidence'] and explanation.strip() for call_id, explanation in claims):
+                self.stop_timer()
                 s.update(status='completed', reason='Completion reported with successful tool evidence.')
+                self.publish()
                 result['final_response'] = text.removesuffix(complete).strip()
                 return None
             if text.endswith(blocked) and text.removesuffix(blocked).strip():

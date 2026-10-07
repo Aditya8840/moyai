@@ -53,7 +53,7 @@ test('recovers after repeated deployment errors, resumes the cursor, and preserv
   b.sources[2].onopen();
   b.sources[2].onmessage({data: JSON.stringify({id: 11, kind: 'tool'})});
   b.sources[2].onmessage({data: JSON.stringify({id: 12, kind: 'tool'})});
-  assert.deepEqual(b.rendered, [11, 12]);
+  assert.deepEqual(b.rendered, [], 'raw events no longer append an unbounded second timeline');
   assert.deepEqual(b.live.filter(update=>update.event).map(update=>update.event.id), [11, 12]);
   assert.equal(b.live.filter(update=>update.disconnected).length, 2);
   assert.deepEqual(b.refreshes, ['chat-a']);

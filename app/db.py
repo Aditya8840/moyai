@@ -569,6 +569,12 @@ class Store:
             row["data"] = json.loads(row["data"])
         return rows
 
+    def goal(self, run_id: str):
+        rows = self.rows("SELECT data FROM events WHERE run_id=? AND kind='status' "
+                         "AND json_extract(data, '$.goal_version')=1 AND json_extract(data, '$.phase')='goal' "
+                         "ORDER BY id DESC LIMIT 1", (run_id,))
+        return json.loads(rows[0]['data']).get('goal') if rows else None
+
     def approvals(self, run_id: str):
         rows = self.rows("SELECT * FROM approvals WHERE run_id=? ORDER BY created_at", (run_id,))
         for row in rows:

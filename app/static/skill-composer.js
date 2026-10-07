@@ -41,6 +41,16 @@ function bindInlineSkillPicker(input, form) {
   popup.className = 'skill-inline';
   popup.hidden = true;
   form.append(popup);
+  const goalHint = document.createElement('div');
+  goalHint.className = 'goal-draft';
+  goalHint.setAttribute('role', 'status');
+  form.prepend(goalHint);
+  function updateGoalHint() {
+    const text = globalThis.MoyaiGoal?.draft(input.value);
+    goalHint.hidden = !text;
+    goalHint.textContent = text || '';
+  }
+  updateGoalHint();
   const listId = input.id + '-skill-options';
   input.setAttribute('aria-autocomplete', 'list');
   input.setAttribute('aria-controls', listId);
@@ -93,6 +103,7 @@ function bindInlineSkillPicker(input, form) {
 
   function refresh() {
     if (destroyed) return;
+    updateGoalHint();
     const query = slashSkillQuery(input.value, input.selectionStart, input.selectionEnd);
     if (query && dismissed !== signature() && !loading && !error && (!skills || Date.now() - loadedAt > 30000)) {
       loading = true;
@@ -138,7 +149,7 @@ function bindInlineSkillPicker(input, form) {
   return {
     destroy() {
       destroyed = true;
-      close(); popup.remove();
+      close(); popup.remove(); goalHint.remove();
       window.removeEventListener('resize', position);
       window.visualViewport?.removeEventListener('resize', position);
       window.visualViewport?.removeEventListener('scroll', position);
