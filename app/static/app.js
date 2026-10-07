@@ -197,10 +197,20 @@ async function submitTask(e){
   e.preventDefault();if(state.sending.has('new'))return;
   const files=state.attachments;let attachment_ids;
   try{attachment_ids=files.ids();}catch(error){toast(error.message);return;}
-  const button=$('#task-form button[type="submit"]');button.disabled=true;state.sending.add('new');files.lock(true);
+  const form=$('#task-form'),input=$('#prompt'),submittedPrompt=input.value;
+  const button=form.querySelector('button[type="submit"]');button.disabled=true;state.sending.add('new');files.lock(true);
   const body={prompt:$('#prompt').value.trim()||(attachment_ids.length?'Please respond to the attached files and audio transcripts.':''),repo_url:$('#repo').value,environment_id:$('#project-environment').value,mode:$('#mode').value,model:$('#new-model').value,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value),attachment_ids};
   const signature=JSON.stringify(body);if(state.pendingNew?.signature!==signature)state.pendingNew={signature,client_id:crypto.randomUUID()};
-  try{const run=await api('/api/runs',{method:'POST',body:JSON.stringify({...body,client_id:state.pendingNew.client_id})});files.clear(attachment_ids);state.newDraft={};state.pendingNew=null;await refreshRuns();await openRun(run.id);}
+  try{
+    const run=await api('/api/runs',{method:'POST',body:JSON.stringify({...body,client_id:state.pendingNew.client_id})});
+    // Clear the submitted DOM value too: removing a focused textarea fires a
+    // change event, which would otherwise save the old prompt back into newDraft.
+    // Keep text edited while the request was in flight, and keep drafts on failure.
+    if(input.value===submittedPrompt){input.value='';autoSize(input);}
+    if(state.newDraft.prompt===submittedPrompt)state.newDraft={};
+    files.clear(attachment_ids);state.pendingNew=null;
+    await refreshRuns();await openRun(run.id);
+  }
   catch(error){toast(error.message);}finally{state.sending.delete('new');files.lock(false);if(button.isConnected)button.disabled=false;}
 }
 async function openRun(id){
@@ -350,7 +360,7 @@ function updateChat(run,initial=false){
   if(box.dataset.messages!==signature){
     box.dataset.messages=signature;
     const activitySlots=new Map([...box.querySelectorAll('[data-activity-slot]')].map(slot=>[slot.dataset.activitySlot,slot]));
-    box.innerHTML=`<div class="conversation-inner">${transcript.map((m,index)=>{const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(transcript[index-1]?.status)?transcript[index-1].status:null;return `<article class="chat-message ${m.role==='user'?'user':'assistant'} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?(m.user_id&&m.user_id===state.userId?'You':esc(m.user_name||'Earlier message')):'<img src="/static/favicon.svg?v=agent-2" alt="">Moyai Devin'}<small>${m.role==='user'?(m.steering_parent_id?'Steering':!['completed','queued'].includes(m.status)?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.display_content??m.content):renderMarkdown(m.content)}</div>${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">${globalThis.MoyaiIcon?.('copy',16)||'Copy'}</button>`:''}</article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`;}).join('')}<div id="credential-requests"></div></div>`;
+    box.innerHTML=`<div class="conversation-inner">${transcript.map((m,index)=>{const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(transcript[index-1]?.status)?transcript[index-1].status:null;return `<article class="chat-message ${m.role==='user'?'user':'assistant'} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?esc(m.user_name||'Earlier message'):'<img src="/static/favicon.svg?v=agent-2" alt="">Moyai Devin'}<small>${m.role==='user'?(m.steering_parent_id?'Steering':!['completed','queued'].includes(m.status)?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.display_content??m.content):renderMarkdown(m.content)}</div>${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">${globalThis.MoyaiIcon?.('copy',16)||'Copy'}</button>`:''}</article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`;}).join('')}<div id="credential-requests"></div></div>`;
     box.querySelectorAll('[data-activity-slot]').forEach(slot=>{const previous=activitySlots.get(slot.dataset.activitySlot);if(previous)slot.replaceWith(previous);});
     MoyaiActivity.sync(box,run,{markdown:renderMarkdown,copy:copyText});
     box.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=()=>showAttachment(run.messages.flatMap(message=>message.attachments||[]).find(file=>file.id===button.dataset.attachment)));
