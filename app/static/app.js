@@ -58,10 +58,39 @@ function syncSessionTitle(run){
   const heading=$('#page-title');if(heading){heading.textContent=sessionTitle(run);heading.title=sessionTitle(run);}
 }
 function syncRunSummary(run){
+  if(state.selected===run.id&&state.chatRun?.id===run.id&&!document.hidden)markSessionRead(run);
   const item=state.runs.flatMap(parent=>[parent,...(parent.children||[])]).find(item=>item.id===run.id);
   if(item)for(const key of ['agent_label','display_title','prompt','status','updated_at']){if(Object.hasOwn(run,key))item[key]=run[key];}
   syncSessionTitle(item?{...run,...item}:run);
   renderSidebar();
+}
+// Read markers are local to this browser and scoped to the signed-in user.
+// A newer completion timestamp makes the circle reappear for follow-up work.
+function sessionReadKey(run){return `moyai-session-read:${state.userId||'local'}:${run.id}`;}
+function sessionCompletion(run){return ['idle','completed'].includes(run.status)?String(run.updated_at||run.created_at||run.status):'';}
+function sessionReadMarker(run){
+  const key=sessionReadKey(run);state.sessionRead??=new Map();
+  if(!state.sessionRead.has(key)){
+    let marker='';try{marker=localStorage.getItem(key)||'';}catch{}
+    state.sessionRead.set(key,marker);
+  }
+  return state.sessionRead.get(key);
+}
+function markSessionRead(run){
+  const marker=sessionCompletion(run);if(!marker||sessionReadMarker(run)===marker)return;
+  const key=sessionReadKey(run);state.sessionRead.set(key,marker);
+  try{localStorage.setItem(key,marker);}catch{}
+  state.sessionReadFade??=new Map();state.sessionReadFade.set(key,Date.now()+350);
+  state.sidebarSignature=null;
+}
+function sessionIndicator(run){
+  const label=sessionStatus(run);
+  if(['running','queued','provisioning','reconnecting','saving','waiting_children','stopping'].includes(run.status))return `<span class="session-indicator" title="${esc(label)}" aria-hidden="true"><span class="session-spinner"></span></span>`;
+  const marker=sessionCompletion(run),unread=marker&&sessionReadMarker(run)!==marker;
+  const remaining=(state.sessionReadFade?.get(sessionReadKey(run))||0)-Date.now();
+  if(unread||marker&&remaining>0)return `<span class="session-indicator" title="${unread?'Unread completion':'Read'}" aria-hidden="true"><span class="session-completion${unread?'':' is-read'}"${unread?'':` style="animation-delay:-${350-remaining}ms"`}></span></span>`;
+  if(!marker&&['failed','interrupted','waiting_credential','awaiting_approval'].includes(run.status))return `<span class="session-indicator session-attention ${esc(run.status)}" title="${esc(label)}" aria-hidden="true">!</span>`;
+  return '<span class="session-indicator" aria-hidden="true"></span>';
 }
 function modelName(model=state.config.model){return (state.config.models||[]).find(m=>m.id===model)?.name||model||'Hermes Agent';}
 function modelPicker(id,selected,disabled=false){return `<label class="model-picker"><span class="sr-only">Model for next message</span><select id="${id}" aria-label="Model for next message" ${disabled?'disabled':''}>${(state.config.models||[]).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}</select></label>`;}
@@ -80,10 +109,9 @@ function sidebarGroups(runs,search){
 function sidebarRow(run,child=false){
   const selected=state.selected===run.id,title=sessionTitle(run),label=sessionStatus(run),repo=sessionRepository(run);
   const date=run.updated_at||run.created_at,time=date&&Number.isFinite(Date.parse(date))?relative(date):'';
-  const active=['running','queued','provisioning','reconnecting','saving','waiting_children','stopping'].includes(run.status);
-  const indicator=active?'<span class="session-spinner" aria-hidden="true"></span>':`<span class="session-dot ${esc(run.status||'unknown')}" aria-hidden="true"></span>`;
+  const unread=sessionCompletion(run)&&sessionReadMarker(run)!==sessionCompletion(run);
   const context=[child?'Agent':run.side_chat_of?'Side chat':'',run.mode==='demo'?'Demo':'',repo].filter(Boolean).join(' · ');
-  return `<button class="session-link ${child?'child-session ':''}${selected?'selected':''}" data-run="${esc(run.id)}" ${child?'':`draggable="true" data-drag-session="${esc(run.id)}"`} ${selected?'aria-current="page"':''} aria-label="${esc([title,label,context,time].filter(Boolean).join(' · '))}" title="${esc(title)}">${child?'<span class="child-mark" aria-hidden="true">·</span>':''}<span class="session-link-body"><span class="session-link-title">${esc(title)}</span><span class="session-link-meta"><span class="session-state${active?' is-active':''}">${indicator}${esc(label)}</span>${time?`<span class="session-updated" data-session-time="${esc(run.id)}" title="${esc('Updated '+new Date(date).toLocaleString())}">${esc(time)}</span>`:''}</span>${context?`<span class="session-link-context" title="${esc(context)}">${esc(context)}</span>`:''}</span></button>`;
+  return `<button class="session-link ${child?'child-session ':''}${selected?'selected':''}" data-run="${esc(run.id)}" ${child?'':`draggable="true" data-drag-session="${esc(run.id)}"`} ${selected?'aria-current="page"':''} aria-label="${esc([title,label,unread?'Unread completion':'',context,time].filter(Boolean).join(' · '))}" title="${esc(title)}">${child?'<span class="child-mark" aria-hidden="true">·</span>':''}<span class="session-link-body"><span class="session-title-row"><span class="session-link-title">${esc(title)}</span>${sessionIndicator(run)}</span><span class="session-link-meta">${time?`<span class="session-updated" data-session-time="${esc(run.id)}" title="${esc('Updated '+new Date(date).toLocaleString())}">${esc(time)}</span>`:''}</span>${context?`<span class="session-link-context" title="${esc(context)}">${esc(context)}</span>`:''}</span></button>`;
 }
 function sidebarSections(runs,folders,search){
   const ids=new Set(folders.map(folder=>folder.id));
@@ -214,7 +242,7 @@ async function submitTask(e){
   catch(error){toast(error.message);}finally{state.sending.delete('new');files.lock(false);if(button.isConnected)button.disabled=false;}
 }
 async function openRun(id){
-  stopStream();const version=++state.pageVersion;state.selected=id;const run=await api(`/api/runs/${id}`);if(version!==state.pageVersion)return;state.activeParentId=run.parent_run_id||'';if(run.parent_run_id||run.agents?.groups?.length)state.expandedParents.add(run.parent_run_id||id);if(!state.runs.some(r=>r.id===(run.parent_run_id||id)))await refreshRuns();if(version!==state.pageVersion)return;state.view='tasks';setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));history.replaceState(null,'','#run='+id);
+  stopStream();const version=++state.pageVersion;state.selected=id;const run=await api(`/api/runs/${id}`);if(version!==state.pageVersion)return;state.activeParentId=run.parent_run_id||'';if(run.parent_run_id||run.agents?.groups?.length)state.expandedParents.add(run.parent_run_id||id);if(!state.runs.some(r=>r.id===(run.parent_run_id||id)))await refreshRuns();if(version!==state.pageVersion)return;if(!document.hidden)markSessionRead(run);state.view='tasks';setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));history.replaceState(null,'','#run='+id);
   if(run.chat_enabled){renderChat(run);return;}
   $('#content').innerHTML=`<button class="back-button" id="back">‹ All tasks</button><div class="page-heading"><div><div class="eyebrow">${run.mode==='demo'?'DEMO WORKSPACE':'CLOUD WORKSPACE'}</div><h1>Task activity</h1></div><div class="toolbar">${terminal.has(run.status) && !run.active?'<button id="retry" class="small">Run again</button>':'<button id="cancel" class="small danger">Stop task</button>'}</div></div>
   <div class="task-layout"><section class="task-main"><div class="task-intro"><span class="badge">${run.mode==='demo'?'Demo':'Hermes Agent'}</span><p class="prompt">${esc(run.prompt)}</p></div><div class="task-tabs"><span>Activity</span></div><div class="timeline" id="timeline">${run.events.map(eventHTML).join('')}</div><div id="approvals"></div><div id="artifact-area"></div></section><aside class="details"><div class="card"><h3>Run details</h3><div class="detail-row"><span>Status</span><span id="run-status">${statusLabel(run.status)}</span></div><div class="detail-row"><span>Execution</span><span>${run.mode==='demo'?'Simulated':'Modal sandbox'}</span></div><div class="detail-row"><span>Agent</span><span>${run.mode==='demo'?'Not started':'Hermes'}</span></div><div class="detail-row"><span>Repository</span><span>${run.repo_url?esc(run.repo_url.replace('https://github.com/','')):'None'}</span></div><div class="detail-row"><span>Connections</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None'}</span></div>${run.sandbox_id?`<div class="detail-row"><span>Sandbox</span><span>${esc(run.sandbox_id)}</span></div>`:''}</div><div class="note"><strong>${run.mode==='demo'?'A preview of the workflow':'An isolated workspace'}</strong>${run.mode==='demo'?'This run uses simulated events. No model, cloud machine, repository, or connected app is accessed.':'Moyai Devin works inside a dedicated Modal sandbox. Writes to connected apps require your approval.'}</div></aside></div>`;
