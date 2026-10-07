@@ -33,9 +33,21 @@ def test_stale_deployment_model_list_cannot_hide_code_models(tmp_path, monkeypat
     settings = Settings(_env_file=env_file, agent_model='openai/gpt-6-astra')
     assert {'id': 'fireworks_ai/glm-5p3', 'name': 'GLM-5.3'} in settings.model_choices()
     assert settings.resolve_model('glm') == 'fireworks_ai/glm-5p3'
+    assert {'id': 'openai/gpt-6.1-sol', 'name': 'GPT-6.1 Sol'} in settings.model_choices()
+    assert settings.resolve_model('sol') == 'openai/gpt-6.1-sol'
     assert settings.resolve_model() == 'openai/gpt-6-astra'
     with pytest.raises(ValueError):
         settings.resolve_model('unapproved-model')
+
+
+@pytest.mark.parametrize('alias', [
+    'openai/gpt-6.1-sol', 'sol', '6.1-sol', 'openai/6.1-sol', 'gpt-6.1-sol',
+    'GPT-6.1 Sol', 'GPT 6.1 Sol', '  SOL  ',
+])
+def test_sol_aliases_resolve_without_changing_default(alias):
+    settings = Settings(_env_file=None, agent_model='openai/gpt-6-astra')
+    assert settings.resolve_model(alias) == 'openai/gpt-6.1-sol'
+    assert settings.resolve_model() == 'openai/gpt-6-astra'
 
 
 def test_custom_default_stays_selectable_alongside_code_catalog(monkeypatch):
@@ -44,3 +56,5 @@ def test_custom_default_stays_selectable_alongside_code_catalog(monkeypatch):
     assert settings.resolve_model() == 'custom-gateway-model'
     assert settings.model_choices()[0] == {'id': 'custom-gateway-model', 'name': 'custom-gateway-model'}
     assert settings.resolve_model('glm') == 'fireworks_ai/glm-5p3'
+    assert {'id': 'openai/gpt-6.1-sol', 'name': 'GPT-6.1 Sol'} in settings.model_choices()
+    assert settings.resolve_model('sol') == 'openai/gpt-6.1-sol'

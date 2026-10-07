@@ -11,6 +11,7 @@ from test_slack import slack_app, event, signed
 from test_slack_chat import start, send
 
 ASTRA = 'openai/gpt-6-astra'
+SOL = 'openai/gpt-6.1-sol'
 OPUS = 'anthropic/claude-opus-5-5'
 GLM = 'fireworks_ai/glm-5p3'
 
@@ -25,13 +26,17 @@ def test_code_catalog_addition_reaches_picker_and_model_validation(workspace, mo
     assert response.json()['model'] == 'example/new-model'
 
 
-@pytest.mark.parametrize('alias, selected', [('claude/opus-5-5', OPUS), ('glm-5.3', GLM), ('GLM 5.3', GLM), ('Claude Opus 5.5', OPUS), (GLM, GLM)])
+@pytest.mark.parametrize('alias, selected', [
+    ('claude/opus-5-5', OPUS), ('glm-5.3', GLM), ('GLM 5.3', GLM), ('Claude Opus 5.5', OPUS), (GLM, GLM),
+    ('sol', SOL), ('GPT 6.1 Sol', SOL), ('GPT-6.1 Sol', SOL), (SOL, SOL),
+])
 def test_model_selection_is_validated_and_frozen_on_each_queued_message(workspace, monkeypatch, alias, selected):
     app, client = workspace
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
     models = client.get('/api/config').json()['models']
-    assert {x['id'] for x in models} >= {ASTRA, OPUS, GLM}
+    assert {x['id'] for x in models} >= {ASTRA, SOL, OPUS, GLM}
     assert {'id': GLM, 'name': 'GLM-5.3'} in models
+    assert {'id': SOL, 'name': 'GPT-6.1 Sol'} in models
     before = len(app.state.store.rows('SELECT id FROM runs'))
     assert client.post('/api/runs', json={'prompt': 'Invalid model', 'model': 'unapproved'}).status_code == 422
     assert len(app.state.store.rows('SELECT id FROM runs')) == before
@@ -59,6 +64,15 @@ def test_model_selection_is_validated_and_frozen_on_each_queued_message(workspac
     assert next(m for m in reopened.messages(run['id']) if m['role'] == 'assistant')['model'] == ASTRA
 
 
+def test_sol_can_start_a_session(workspace, monkeypatch):
+    app, client = workspace
+    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+    response = client.post('/api/runs', json={'prompt': 'Use GPT-6.1 Sol', 'model': SOL})
+    assert response.status_code == 201
+    assert response.json()['model'] == SOL
+    assert app.state.store.claim_message(response.json()['id'])['model'] == SOL
+
+
 def test_gateway_pins_active_model_despite_future_switch_or_sandbox_override(workspace, monkeypatch):
     app, client = workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
@@ -70,7 +84,7 @@ def test_gateway_pins_active_model_despite_future_switch_or_sandbox_override(wor
         return httpx.Response(200, json={'choices':[{'message':{'content':'Done'}}]})
     actual = httpx.AsyncClient
     monkeypatch.setattr('app.main.httpx.AsyncClient', lambda **kwargs: actual(transport=httpx.MockTransport(upstream), **kwargs))
-    for selected, future in [(ASTRA, OPUS), (OPUS, ASTRA), (GLM, ASTRA), (ASTRA, GLM)]:
+    for selected, future in [(ASTRA, OPUS), (OPUS, ASTRA), (GLM, ASTRA), (ASTRA, GLM), (SOL, ASTRA), (ASTRA, SOL)]:
         run = app.state.store.create_run('Pinned turn', '', 'modal', [], chat_enabled=True, model=selected)
         app.state.store.claim_message(run['id'])
         app.state.store.update_run(run['id'], status='running', token_hash=digest('capability'))
@@ -83,7 +97,10 @@ def test_gateway_pins_active_model_despite_future_switch_or_sandbox_override(wor
         assert captured[-1]['model'] == selected and 'api_base' not in captured[-1]
 
 
-@pytest.mark.parametrize('alias, selected', [('opus', OPUS), ('glm-5.3', GLM), ('glm 5.3', GLM), ('glm', GLM), ('glm-5p3', GLM)])
+@pytest.mark.parametrize('alias, selected', [
+    ('opus', OPUS), ('glm-5.3', GLM), ('glm 5.3', GLM), ('glm', GLM), ('glm-5p3', GLM),
+    ('sol', SOL), ('GPT 6.1 Sol', SOL),
+])
 def test_slack_model_commands_do_not_run_the_agent_and_keep_queued_models(slack_app, alias, selected):
     app, client, run_id = start(slack_app)
     original = app.state.store.messages(run_id)[0]['model']
