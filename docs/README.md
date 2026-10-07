@@ -2,7 +2,7 @@
 
 [Back to Moyai Devin](../README.md)
 
-Start with the [README quickstart](../README.md#getting-started) to try the local demo. To run real tasks, configure [cloud execution](deployment.md#enable-cloud-runs) and the connections you need.
+Start with the [installation walkthrough](getting-started.md) to deploy Moyai on Modal, configure a model, verify a real task, and connect your repository. The [README](../README.md#getting-started) has the shorter version. The local demo is only a simulated UI preview, not a working agent setup.
 
 ## Use Moyai
 
@@ -20,7 +20,7 @@ Start with the [README quickstart](../README.md#getting-started) to try the loca
 
 | Guide | What you'll find |
 | --- | --- |
-| [Local setup](getting-started.md) | Local configuration and single-process requirements |
+| [Install and run a real task](getting-started.md) | Account setup, credentials, Modal deployment, first task, GitHub, and troubleshooting |
 | [Cloud setup and deployment](deployment.md) | Modal sandboxes, Render, Docker, migration, and backups |
 | [Sign-in and user roles](authentication.md) | Google Workspace SSO and administrators |
 | [App connections](integrations.md) | Linear, Slack, Notion, GitHub, and repository rulesets |
