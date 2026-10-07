@@ -26,7 +26,43 @@ function toast(message) { $('#toast').textContent = message; $('#toast').hidden 
 function statusLabel(status) { return `<span class="status ${esc(status)}">${esc(status==='idle'?'Ready':status.replaceAll('_',' '))}</span>`; }
 function relative(date) { const min = Math.max(0, Math.floor((Date.now() - new Date(date)) / 60000)), hours=Math.floor(min/60), days=Math.floor(min/1440), months=Math.floor(days/30); return min < 1 ? 'Just now' : min < 60 ? `${min}m ago` : hours < 24 ? `${hours} hour${hours===1?'':'s'} ago` : days < 30 ? `${days} day${days===1?'':'s'} ago` : months < 2 ? 'last month' : months < 12 ? `${months} months ago` : new Date(date).toLocaleDateString(); }
 function stopStream(){ if(typeof workspacePanel!=='undefined'){workspacePanel?.dispose();workspacePanel=null;} computer.close(); clearTimeout(state.streamRetry); state.streamRetry=null; state.source?.close(); state.source = null; state.chatRun = null; savedFiles.reset(); }
-function sessionTitle(run){return (run.agent_label||run.prompt||'Session').split('\n')[0].replace(/\s+/g,' ').trim();}
+function sessionTitle(run={}){
+  const text=value=>typeof value==='string'?value.replace(/\s+/g,' ').trim():'';
+  for(const value of [run.agent_label,run.display_title]){const title=text(value);if(title)return title;}
+  // This is only a deterministic placeholder until the title agent finishes.
+  // Keep the request's meaning; do not guess corrections, outcomes or PRs.
+  const lines=(typeof run.prompt==='string'?run.prompt:'').split(/\r?\n/).map(line=>line
+    .replace(/^\s*(?:(?:[-*+•]|\d+[.)]|#{1,6}|>)\s+)+(?:\[[ xX]\]\s*)?/,'')
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g,'$1')
+    .replace(/(?:https?:\/\/|www\.)[^\s<>]+/gi,'')
+    .replace(/`([^`]+)`|\*\*([^*]+)\*\*/g,(_,code,bold)=>code||bold).replace(/\s+/g,' ').trim());
+  let title=lines.find(line=>/[\p{L}\p{N}]/u.test(line))||'';
+  title=title.replace(/^(?:(?:please|hey|hi)[,!:]?\s+)?(?:(?:can|could|would) you\s+|(?:we|i)\s+(?:wanna|want to|need to|would like to)\s+|please\s+)/i,'').trim();
+  if(!title)return 'Untitled session';
+  title=title[0].toUpperCase()+title.slice(1);
+  if(title.length>96){const short=title.slice(0,93);title=(short.lastIndexOf(' ')>60?short.slice(0,short.lastIndexOf(' ')):short)+'…';}
+  return title;
+}
+function sessionMatches(run,search){
+  const term=search.trim().toLowerCase();
+  return [sessionTitle(run),run.agent_label,run.display_title,run.prompt].some(value=>typeof value==='string'&&value.toLowerCase().includes(term));
+}
+function sessionStatus(run){
+  return ({idle:'Ready',completed:'Completed',running:'Working',queued:'Queued',provisioning:'Starting',reconnecting:'Reconnecting',saving:'Saving',awaiting_approval:'Needs approval',waiting_credential:'Needs access',waiting_children:'Agents working',stopping:'Stopping',failed:'Failed',cancelled:'Stopped',interrupted:'Interrupted'})[run.status]||'Status unknown';
+}
+function sessionRepository(run){
+  try{const url=new URL(run.repo_url);return url.protocol==='https:'&&url.hostname==='github.com'?url.pathname.split('/').filter(Boolean).slice(0,2).join('/').replace(/\.git$/,''):'';}catch{return '';}
+}
+function syncSessionTitle(run){
+  if(run?.id!==state.selected)return;
+  const heading=$('#page-title');if(heading){heading.textContent=sessionTitle(run);heading.title=sessionTitle(run);}
+}
+function syncRunSummary(run){
+  const item=state.runs.flatMap(parent=>[parent,...(parent.children||[])]).find(item=>item.id===run.id);
+  if(item)for(const key of ['agent_label','display_title','prompt','status','updated_at']){if(Object.hasOwn(run,key))item[key]=run[key];}
+  syncSessionTitle(item?{...run,...item}:run);
+  renderSidebar();
+}
 function modelName(model=state.config.model){return (state.config.models||[]).find(m=>m.id===model)?.name||model||'Hermes Agent';}
 function modelPicker(id,selected,disabled=false){return `<label class="model-picker"><span class="sr-only">Model for next message</span><select id="${id}" aria-label="Model for next message" ${disabled?'disabled':''}>${(state.config.models||[]).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}</select></label>`;}
 
@@ -35,14 +71,16 @@ function setSidebar(open){document.body.classList.toggle('sidebar-open',open);$(
 function sidebarGroups(runs,search){
   return runs.map(parent=>{
     const children=parent.children||[];
-    const parentMatch=sessionTitle(parent).toLowerCase().includes(search);
-    const visible=parentMatch?children:children.filter(child=>sessionTitle(child).toLowerCase().includes(search));
+    const parentMatch=sessionMatches(parent,search);
+    const visible=parentMatch?children:children.filter(child=>sessionMatches(child,search));
     return {...parent,children:visible,totalChildren:children.length,visible:parentMatch||visible.length>0};
   }).filter(parent=>parent.visible);
 }
 function sidebarRow(run,child=false){
-  const selected=state.selected===run.id, label=run.status==='idle'?'Ready':run.status.replaceAll('_',' ');
-  return `<button class="session-link ${child?'child-session ':''}${selected?'selected':''}" data-run="${esc(run.id)}" ${child?'':`draggable="true" data-drag-session="${esc(run.id)}"`} ${selected?'aria-current="page"':''} title="${esc(sessionTitle(run))}">${child?'<span class="child-mark" aria-hidden="true">·</span>':''}<span class="session-link-body"><span class="session-link-title">${esc(sessionTitle(run))}</span><small data-session-time="${esc(run.id)}">${relative(run.updated_at||run.created_at)}${child?' · '+esc(label):run.mode==='demo'?' · Demo':''}</small></span><span class="session-dot ${esc(run.status)}" aria-label="${esc(label)}" title="${esc(label)}"></span></button>`;
+  const selected=state.selected===run.id,title=sessionTitle(run),label=sessionStatus(run),repo=sessionRepository(run);
+  const date=run.updated_at||run.created_at,time=date&&Number.isFinite(Date.parse(date))?relative(date):'';
+  const context=[child?'Agent':run.side_chat_of?'Side chat':'',run.mode==='demo'?'Demo':'',repo].filter(Boolean).join(' · ');
+  return `<button class="session-link ${child?'child-session ':''}${selected?'selected':''}" data-run="${esc(run.id)}" ${child?'':`draggable="true" data-drag-session="${esc(run.id)}"`} ${selected?'aria-current="page"':''} aria-label="${esc([title,label,context,time].filter(Boolean).join(' · '))}" title="${esc(title)}">${child?'<span class="child-mark" aria-hidden="true">·</span>':''}<span class="session-link-body"><span class="session-link-title">${esc(title)}</span><span class="session-link-meta"><span class="session-state"><span class="session-dot ${esc(run.status||'unknown')}" aria-hidden="true"></span>${esc(label)}</span>${time?`<span class="session-updated" data-session-time="${esc(run.id)}" title="${esc('Updated '+new Date(date).toLocaleString())}">${esc(time)}</span>`:''}</span>${context?`<span class="session-link-context" title="${esc(context)}">${esc(context)}</span>`:''}</span></button>`;
 }
 function sidebarSections(runs,folders,search){
   const ids=new Set(folders.map(folder=>folder.id));
@@ -58,6 +96,12 @@ function sidebarRenderSessions(groups,search){return groups.map(parent=>{
     return `<div class="session-group"><div class="parent-session">${hasChildren?`<button class="agent-disclosure" data-toggle-agents="${esc(parent.id)}" aria-label="${expanded?'Collapse':'Expand'} agents for ${esc(sessionTitle(parent))}" aria-expanded="${expanded}" aria-controls="children-${esc(parent.id)}"><span aria-hidden="true">${expanded?'⌄':'›'}</span></button>`:'<span class="agent-disclosure-space"></span>'}${sidebarRow(parent)}<button class="session-move" data-move-session="${esc(parent.id)}" title="Move to folder" aria-label="Move ${esc(sessionTitle(parent))} to folder">⋯</button></div>${hasChildren?`<div class="child-sessions" id="children-${esc(parent.id)}" role="group" aria-label="Agents for ${esc(sessionTitle(parent))}" ${expanded?'':'hidden'}>${parent.children.map(child=>sidebarRow(child,true)).join('')}</div>`:''}</div>`;
   }).join('');}
 function renderSidebar(){
+  const summaries=state.runs.flatMap(parent=>[parent,...(parent.children||[])]),selected=summaries.find(run=>run.id===state.selected);
+  if(selected){
+    if(state.chatRun?.id===selected.id)for(const key of ['agent_label','display_title','prompt']){if(Object.hasOwn(selected,key))state.chatRun[key]=selected[key];}
+    syncSessionTitle(selected);
+  }
+  if(typeof workspacePanel!=='undefined')workspacePanel?.syncTitles?.(summaries);
   // Polling must not replace the source element during a native drag.
   if(state.draggedSessionId)return;
   const search=($('#session-search').value||'').trim().toLowerCase();
@@ -90,6 +134,7 @@ function setView(view,title){
     if(active)b.setAttribute('aria-current',b.dataset.view===view?'page':'true');else b.removeAttribute('aria-current');
   });
   const breadcrumb=settingsViews.has(view)&&view!=='settings';
+  $('#page-title').title=title;
   $('#page-title').classList.toggle('settings-breadcrumb',breadcrumb);
   if(breadcrumb)$('#page-title').innerHTML=`<a href="#settings">Settings</a><span aria-hidden="true">/</span><span aria-current="page">${esc(title)}</span>`;
   else $('#page-title').textContent=title;
@@ -184,7 +229,7 @@ function renderChat(run){
   $('#header-actions').innerHTML=`${(run.parent_run_id||run.side_chat_of)?`<button class="quiet parent-session-link" data-open-parent="${esc(run.parent_run_id||run.side_chat_of)}" title="Open parent session">← Parent session</button>`:''}<span id="run-status"></span>${run.mode==='modal'?`<button id="computer-button" class="quiet details-toggle header-icon" aria-label="Computer" title="Computer" aria-controls="workspace-panel">${icon('monitor')}</button>`:''}<button id="files-button" class="quiet details-toggle" aria-controls="workspace-panel" hidden>Files</button><button id="toggle-details" class="quiet details-toggle header-icon" aria-label="Activity" title="Activity" aria-expanded="false" aria-controls="session-details">${icon('list')}</button><button id="workspace-panel-toggle" class="quiet details-toggle header-icon" aria-label="Show workspace panel" title="Workspace panel" aria-controls="workspace-panel" aria-expanded="false">${icon('panel')}</button>`;
   $('#content').innerHTML=`<div class="chat-layout"><section class="chat-panel"><div class="conversation" id="conversation" role="log" aria-label="Conversation" aria-live="polite"></div><button id="jump-latest" class="jump-latest" hidden>↓ Latest message</button><div class="chat-bottom"><div id="approvals"></div><div class="chat-working" id="chat-working" role="status"></div><section id="message-queue" class="message-queue" aria-label="Queued messages" hidden></section><form id="message-form" class="composer reply-composer"><label class="sr-only" for="followup">Message Moyai Devin</label><textarea id="followup" maxlength="16000" required rows="1" placeholder="Respond to Moyai or ask something else"></textarea><div class="composer-toolbar"><button type="button" class="quiet skill-picker-button" data-skill-picker="followup" aria-label="Choose a skill" title="Skills · or type /">${icon('slash',18)}</button>${run.mode==='demo'?'<span class="composer-model">Demo session</span>':modelPicker('chat-model',state.modelDrafts[id]||run.model||state.config.model)}<span id="connection-state" class="connection-notice" hidden>Reconnecting…</span><button id="stop-response" class="stop-button" type="button" aria-label="Stop response" title="Stop response"><span aria-hidden="true">■</span></button><button type="submit" class="send-button" aria-label="Send message" title="Send message">${icon('up',18)}</button><button type="submit" data-send-now hidden>Send now</button></div></form><div class="composer-caption"><span id="queue-note">Your conversation and files stay here.</span><span>Type / for skills · Shift + Enter for a new line</span></div></div></section>
   <aside class="session-side" id="session-details" aria-label="Session details" hidden><div class="details-heading"><h2>Session activity</h2><button id="close-details" class="icon-button" aria-label="Close session details">×</button></div><div class="session-facts">${run.owner?`<div class="detail-row"><span>Started by</span><span>${esc(run.owner.email||run.owner.name)}</span></div>`:''}${run.project_environment?.name?`<div class="detail-row"><span>Project environment</span><span>${esc(run.project_environment.name)} · ${esc(run.project_environment.commit_sha.slice(0,8))}</span></div>`:''}<div class="detail-row"><span>Connected apps</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None selected'}</span></div><div class="detail-row"><span>Workspace</span><span id="saved-workspace"></span></div><div id="artifact-area"></div></div><div id="slack-context"></div><div id="agent-details"></div><section class="activity-panel"><h3>Progress</h3><div class="timeline" id="timeline">${run.events.filter(e=>!['chat','result'].includes(e.kind)).map(eventHTML).join('')}</div></section></aside></div>`;
-  workspacePanel=MoyaiPanel.create({run,layout:$('.chat-layout'),api,computer,markdown:renderMarkdown,escape:esc,size:fileSize,user:state.userId||'shared:local:admin',models:state.config.models||[],toast,onCreated:()=>refreshRuns().catch(showError)});
+  workspacePanel=MoyaiPanel.create({run,layout:$('.chat-layout'),api,computer,markdown:renderMarkdown,escape:esc,size:fileSize,titleFor:sessionTitle,matchesSession:sessionMatches,user:state.userId||'shared:local:admin',models:state.config.models||[],toast,onCreated:()=>refreshRuns().catch(showError)});
   $('#workspace-panel-toggle').onclick=()=>workspacePanel.toggle();
   $('#toggle-details').onclick=()=>workspacePanel.open('activity');$('#close-details').onclick=()=>workspacePanel.hide();
   if($('#computer-button'))$('#computer-button').onclick=()=>workspacePanel.open('computer');
@@ -251,7 +296,7 @@ function updateChatStatus(run){
   $('#queue-note').textContent=run.slack_mirroring==='active'?'Your messages and replies are shared with the connected Slack conversation.':run.slack_mirroring==='paused'?'Slack sharing is paused for this session.':busy?'Enter to queue · Ctrl/⌘ Enter to send now.':'Your conversation and files stay here.';
   if(state.activeParentId)$('#queue-note').textContent='Chatting with this agent directly. Results already sent to the parent stay saved.';
   renderChatWorking(run);
-  const item=state.runs.flatMap(r=>[r,...(r.children||[])]).find(r=>r.id===state.selected);if(item&&item.status!==run.status){item.status=run.status;renderSidebar();}
+  syncRunSummary(run);
 }
 function renderChatWorking(run){
   const current=MoyaiActivity.current(run),node=$('#chat-working');

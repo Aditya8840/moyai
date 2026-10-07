@@ -23,6 +23,7 @@ class SlackSessions:
         self.jobs = set()
         self.identities = None
         self.automation_events = None
+        self.session_titles = None
         self.files = SlackFiles(self)
         self.chat = SlackChat(self)
         self.agentchat, self.channel = connect_agentchat(self)
@@ -136,6 +137,8 @@ class SlackSessions:
                 self.identities.wake.set()
             if run:
                 self.manager.submit(run)
+                if self.session_titles:
+                    self.session_titles.schedule(run['id'])
             return
         if not mentioned or len(prompt) < 3:
             return
@@ -152,6 +155,8 @@ class SlackSessions:
                 self.identities.wake.set()
             self.manager.submit(run)
             self.submit_reply(run['id'])
+            if self.session_titles:
+                self.session_titles.schedule(run['id'])
 
     async def prepare(self, run_id):
         await self.prepare_source(run_id)

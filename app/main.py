@@ -173,6 +173,9 @@ def create_app(settings: Settings | None = None):
     manager.persist = checkpoints.flush
     store.execute("INSERT OR IGNORE INTO organization(id,name) VALUES(1,?)", (settings.organization_name,))
     slack = SlackSessions(store, connectors, manager, checkpoints, settings)
+    from .session_titles import SessionTitles
+    session_titles = SessionTitles(store, settings, checkpoints)
+    slack.session_titles = session_titles
     from .message_queue import MessageQueue
     message_queue = MessageQueue(store, slack.chat.change_queued_in)
     identities = SlackIdentities(store, connectors, settings, security, checkpoints)
@@ -199,9 +202,11 @@ def create_app(settings: Settings | None = None):
         watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
         tracing.start()
         infrastructure.start()
+        session_titles.start()
         try:
             yield
         finally:
+            await session_titles.close()
             await infrastructure.close()
             await automations.close()
             await environments.close()
@@ -217,6 +222,8 @@ def create_app(settings: Settings | None = None):
     app = FastAPI(title="Moyai Devin", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     google = GoogleSignIn(settings, security, store)
     app.state.google_signin = google
+    app.state.session_titles = session_titles
+    app.include_router(session_titles.routes(security))
     app.include_router(google.routes())
     app.include_router(user_roles.routes(security))
     app.state.user_roles = user_roles
@@ -432,6 +439,7 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()
         manager.submit(run)
+        session_titles.schedule(run['id'])
         return public_run(run)
 
     @app.get('/api/runs/{run_id}/side-chats')
@@ -439,7 +447,7 @@ def create_app(settings: Settings | None = None):
         security.require(request)
         if not store.run(run_id):
             raise HTTPException(404, 'Session not found.')
-        return store.rows('SELECT id,prompt,status,model,created_at,updated_at FROM runs WHERE side_chat_of=? ORDER BY created_at,id', (run_id,))
+        return store.rows('SELECT id,prompt,agent_label,display_title,status,model,created_at,updated_at FROM runs WHERE side_chat_of=? ORDER BY created_at,id', (run_id,))
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str, request: Request):
@@ -483,6 +491,7 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(409, str(exc))
         await checkpoints.flush()
         # Resume even for a duplicate whose first acknowledgement was lost.
+        session_titles.schedule(run_id)
         if store.has_queued_messages(run_id):
             manager.submit(store.run(run_id))
         return {"id": message["id"], "status": message["status"], "model": message['model'], "created": created}
@@ -930,7 +939,7 @@ def create_app(settings: Settings | None = None):
 
 
 def public_run(run):
-    return {key: value for key, value in run.items() if key not in {"token_hash", "pending_result", "side_chat_context"}}
+    return {key: value for key, value in run.items() if key not in {"token_hash", "pending_result", "side_chat_context", "title_attempted_at"}}
 
 
 app = create_app()
