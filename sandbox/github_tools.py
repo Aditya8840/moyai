@@ -179,7 +179,7 @@ def advertised_tools(tools):
             properties = {'directory': {'type': 'string', 'description': 'Repository directory inside /workspace; defaults to /workspace/repo.'}}
             required = []
             if tool['name'] == 'github_checkout':
-                properties['repository'] = {'type': 'string', 'description': 'Allowed owner/repository, such as BerriAI/moyai-devin. Use github_repositories to list choices; defaults to the session repository.'}
+                properties['repository'] = {'type': 'string', 'description': 'Allowed owner/repository, such as BerriAI/moyai. Use github_repositories to list choices; defaults to the session repository.'}
                 properties['number'] = {'type': 'integer', 'minimum': 1, 'description': 'Optional PR number; use a fresh directory to check out its current head.'}
             if tool['name'] in {'github_create_pull_request', 'github_update_pull_request'}:
                 properties.update({

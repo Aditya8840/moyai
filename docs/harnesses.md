@@ -72,7 +72,7 @@ review through the existing workflow.
 New Slack threads can explicitly choose a runtime:
 
 ```text
-@Moyai Devin harness claude-agent-sdk
+@Moyai harness claude-agent-sdk
 Read the repository
 ```
 

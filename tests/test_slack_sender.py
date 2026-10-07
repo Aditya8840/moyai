@@ -247,4 +247,4 @@ def test_oauth_only_requests_bot_write_permissions(sender):
     assert {'chat:write', 'im:write', 'im:history'} <= set(params['scope'][0].split(','))
     assert all(not scope.endswith(':write') for scope in params['user_scope'][0].split(','))
     connection = next(c for c in app.state.connectors.list() if c['id'] == 'slack')
-    assert connection['identity'] == 'Moyai Devin bot sends · shared user reads'
+    assert connection['identity'] == 'Moyai bot sends · shared user reads'

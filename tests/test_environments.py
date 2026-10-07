@@ -90,7 +90,7 @@ def test_edits_and_failed_rebuild_keep_last_good_snapshot(workspace):
     env = app.state.environments
     build_id = prepared(env)
     new = recipe()
-    new.repository = 'BerriAI/moyai-devin'
+    new.repository = 'BerriAI/moyai'
     env.save_recipe('e' * 32, SaveRecipe(recipe=new, revision=1), 'admin')
     build = env.enqueue('e' * 32, 2, 'admin')
     assert env.enqueue('e' * 32, 2, 'admin')['id'] == build['id']

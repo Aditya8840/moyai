@@ -23,10 +23,10 @@ from app.main import create_app
 from app.security import digest
 
 
-PAGE = '''<!doctype html><meta charset="utf-8"><title>Moyai Devin · Slack sender verification</title>
+PAGE = '''<!doctype html><meta charset="utf-8"><title>Moyai · Slack sender verification</title>
 <style>
 body{font:17px system-ui;background:#f7f6fb;color:#29243c;margin:0;padding:32px}main{max-width:1060px;margin:auto}h1{font-size:34px;line-height:1.2;margin:12px 0}p{color:#625d72;line-height:1.5}button{background:#5b3fd1;color:white;border:0;border-radius:9px;padding:12px 20px;font:inherit;cursor:pointer}button:disabled{opacity:.5}.badge{color:#5b3fd1;font-size:13px;font-weight:700;letter-spacing:.08em}.card{background:white;border:1px solid #ddd7ed;border-radius:12px;padding:18px;margin-top:16px}.title{font-weight:700}.message{font-size:23px;margin:12px 0;color:#245d42}.detail{font-size:14px;color:#625d72;white-space:pre-wrap;line-height:1.5}#status{margin-left:16px;color:#245d42;font-weight:600}footer{font-size:13px;color:#625d72;margin-top:20px}
-</style><main><div class="badge">MOYAI DEVIN · LOCAL BROKER VERIFICATION</div>
+</style><main><div class="badge">MOYAI · LOCAL BROKER VERIFICATION</div>
 <h1>Messages from the bot.<br>The person who asked, named in the text.</h1>
 <p>Real requests through Moyai's broker and connector, using stored test profiles.<br>Slack's API is simulated; no real Slack messages are sent.</p>
 <button id="run">Run sender checks</button><span id="status">Ready</span><div id="results"></div>
@@ -116,7 +116,7 @@ def demo(directory):
                 assert result['message']['user'] == 'U99999999'
                 assert result['message']['text'] == name + ': Hello from my chat'
                 assert [r['method'] for r in requests] == ['conversations.open', 'chat.postMessage', 'conversations.replies']
-                output = {'title': name + ' requests a DM · delivered by Moyai Devin',
+                output = {'title': name + ' requests a DM · delivered by Moyai',
                           'message': result['message']['text'],
                           'detail': 'Bot DM D12345678 · conversations.open → chat.postMessage → conversations.replies\n'
                                     'Sender credential: bot · Requester: ' + name + (' · Same chat; creator remains Moe' if step == 1 else '')}

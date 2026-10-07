@@ -129,7 +129,7 @@ PAGE = '''<!doctype html><meta charset="utf-8"><title>Moyai ruleset demo</title>
 small{color:#6846c7;font-weight:650;letter-spacing:.08em}h1{font-size:38px;margin:12px 0}p{color:#646073;line-height:1.6;margin:10px 0 24px}
 button{background:#6541c7;border:0;border-radius:10px;color:white;padding:13px 22px;font:600 16px system-ui;cursor:pointer}button:disabled{opacity:.55}
 pre{background:#191827;color:#eeeafc;border-radius:16px;padding:26px;min-height:430px;font:15px/2 ui-monospace,monospace;white-space:pre-wrap;margin-top:24px;box-shadow:0 8px 30px #22143314}
-</style><main><small>MOYAI DEVIN · LOCAL BROKER DEMO</small><h1>Fix reviewer noise. Keep the other rules.</h1>
+</style><main><small>MOYAI · LOCAL BROKER DEMO</small><h1>Fix reviewer noise. Keep the other rules.</h1>
 <p>Actual requests through Moyai’s broker and GitHub client, using a simulated GitHub provider.<br>No live repository settings or credentials are used.</p>
 <button id="run">Run reviewer update</button><pre id="log">Ready. Start the demo to inspect guard-main and remove its wildcard reviewer entry.</pre>
 <script>

@@ -91,8 +91,8 @@ def test_web_reply_attribution_uses_reply_sender_and_email_fallback(slack_app):
 
 
 def publication(app, run_id, number=100, title='Show the completed demo'):
-    result = {'number': number, 'url': f'https://github.com/BerriAI/moyai-devin/pull/{number}',
-              'repository': 'BerriAI/moyai-devin', 'title': title, 'draft': False}
+    result = {'number': number, 'url': f'https://github.com/BerriAI/moyai/pull/{number}',
+              'repository': 'BerriAI/moyai', 'title': title, 'draft': False}
     app.state.store.execute('''INSERT INTO github_publications
         (id,run_id,message_id,arguments_hash,branch,result,connection_version,created_at)
         VALUES(?,?,0,'test','test',?,'test',?)''', (f'{run_id}-{number}', run_id, json.dumps(result), now()))

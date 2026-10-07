@@ -8,7 +8,7 @@ from pathlib import Path
 import modal
 
 ROOT = Path(__file__).parent
-APP_NAME = "moyai-devin"
+APP_NAME = "moyai"
 VOLUME_NAME = "hermes-workspace-state"
 
 app = modal.App(APP_NAME)
@@ -87,7 +87,7 @@ def main():
     from app.config import Settings
 
     if Path.cwd() != ROOT:
-        raise SystemExit("Run this command from the internal-devin project directory.")
+        raise SystemExit("Run this command from the project root directory.")
     settings = Settings()
     if not settings.modal_token_id or not settings.modal_token_secret:
         raise SystemExit("Configure Modal credentials in .env first.")

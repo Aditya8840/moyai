@@ -43,7 +43,7 @@ class AgentTracing:
         self.store, self.settings = store, settings
         destinations = settings.trace_destinations()
         self.enabled = bool(destinations)
-        self.resource = Resource({'service.name': 'moyai-devin',
+        self.resource = Resource({'service.name': 'moyai',
                                   'deployment.environment.name': settings.trace_environment})
         self.processor = processor
         with store.connect() as conn:
@@ -78,7 +78,7 @@ class AgentTracing:
                 parent = identifier('agent:' + root, 8)
         trace_id = identifier('trace:' + root, 16)
         span_id = identifier(f"agent:{run['id']}:{message_id or 0}", 8)
-        name = ' '.join(self.content(run.get('agent_label') or 'moyai-devin').split())[:160] or 'moyai-devin'
+        name = ' '.join(self.content(run.get('agent_label') or 'moyai').split())[:160] or 'moyai'
         # Freeze attribution before a group finishes or a label changes. A late
         # journal replay must keep the original trace, parent and agent name.
         connection.execute('INSERT INTO trace_contexts VALUES(?,?,?,?,?,?,?)',
@@ -172,15 +172,15 @@ class AgentTracing:
             'traceloop.entity.name': agent_name if root else name,
             'traceloop.entity.input': attrs.get('input.value', ''),
             'traceloop.entity.output': attrs.get('output.value', ''),
-            'traceloop.association.properties.event': 'moyai-devin',
+            'traceloop.association.properties.event': 'moyai',
         })
         if self.settings.langfuse_public_key and self.settings.langfuse_secret_key:
             # Propagate filterable context to every observation (Langfuse v4).
             attributes.update({
                 'langfuse.observation.type': {'AGENT': 'agent', 'LLM': 'generation', 'TOOL': 'tool'}.get(
                     attrs.get('openinference.span.kind'), 'span'),
-                'langfuse.trace.name': 'moyai-devin',
-                'langfuse.trace.tags': ['moyai-devin'],
+                'langfuse.trace.name': 'moyai',
+                'langfuse.trace.tags': ['moyai'],
                 'langfuse.environment': self.settings.langfuse_tracing_environment,
                 'langfuse.observation.metadata.run_id': run['id'],
                 'langfuse.observation.metadata.turn_id': str(message_id or 0),
@@ -189,7 +189,7 @@ class AgentTracing:
         if self.settings.langsmith_api_key:
             attributes.update({
                 'langsmith.span.kind': {'AGENT': 'chain', 'LLM': 'llm', 'TOOL': 'tool'}.get(kind, 'chain'),
-                'langsmith.span.tags': 'moyai-devin,' + self.settings.trace_environment,
+                'langsmith.span.tags': 'moyai,' + self.settings.trace_environment,
                 'langsmith.metadata.thread_id': session,
                 'langsmith.metadata.session_id': session,
                 'langsmith.metadata.run_id': run['id'],
@@ -205,7 +205,7 @@ class AgentTracing:
                 'braintrust.metadata.turn_id': str(message_id or 0),
                 'braintrust.metadata.session_url': attributes['moyai.session_url'],
                 'braintrust.metadata.environment': self.settings.trace_environment,
-                'braintrust.tags': ['moyai-devin', self.settings.trace_environment],
+                'braintrust.tags': ['moyai', self.settings.trace_environment],
             })
         error = self.content(attrs.get('output.value') or attrs.get('moyai.status') or 'Operation failed') if failed else None
         span = ReadableSpan(
@@ -238,7 +238,7 @@ class AgentTracing:
         if message:
             inputs += [m['content'] for m in rows(
                 'SELECT content FROM messages WHERE run_id=? AND steering_parent_id=? ORDER BY id', (run_id, message_id))]
-        self.emit(run, message_id, 'moyai-devin', '', datetime.fromisoformat(started).timestamp() * 1e9,
+        self.emit(run, message_id, 'moyai', '', datetime.fromisoformat(started).timestamp() * 1e9,
                   time.time_ns(), {'gen_ai.operation.name': 'invoke_agent',
                   'openinference.span.kind': 'AGENT', 'input.value': self.content('\n\n'.join(inputs)),
                   'output.value': self.content(output), 'moyai.status': status}, root=True,

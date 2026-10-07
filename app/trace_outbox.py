@@ -160,9 +160,9 @@ class RaindropEventOutbox(TraceOutbox):
         attrs = span.attributes
         event = {
             'event_id': format(span.context.trace_id, '032x'),
-            'user_id': attrs.get('user.id', 'moyai-devin'),
-            'event': 'moyai-devin',
-            'properties': {'agent': 'moyai-devin', 'run_id': attrs['moyai.run_id'],
+            'user_id': attrs.get('user.id', 'moyai'),
+            'event': 'moyai',
+            'properties': {'agent': 'moyai', 'run_id': attrs['moyai.run_id'],
                            'turn_id': attrs['moyai.turn_id'], 'session_url': attrs['moyai.session_url'],
                            'status': attrs['moyai.status'], 'environment': attrs['moyai.environment']},
             'ai_data': {'input': attrs['input.value'], 'output': attrs['output.value'],

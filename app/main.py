@@ -220,7 +220,7 @@ def create_app(settings: Settings | None = None):
                 await asyncio.gather(watcher, return_exceptions=True)
             await checkpoints.flush()
 
-    app = FastAPI(title="Moyai Devin", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="Moyai", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     google = GoogleSignIn(settings, security, store)
     app.state.google_signin = google
     app.state.session_titles = session_titles
@@ -559,7 +559,7 @@ def create_app(settings: Settings | None = None):
         path = artifact_path(run_id)
         if not path.exists() or not store.run(run_id):
             raise HTTPException(404, "No result archive is available.")
-        return FileResponse(path, media_type="application/zip", filename=f"moyai-devin-{run_id[:8]}.zip")
+        return FileResponse(path, media_type="application/zip", filename=f"moyai-{run_id[:8]}.zip")
 
     @app.get("/api/connections")
     async def connections(request: Request):

@@ -71,12 +71,12 @@ async def test_five_receivers_get_identical_tree_and_raindrop_gets_interaction(t
     ls = requests['trace_outbox_langsmith']
     assert str(ls.url) == 'https://api.smith.langchain.com/otel/v1/traces'
     assert ls.headers['x-api-key'] == 'ls-secret'
-    assert ls.headers['langsmith-project'] == 'moyai-devin'
+    assert ls.headers['langsmith-project'] == 'moyai'
     assert ls.headers['x-tenant-id'] == 'workspace-id'
     bt = requests['trace_outbox_braintrust']
     assert str(bt.url) == 'https://api.braintrust.dev/otel/v1/traces'
     assert bt.headers['authorization'] == 'Bearer bt-secret'
-    assert bt.headers['x-bt-parent'] == 'project_name:moyai-devin'
+    assert bt.headers['x-bt-parent'] == 'project_name:moyai'
     exported = spans(ls.content)
     root = next(s for s in exported if not s.parent_span_id)
     assert all(s.parent_span_id == root.span_id for s in exported if s != root)

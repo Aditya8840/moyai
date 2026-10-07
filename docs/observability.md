@@ -24,7 +24,7 @@ and bounded tool inputs/results. Follow-ups have separate trace IDs and a shared
 session ID. Active delegated agents attach beneath their coordinator; machine
 renewals retain the current turn's trace identity. Sandbox events never receive
 the trace credential and trace payloads are separate from public chat activity.
-The service name remains `moyai-devin`; workers use their saved agent labels.
+The service name remains `moyai`; workers use their saved agent labels.
 Each turn keeps its original trace, parent and name across recovery.
 
 System prompts, loaded skills, private reasoning, images and credential-tool
@@ -43,7 +43,7 @@ The destination must enable `general_settings.tracing.store: clickhouse` and
 `CLICKHOUSE_URL`. ClickHouse is required for Agent Traces itself. A Lens worker
 is only needed for automated investigations. After deployment, run a short task
 that uses a file or terminal tool, open **Logs → Agent Traces**, and look for
-`moyai-devin`; verify the task, tool result and final answer in the trace tree.
+`moyai`; verify the task, tool result and final answer in the trace tree.
 
 ## Agent Traces in Raindrop
 
@@ -66,7 +66,7 @@ own durable `trace_outbox_raindrop_events` queue. Its `event_id` matches the tur
 trace ID. Raindrop needs this interaction for Events, Signals, and Issues; OTLP
 spans alone do not create it. The Query API uses a separate read credential.
 
-After deploying, run a short task, then open Raindrop and look for the `moyai-devin` service
+After deploying, run a short task, then open Raindrop and look for the `moyai` service
 in Events. Issues show up once Raindrop has enough conversations to cluster.
 
 ## Agent Traces in Langfuse
@@ -83,25 +83,25 @@ header. No additional SDK or sandbox credentials are needed. Agent turns appear
 as **agent** observations, model requests as **generations** with model/token usage,
 and tools as **tool** observations. Follow-ups have separate traces grouped by the
 Moyai session ID; delegated agents retain their existing parent/child hierarchy.
-Every observation carries the environment, `moyai-devin` tag, and a link to its chat.
+Every observation carries the environment, `moyai` tag, and a link to its chat.
 System prompts, private reasoning, images and private tool payloads remain excluded.
 
 Langfuse has its own persistent `trace_outbox_langfuse` table, retries and receipts.
 An outage does not block LiteLLM/Raindrop delivery or agent responses. Keys are
 redacted from trace text and never committed or passed into agent sandboxes.
 After deployment, run a short task that uses a terminal/file tool, then find
-**moyai-devin** in Langfuse and verify the task, generation, tool output and final
+**moyai** in Langfuse and verify the task, generation, tool output and final
 answer. Check the session view for follow-up turns. Existing completed turns are
 not backfilled.
 
 ## Agent Traces in LangSmith and Braintrust
 
-Set `LANGSMITH_API_KEY` and `LANGSMITH_PROJECT=moyai-devin` to enable LangSmith.
+Set `LANGSMITH_API_KEY` and `LANGSMITH_PROJECT=moyai` to enable LangSmith.
 `LANGSMITH_ENDPOINT` defaults to `https://api.smith.langchain.com`; set
 `LANGSMITH_WORKSPACE_ID` if the key needs explicit workspace routing.
 
 Set `BRAINTRUST_API_KEY` and `BRAINTRUST_PARENT=project_id:<project-id>` to enable
-Braintrust. `project_name:moyai-devin` also works, but an ID survives project
+Braintrust. `project_name:moyai` also works, but an ID survives project
 renames. `BRAINTRUST_API_URL` defaults to `https://api.braintrust.dev`.
 
 Both use `/otel/v1/traces`, with independent persistent outboxes. Set

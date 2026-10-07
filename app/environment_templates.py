@@ -84,7 +84,7 @@ Use the existing credential tools for model access if needed; no provider keys a
 Chromium and Playwright are available from the base image. Check process startup and health before measurements.
 ''',
 }, {
-    'name': 'Custom project', 'repository': 'BerriAI/moyai-devin', 'ref': 'main',
+    'name': 'Custom project', 'repository': 'BerriAI/moyai', 'ref': 'main',
     'apt_packages': [], 'setup': '', 'startup': '', 'verify': 'git status --short',
     'shutdown': '', 'instructions': 'Repository: /workspace/repo. Add the project build and test commands here.',
 }, {

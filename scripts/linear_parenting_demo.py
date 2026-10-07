@@ -63,7 +63,7 @@ def main(pause=0):
             app.state.store.update_run(run_id, status='running', token_hash=digest('demo-capability'))
             headers = {'Authorization': 'Bearer demo-capability'}
             endpoint = f'/broker/{run_id}/tools/call'
-            print('MOYAI DEVIN / LINEAR PARENT UPDATES', flush=True)
+            print('MOYAI / LINEAR PARENT UPDATES', flush=True)
             print('LOCAL DEMO: real broker + connector; no approval clicks; simulated Linear API', flush=True)
             print('Before: 5 existing children, no parents. 6 total issues including DEMO-100.\n', flush=True)
             with patch('app.connectors.httpx.AsyncClient', local_client):

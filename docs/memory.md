@@ -59,9 +59,8 @@ additional tool rounds finding and saving memories; there is no separate model
 or vector database running on every message.
 
 The design draws on official [Codex memories](https://developers.openai.com/codex/customization/memories),
-[Claude Code memory](https://code.claude.com/docs/en/memory), and
-[Devin Knowledge](https://docs.devin.ai/product-guides/knowledge) documentation
-(reviewed October 2, 2026): scoped recall, concise notes, provenance, user controls,
-and separation from required team instructions. Devin’s documentation now directs
-new reusable guidance to Skills. This is Moyai’s implementation, not a claim of
+[Claude Code memory](https://code.claude.com/docs/en/memory), and other coding-agent
+knowledge documentation (reviewed October 2, 2026): scoped recall, concise notes,
+provenance, user controls, and separation from required team instructions. Reusable
+guidance belongs in Skills. This is Moyai’s implementation, not a claim of
 exact product parity.

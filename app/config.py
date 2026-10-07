@@ -63,11 +63,11 @@ class Settings(BaseSettings):
                                    pattern=r"^[a-z0-9_-]+$")
     langsmith_endpoint: str = "https://api.smith.langchain.com"
     langsmith_api_key: str = ""
-    langsmith_project: str = "moyai-devin"
+    langsmith_project: str = "moyai"
     langsmith_workspace_id: str = ""
     braintrust_api_url: str = "https://api.braintrust.dev"
     braintrust_api_key: str = ""
-    braintrust_parent: str = "project_name:moyai-devin"
+    braintrust_parent: str = "project_name:moyai"
     agent_model: str = ""
     agent_harness: str = 'claude-agent-sdk'
     modal_token_id: str = ""

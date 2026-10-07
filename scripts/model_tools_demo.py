@@ -24,7 +24,7 @@ from app.security import digest
 PAGE = '''<!doctype html><meta charset="utf-8"><title>Moyai model switching · local broker demo</title>
 <style>
 body{font:17px system-ui;color:#262336;background:#f7f6fb;margin:0;padding:32px}main{max-width:1100px;margin:auto}h1{font-size:34px;margin:8px 0}p{color:#625d72;line-height:1.5;margin:12px 0}button{background:#5b3fd1;color:white;border:0;border-radius:9px;padding:13px 22px;font:inherit;cursor:pointer}button:disabled{opacity:.5}.badge{font-size:13px;letter-spacing:.08em;color:#5b3fd1;font-weight:700}.state{float:right;background:#eee9ff;padding:14px 24px;border-radius:12px;min-width:250px;white-space:pre-line}#steps{margin-top:20px}.step{padding:13px 18px;background:white;border:1px solid #e3dfee;border-radius:10px;margin:10px 0;display:grid;grid-template-columns:260px 1fr;gap:20px}.step code{display:block;color:#625d72;font-size:12px;margin-top:6px}.result{font-size:16px;white-space:pre-wrap;color:#215c45}footer{font-size:13px;color:#6b657b;margin-top:18px}
-</style><main><div class="badge">MOYAI DEVIN · LOCAL BROKER DEMO</div>
+</style><main><div class="badge">MOYAI · LOCAL BROKER DEMO</div>
 <h1>Model switching that changes routing</h1>
 <p>Example request: “Use GLM 5.3 and summarize this thread.”<br>Real broker requests below; tool choices are scripted and the model provider is a local stub.</p>
 <div class="state" id="state">Ready · GPT-6 Astra</div><button id="run">Run broker demo</button><div id="steps"></div>

@@ -62,14 +62,14 @@ def demo(directory):
         app.state.manager.ready = asyncio.Event()
         app.state.manager.ready.set()
         owner = store.identity({'method': 'local', 'role': 'admin'})
-        env.save_recipe('e' * 32, SaveRecipe(recipe=Recipe(name='Moyai development', repository='BerriAI/moyai-devin', verify='true')), 'Local demo')
+        env.save_recipe('e' * 32, SaveRecipe(recipe=Recipe(name='Moyai development', repository='BerriAI/moyai', verify='true')), 'Local demo')
         store.execute('UPDATE environments SET activate_on_ready=1')
         build = env.enqueue('e' * 32, 1, 'Local demo')
         env.update(build['id'], phase='failed', error='Simulated Git authentication failure')
         saved = service.save(Save.model_validate({'definition': {
             'name': 'Complaint triage · local verification',
-            'prompt': 'Investigate incoming complaints for Moyai Devin.',
-            'mode': 'modal', 'repo_url': 'https://github.com/BerriAI/moyai-devin',
+            'prompt': 'Investigate incoming complaints for Moyai.',
+            'mode': 'modal', 'repo_url': 'https://github.com/BerriAI/moyai',
             'triggers': [{'id': 'complaints', 'event': {'provider': 'webhook', 'event': 'complaint.received'}}]
         }}), owner)
         store.execute('UPDATE automations SET paused=0,synced_revision=revision WHERE id=?', (saved['id'],))

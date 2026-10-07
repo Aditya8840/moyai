@@ -29,12 +29,12 @@ def test_pr_selection_requires_the_exact_url_and_supports_legacy_receipts(worksp
     store = app.state.store
     run_id = store.create_run('Legacy PR handoff', '', 'demo', [])['id']
     url = publication(app, run_id)
-    legacy = {'number': 100, 'repository': 'berriai/moyai-devin', 'url': url}
+    legacy = {'number': 100, 'repository': 'berriai/moyai', 'url': url}
     store.execute('UPDATE github_publications SET result=? WHERE run_id=?', (json.dumps(legacy), run_id))
     with store.connect() as conn:
         for answer in [url + '0', url + '/files', url + '?fake=1',
                        url.replace('github.com', 'github.com.evil.example'),
-                       'https://github.com/BerriAI/moyai-devin/pull/999']:
+                       'https://github.com/BerriAI/moyai/pull/999']:
             assert pr_delivery.select_prs(conn, run_id, answer) == []
         selected = pr_delivery.select_prs(conn, run_id, f'<{url}|View PR>\n{url}.')
         assert len(selected) == 1
