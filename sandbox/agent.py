@@ -135,9 +135,12 @@ def run_agent(spec, relay):
     waiting = AgentWait(relay)
     goal = GoalLoop(Path('/session/goal.json'), spec['run_id'],
                     restore=not (spec.get('fresh_child') or spec.get('workspace_warning')),
-                    continuation=bool(spec.get('continuation')))
+                    continuation=bool(spec.get('continuation')),
+                    on_change=lambda value: emit('status', 'Goal ' + (value['status'] if value else 'cleared'),
+                                                {'phase': 'goal', 'goal_version': 1, 'goal': value}))
     if not spec.get('continuation'):
         goal.accept(spec['prompt'])
+    goal.publish()
     steering = ActiveTurnSteering(relay, lambda item: prepare_attachments(
         {**spec, 'attachments': item.get('attachments', [])}, os.environ['WORKSPACE_RUN_TOKEN']),
         on_input=lambda item: goal.steer(item['content']))
