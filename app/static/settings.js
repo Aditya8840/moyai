@@ -56,5 +56,20 @@ async function renderSettings() {
             <span class="settings-arrow" aria-hidden="true">›</span>
           </a>`).join('')}</div>
       </section>`).join('')}</div>
+    <section class="card" id="title-model-settings"><h2>Session title model</h2><p class="subtext">A small model names chats through your configured LiteLLM gateway. Changing it applies to new title attempts, not existing titles or the main chat model.</p><form id="title-model-form"><label for="title-model">Gateway model ID</label><input id="title-model" maxlength="200" required placeholder="openai/gpt-4.1-nano" ${admin?'':'disabled'}><button type="submit" ${admin?'':'disabled'}>Save title model</button><p id="title-model-status" role="status">Loading…</p></form></section>
   </section>`;
+  try{
+    const saved=await api('/api/settings/session-titles');if(version!==state.pageVersion)return;
+    $('#title-model').value=saved.model;
+    $('#title-model-status').textContent=!saved.enabled?'Title generation is disabled by the server.':!saved.gateway_configured?'Gateway access must be configured on the server.':admin?'Enter the exact model ID enabled on your gateway.':'Only administrators can change the workspace title model.';
+    $('#title-model-form').onsubmit=async event=>{
+      event.preventDefault();const button=event.currentTarget.querySelector('button');button.disabled=true;
+      try{
+        await api('/api/settings/session-titles',{method:'PUT',body:JSON.stringify({model:$('#title-model').value.trim()})});
+        const confirmed=await api('/api/settings/session-titles');if(version!==state.pageVersion)return;
+        $('#title-model').value=confirmed.model;$('#title-model-status').textContent='Saved. New title attempts use '+confirmed.model+'.';
+      }catch(error){if(version===state.pageVersion)$('#title-model-status').textContent=error.message;}
+      finally{if(version===state.pageVersion)button.disabled=false;}
+    };
+  }catch(error){if(version===state.pageVersion)$('#title-model-status').textContent=error.message;}
 }
