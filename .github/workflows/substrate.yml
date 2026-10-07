@@ -35,9 +35,6 @@ jobs:
           repository: agent-substrate/substrate
           ref: 92b74c0ee45aee6578a1a3d468f9f56b95074050
           path: .substrate
-      - name: Create disposable Kubernetes cluster
-        working-directory: .substrate
-        run: hack/create-kind-cluster.sh
       - uses: actions/cache/restore@v4
         id: substrate-go-cache
         with:
@@ -45,6 +42,9 @@ jobs:
             ~/.cache/go-build
             ~/go/pkg/mod
           key: substrate-go-1.27-${{ runner.os }}-${{ runner.arch }}-92b74c0
+      - name: Create disposable Kubernetes cluster
+        working-directory: .substrate
+        run: hack/create-kind-cluster.sh
       - name: Install real Substrate and two sandbox workers
         working-directory: .substrate
         run: hack/install-ate-kind.sh --deploy-ate-system --credential-provider='{"enabled":false}' --deploy-demo-sandbox
