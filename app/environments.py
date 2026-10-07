@@ -76,6 +76,8 @@ class Environments:
             commit_sha TEXT NOT NULL DEFAULT '', log TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '', actor TEXT NOT NULL)''')
         with store.connect() as conn:
+            if 'sandbox_provider' not in {r['name'] for r in conn.execute('PRAGMA table_info(environment_builds)')}:
+                conn.execute("ALTER TABLE environment_builds ADD COLUMN sandbox_provider TEXT NOT NULL DEFAULT 'modal'")
             columns = {r['name'] for r in conn.execute('PRAGMA table_info(environments)')}
             for name in ('refresh_daily', 'activate_on_ready'):
                 if name not in columns:
@@ -135,14 +137,16 @@ class Environments:
                     if not self.connectors or not any(c['id']=='github' and c['connected'] and c['enabled'] for c in self.connectors.list()):
                         raise ConnectorError('Enable the GitHub connection to use this repository environment.')
                     await self.connectors.github.selected_target(run, repository_id=recipe.get('repository_id'), repository='' if recipe.get('repository_id') else recipe['repository'])
-                if not selected['active_build']:
-                    if not self.settings.modal_token_id or not self.settings.modal_token_secret:
-                        raise HTTPException(503, 'Configure Modal before preparing this repository.')
-                    recent = self.store.rows('SELECT * FROM environment_builds WHERE environment_id=? AND revision=? ORDER BY rowid DESC LIMIT 1',
-                                             (selected['id'], selected['revision']))
-                    build = recent[0] if recent else self.enqueue(selected['id'], selected['revision'], 'First session')
+                if not selected['active_build'] or self.build(selected['active_build']).get('sandbox_provider', 'modal') != run['sandbox_provider']:
+                    if self.settings.missing_sandbox(run['sandbox_provider']):
+                        raise HTTPException(503, 'Configure the sandbox provider before preparing this repository.')
+                    recent = self.store.rows('SELECT * FROM environment_builds WHERE environment_id=? AND revision=? AND sandbox_provider=? ORDER BY rowid DESC LIMIT 1',
+                                             (selected['id'], selected['revision'], run['sandbox_provider']))
+                    build = recent[0] if recent else self.enqueue(selected['id'], selected['revision'], 'First session', provider=run['sandbox_provider'])
                     if build['phase'] == 'failed':
                         raise HTTPException(409, 'Project setup failed for ' + recipe['repository'] + '. An administrator can inspect the build log, edit the recipe, and rebuild in Environments.')
+                    if build['phase'] == 'ready':
+                        return self.bind(run_id, prepared_build=build['id'])
                     raise EnvironmentPending(recipe['name'], build['id'])
         except ConnectorError as exc:
             raise HTTPException(409, str(exc)) from None
@@ -199,7 +203,8 @@ class Environments:
             self.enqueue(identity, saved['revision'], actor)
         return saved
 
-    def enqueue(self, identity, revision, actor):
+    def enqueue(self, identity, revision, actor, provider=None):
+        provider = provider or self.settings.sandbox_provider
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             row = conn.execute('SELECT * FROM environments WHERE id=?', (identity,)).fetchone()
@@ -207,12 +212,13 @@ class Environments:
                 raise HTTPException(404, 'Project environment not found.')
             if row['revision'] != revision:
                 raise HTTPException(409, 'Save or reload the current recipe before building.')
-            active = conn.execute("SELECT * FROM environment_builds WHERE environment_id=? AND phase NOT IN ('ready','failed')", (identity,)).fetchone()
+            active = conn.execute("SELECT * FROM environment_builds WHERE environment_id=? AND sandbox_provider=? AND phase NOT IN ('ready','failed')", (identity, provider)).fetchone()
             if active:
                 return dict(active)
             identity_build = uuid4().hex
             conn.execute('''INSERT INTO environment_builds(id,environment_id,revision,recipe,created_at,actor)
                 VALUES(?,?,?,?,?,?)''', (identity_build, identity, revision, row['recipe'], now(), actor))
+            conn.execute('UPDATE environment_builds SET sandbox_provider=? WHERE id=?', (provider, identity_build))
         return self.build(identity_build)
 
     def build(self, identity):
@@ -272,16 +278,16 @@ class Environments:
             return 'Project setup failed for ' + recipe['repository'] + '. Rebuild its environment in Environments.'
         return 'Preparing project environment: ' + recipe['name'] + '. Waiting for a successful build.'
 
-    def bind(self, run_id):
+    def bind(self, run_id, prepared_build=None):
         """Pin once. Existing session snapshots always win over project templates."""
         run = self.store.run(run_id)
         if not run.get('environment_build_id'):
             previous = run.get('snapshot_id') or run.get('parent_run_id') or self.store.rows(
                 "SELECT 1 FROM messages WHERE run_id=? AND role='assistant' LIMIT 1", (run_id,))
             row = None if previous else self.choose(run.get('environment_id', 'auto'), run['repo_url'], run.get('github_repository_id'))
-            if row and not row['active_build']:
+            if row and not row['active_build'] and not prepared_build:
                 raise HTTPException(409, 'This repository environment is still being prepared.')
-            identity = row['active_build'] if row else 'none'
+            identity = (prepared_build or row['active_build']) if row else 'none'
             self.store.execute("UPDATE runs SET environment_build_id=? WHERE id=? AND environment_build_id=''", (identity, run_id))
             if row:
                 recipe = json.loads(self.build(identity)['recipe'])
@@ -293,6 +299,8 @@ class Environments:
         if not identity or identity == 'none':
             return {}
         build = self.build(identity)
+        if build.get('sandbox_provider', 'modal') != run.get('sandbox_provider', 'modal'):
+            raise HTTPException(409, 'Rebuild this environment using the session’s sandbox provider, or start without a prepared environment.')
         recipe = json.loads(build.get('resolved_recipe') or build['recipe'])
         stored = json.loads(build['recipe'])
         recipe['repository_id'] = recipe.get('repository_id') or stored.get('repository_id')
@@ -308,11 +316,11 @@ class Environments:
 
     async def advance(self, build):
         identity, recipe = build['id'], json.loads(build['recipe'])
-        client = await self.manager.client()
+        backend = self.manager.provider(name=build.get('sandbox_provider', 'modal'))
         name = 'moyai-environment-' + identity
         if build['phase'] in {'ready', 'failed', 'cancelling'}:
             try:
-                sandbox = await modal.Sandbox.from_name.aio(self.settings.modal_app_name, name, client=client)
+                sandbox = await backend.find(name)
                 await sandbox.terminate.aio()
             except modal.exception.NotFoundError:
                 pass
@@ -320,15 +328,13 @@ class Environments:
             self.update(identity, sandbox_id='', **fields)
             return
         try:
-            sandbox = await modal.Sandbox.from_name.aio(self.settings.modal_app_name, name, client=client)
+            sandbox = await backend.find(name, initialize=build['phase'] == 'queued',
+                                         timeout=3600, apt_packages=recipe['apt_packages'])
         except modal.exception.NotFoundError:
             if build['phase'] != 'queued':
                 self.update(identity, phase='failed', error='The build sandbox expired. Start a new build; the previous environment is unchanged.', finished_at=now())
                 return
-            app = await modal.App.lookup.aio(self.settings.modal_app_name, create_if_missing=True, client=client)
-            sandbox = await modal.Sandbox.create.aio(app=app, client=client, name=name,
-                image=self.manager.image().apt_install(*recipe['apt_packages']) if recipe['apt_packages'] else self.manager.image(),
-                timeout=3600, cpu=2, memory=8192)
+            sandbox = await backend.create(name=name, apt_packages=recipe['apt_packages'], timeout=3600, memory=8192)
         self.update(identity, sandbox_id=sandbox.object_id)
         if build['phase'] == 'queued':
             token = ''
@@ -448,7 +454,7 @@ class Environments:
                 pass
             return {'environments': self.catalog(admin=True), 'templates': TEMPLATES,
                     'automatic_setup': self.settings.auto_prepare_repositories,
-                    'modal_configured': bool(self.settings.modal_token_id and self.settings.modal_token_secret)}
+                    'modal_configured': not self.settings.missing_sandbox()}
 
         @router.post('/api/admin/environments', status_code=201)
         async def create(body: SaveRecipe, request: Request):
@@ -466,8 +472,8 @@ class Environments:
         @router.post('/api/admin/environments/{identity}/build', status_code=202)
         async def build(identity: str, body: BuildRequest, request: Request):
             who = actor(request)
-            if not self.settings.modal_token_id or not self.settings.modal_token_secret:
-                raise HTTPException(503, 'Configure Modal in Runtime before building an environment.')
+            if self.settings.missing_sandbox():
+                raise HTTPException(503, 'Configure a sandbox provider in Runtime before building an environment.')
             return self.enqueue(identity, body.revision, who)
 
         @router.put('/api/admin/environments/{identity}/policy')

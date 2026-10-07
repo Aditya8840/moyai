@@ -241,7 +241,7 @@ class Automations:
             raise HTTPException(409, 'The automation owner no longer has workspace access.')
         if definition.mode == 'demo':
             return
-        if not all((self.settings.modal_token_id, self.settings.modal_token_secret, self.settings.litellm_api_base, self.settings.litellm_api_key)):
+        if self.settings.missing_sandbox() or not all((self.settings.litellm_api_base, self.settings.litellm_api_key)):
             raise HTTPException(409, 'Cloud setup is incomplete. Check Runtime before running this automation.')
         enabled = {c['id'] for c in self.connectors.list() if c['connected'] and c['enabled']}
         if not set(definition.plugins) <= enabled:
@@ -437,6 +437,7 @@ class Automations:
                     conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)",
                                  (run_id, prompt, stamp, definition.model, row['owner_id']))
                     conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'status',?,'{}',?)", (run_id, 'Started by event automation' if event else 'Started by automation', stamp))
+                    conn.execute('UPDATE runs SET sandbox_provider=? WHERE id=?', (self.settings.sandbox_provider, run_id))
                     conn.execute('INSERT INTO automation_runs VALUES(?,?,?,?,?,?,?)', (occurrence, automation_id, revision, run_id, 'started', '', stamp))
                     if self.settings.temporal_enabled:
                         conn.execute('INSERT INTO durable_sessions(run_id,revision) VALUES(?,1)', (run_id,))

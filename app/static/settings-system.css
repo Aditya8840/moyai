@@ -338,3 +338,15 @@
 }
 
 .settings-view .environment-dialog { width: min(760px,calc(100% - 32px)); }
+
+.settings-view .sandbox-connection { margin-block-end: 24px; }
+.settings-view #sandbox-connection-form { max-width: 768px; display: grid; gap: 16px; margin-block-start: 20px; }
+.settings-view #sandbox-connection-fields { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
+.settings-view #sandbox-connection-form .field { display: grid; gap: 8px; margin: 0; }
+.settings-view #sandbox-connection-fields :is(.sandbox-field-wide,details) { grid-column: 1 / -1; }
+.settings-view #sandbox-connection-fields :is(input,textarea) { width: 100%; min-width: 0; }
+.settings-view .sandbox-public-key { white-space: pre-wrap; overflow-wrap: anywhere; }
+.settings-view #sandbox-connection-status:empty { display: none; }
+@media(max-width:600px) {
+  .settings-view #sandbox-connection-fields { grid-template-columns: minmax(0,1fr); }
+}

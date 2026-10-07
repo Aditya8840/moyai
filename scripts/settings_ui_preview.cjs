@@ -45,6 +45,10 @@ daily.forEach((d,i)=>d.seven_day_average=Number((daily.slice(Math.max(0,i-6),i+1
 const adoption={start:daily[0].date,end:daily.at(-1).date,total_requests:daily.reduce((n,d)=>n+d.requests,0),active_users:6,daily,weekly:{requests:312,previous_requests:198,percent_change:57.6,delta:114,start:'2026-09-30',end:'2026-10-06',previous_start:'2026-09-23',previous_end:'2026-09-29'}};
 let titleModel='openai/gpt-4.1-nano';
 let chatPreferences={send_immediately:false};
+let sandboxConnection={provider:'modal',revision:0,public_key:'c3ludGhldGljLXByZXZpZXctcHVibGljLWtleS1vbmx5',providers:{
+ modal:{configured:true,values:{modal_app_name:'moyai'},secrets:{modal_token_id:true,modal_token_secret:true}},
+ substrate:{configured:false,values:{substrate_api_url:'',substrate_router_url:'',substrate_atespace:'moyai',substrate_template:'moyai',substrate_egress_hosts:'*'},secrets:{substrate_api_token:false}}
+}};
 const json=(res,status,value)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value));};
 const server=http.createServer(async(req,res)=>{
  const url=new URL(req.url,'http://localhost'),p=url.pathname;
@@ -59,16 +63,28 @@ const server=http.createServer(async(req,res)=>{
  }
  const role=fixture==='member'?'member':'admin',empty=fixture==='empty';
  let body={};if(req.method!=='GET'){const chunks=[];for await(const chunk of req)chunks.push(chunk);try{body=JSON.parse(Buffer.concat(chunks).toString()||'{}');}catch{return json(res,400,{detail:'Invalid JSON'});}}
- const supportedWrite = (req.method==='PUT' && ['/api/settings/session-titles','/api/settings/preferences','/api/memory/preferences','/api/admin/users/role'].includes(p)) ||
+ const supportedWrite = (req.method==='PUT' && ['/api/settings/preferences','/api/settings/sandboxes','/api/settings/session-titles','/api/memory/preferences','/api/admin/users/role'].includes(p)) ||
   (req.method==='POST' && p==='/api/memory') ||
   (['PUT','DELETE'].includes(req.method) && /^\/api\/memory\/[^/]+$/.test(p)) ||
   (req.method==='POST' && /^\/api\/automations\/[^/]+\/state$/.test(p));
  if(req.method!=='GET'&&!supportedWrite)return json(res,501,{detail:'This operation is not available in the visual preview.'});
- if(fixture==='error'&&['/api/skills','/api/credentials','/api/memory','/api/admin/environments','/api/admin/spend','/api/spend','/api/admin/adoption','/api/automations'].includes(p))return json(res,503,{detail:'This preview simulates a service outage.'});
+ if(fixture==='error'&&['/api/settings/sandboxes','/api/skills','/api/credentials','/api/memory','/api/admin/environments','/api/admin/spend','/api/spend','/api/admin/adoption','/api/automations'].includes(p))return json(res,503,{detail:'This preview simulates a service outage.'});
+ if(p==='/api/settings/sandboxes'){
+  if(req.method==='PUT'){
+   if(role!=='admin')return json(res,403,{detail:'Administrator access required.'});
+   sandboxConnection={...sandboxConnection,provider:body.provider,revision:sandboxConnection.revision+1,message:'Synthetic connection test succeeded.'};
+   for(const [key,value] of Object.entries(body.values||{})){
+    if(key.includes('token')){if(value)sandboxConnection.providers[body.provider].secrets[key]=true;}
+    else sandboxConnection.providers[body.provider].values[key]=value;
+   }
+  }
+  return json(res,200,role==='admin'?sandboxConnection:{provider:sandboxConnection.provider});
+ }
  if(p==='/api/session')return json(res,200,{authenticated:true,local:true,role,user_id:'user-0',preferences:chatPreferences,csrf:'local-fixture',identity:{email:'alex@example.com',name:'Alex Morgan'}});
  if(p==='/api/config')return json(res,200,{missing:[],cloud_ready:true,harness:'claude-agent-sdk',harnesses:[{id:'claude-agent-sdk',name:'Claude Agent SDK',models:[model]}],models:[{id:model,name:'GPT-6 Astra'}],model,execution_engine:'Temporal',execution_connected:true,checkpoint_interval_seconds:600,max_concurrent_runs:100,parallel_agents_enabled:true,max_parallel_agents:100,sandbox_idle_seconds:300,run_timeout_seconds:0});
  if(p==='/api/organization')return json(res,200,{name:'Example team',google_signin:true,activity:[],slack_sessions:{enabled:true,audience:'Workspace members',thread_reply_ready:true,direct_message_ready:true}});
  if(p==='/api/runs')return json(res,200,['Review release readiness','Investigate gateway latency','Update integration tests','Draft the engineering digest'].map((prompt,i)=>({id:String(i+1).repeat(32),prompt,status:'idle',updated_at:stamp,created_at:stamp,children:[]})));
+ if(/^\/api\/runs\/[0-9a-f]{32}$/.test(p))return json(res,200,{id:p.split('/').at(-1),prompt:'Review release readiness',status:'completed',chat_enabled:false,mode:'modal',sandbox_provider:fixture==='modal-run'?'modal':'substrate',harness:'claude-agent-sdk',plugins:[],repo_url:'',events:[{id:1,kind:'result',message:'Review complete. No changes needed.',created_at:stamp}],approvals:[],artifacts:[],updated_at:stamp,created_at:stamp});
  if(p==='/api/session-folders')return json(res,200,{folders:[]});
  if(p==='/api/connections')return json(res,200,connections);
  if(p==='/api/settings/preferences'){if(req.method==='PUT')chatPreferences={send_immediately:body.send_immediately===true};return json(res,200,chatPreferences);}

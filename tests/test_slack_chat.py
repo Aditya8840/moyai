@@ -165,6 +165,16 @@ def test_thread_followups_and_both_slack_event_types_share_one_session(slack_app
     assert len(app.state.store.rows('SELECT * FROM slack_receipts')) == 2
 
 
+def test_existing_slack_session_keeps_modal_after_switch_to_unconfigured_substrate(slack_app):
+    app, client, run_id = start(slack_app)
+    finish(app, run_id, 'Ready.')
+    app.state.settings.sandbox_provider = 'substrate'
+    assert app.state.settings.missing_sandbox('substrate')
+    send(client, 1, 'Continue on the original provider.')
+    assert app.state.store.run(run_id)['sandbox_provider'] == 'modal'
+    assert app.state.store.messages(run_id)[-1]['status'] == 'queued'
+
+
 def test_parallel_duplicate_delivery_cannot_enqueue_twice(slack_app):
     app, client, run_id = start(slack_app)
     payload = event('EvParallelFollowup', type='message', ts='1790719001.111111', thread_ts=ROOT, text='Continue please')

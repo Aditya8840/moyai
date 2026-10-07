@@ -297,6 +297,7 @@ class AgentCoordinator:
                          run['active_user_id'], run['active_user_id'], snapshot, parent_id, group_id, label, run.get('environment_id', 'auto'), run.get('environment_build_id', 'none'), run.get('harness', 'hermes'), run.get('github_repository_id')))
                     conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)",
                                  (child_id, prompt, stamp, model, run['active_user_id']))
+                    conn.execute('UPDATE runs SET sandbox_provider=? WHERE id=?', (run['sandbox_provider'], child_id))
                     # Child creation and its Temporal wake are one durable write.
                     conn.execute('INSERT INTO durable_sessions(run_id,revision) VALUES(?,1)', (child_id,))
                 conn.execute("UPDATE agent_groups SET status='running',snapshot_id=? WHERE id=?", (snapshot, group_id))

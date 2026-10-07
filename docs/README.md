@@ -21,7 +21,7 @@ Follow the [installation walkthrough](getting-started.md) to deploy Moyai on Mod
 | Guide | What you'll find |
 | --- | --- |
 | [Install and run a real task](getting-started.md) | Account setup, credentials, Modal deployment, first task, GitHub, and troubleshooting |
-| [Cloud setup and deployment](deployment.md) | Modal sandboxes, Render, Docker, migration, and backups |
+| [Cloud setup and deployment](deployment.md) | Modal or Substrate sandboxes, Render, Docker, migration, and backups |
 | [Sign-in and user roles](authentication.md) | Google Workspace SSO and administrators |
 | [App connections](integrations.md) | Linear, Slack, Notion, GitHub, and repository rulesets |
 | [Secure access and 1Password](credentials.md) | Credential requests, ownership, and vault access |
