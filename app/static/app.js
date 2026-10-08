@@ -374,6 +374,8 @@ async function openRun(id,hash='#run='+id){
   if($('#cancel'))$('#cancel').onclick=async()=>{try{await api(`/api/runs/${id}/cancel`,{method:'POST'});await openRun(id);}catch(e){toast(e.message);}};
   if($('#retry'))$('#retry').onclick=async()=>{await navigate('tasks');$('#prompt').value=run.prompt;$('#repo').value=run.repo_url;$('#mode').value=run.mode;$('#mode').dispatchEvent(new Event('change'));document.querySelectorAll('[name="plugin"]').forEach(input=>input.checked=run.plugins.includes(input.value));};
   renderApprovals(run.approvals || []);
+  if(link?.fileRef)await openLinkedFile(link,version);
+  if(version!==state.pageVersion)return;
   savedFiles.sync(run);
   if(link?.fileRef)await openLinkedFile(link,version);
   if(version!==state.pageVersion)return;
