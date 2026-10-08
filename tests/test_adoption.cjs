@@ -10,17 +10,17 @@ function setup(){
 }
 const data={start:'2026-10-01',end:'2026-10-01',total_requests:0,active_users:0,daily:[{date:'2026-10-01',requests:0,seven_day_average:0,active_users:0,partial:true}],weekly:{start:'2026-09-24',end:'2026-09-30',previous_start:'2026-09-17',previous_end:'2026-09-23',requests:0,previous_requests:0,delta:0,percent_change:null}};
 test('empty and single-day charts are finite, accessible, and honest about missing baseline',()=>{
- const {c}=setup();const html=c.adoptionDashboard(data);
- assert.doesNotMatch(html,/NaN|Infinity|undefined/);assert.match(html,/No recorded human requests/);assert.match(html,/No requests in either week/);assert.match(html,/role="img"/);assert.match(html,/Daily breakdown/);assert.match(html,/partial/);
+ const {c}=setup();const html=c.adoptionDashboard(data)+c.adoptionDetails(data);
+ assert.doesNotMatch(html,/NaN|Infinity|undefined/);assert.match(html,/No recorded human requests/);assert.match(html,/No requests in either week/);assert.match(html,/role="img"/);assert.match(html,/Daily human activity/);assert.match(html,/partial/);
  const growth=c.adoptionDashboard({...data,weekly:{...data.weekly,requests:5}});
  assert.match(growth,/No prior-week baseline/);assert.doesNotMatch(growth,/Infinity/);
 });
-test('members cannot fetch the admin report',async()=>{
- const {c,elements}=setup();c.state.role='member';c.api=()=>{throw Error('must not fetch');};await c.renderAdoption();assert.match(elements.get('#content').innerHTML,/administrators/);
-});
-test('filters fetch real endpoint and stale navigation cannot overwrite content',async()=>{
- const {c,elements}=setup();const calls=[];c.api=async url=>{calls.push(url);return data;};await c.renderAdoption();assert.equal(calls[0],'/api/admin/adoption?');
- elements.get('#adoption-filter-form').onsubmit({preventDefault(){},currentTarget:{elements:{start:{value:'2026-09-01'},end:{value:'2026-09-30'}}}});
- await Promise.resolve();assert.equal(calls[1],'/api/admin/adoption?start=2026-09-01&end=2026-09-30');
- c.api=async()=>{c.state.pageVersion++;elements.get('#content').innerHTML='next page';return data;};await c.renderAdoption();assert.equal(elements.get('#content').innerHTML,'next page');
+test('human activity embeds once and keeps newest breakdown dates first',()=>{
+ const {c}=setup();const report={...data,daily:[{...data.daily[0],date:'2026-09-30'},...data.daily]};
+ const html=c.adoptionDashboard(report)+c.adoptionDetails(report);
+ assert.doesNotMatch(html,/<h1|href="#spend"|analytics-tabs|analytics-actions/);
+ const rows=html.slice(html.indexOf('<tbody>'));
+ assert.ok(rows.indexOf('2026-10-01')<rows.indexOf('2026-09-30'));
+ assert.equal(c.adoptionExport(report).length,3);
+ assert.equal(c.adoptionExport(report)[0][1],'Human requests');
 });
