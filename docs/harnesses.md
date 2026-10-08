@@ -75,12 +75,21 @@ Transient model connection failures with pending tools continue in the same live
 native thread, preserving existing command sessions under the original turn
 retry limit. See [cloud recovery](observability.md#cloud-request-failures-and-recovery).
 
-When context rejection or a terminal failure ends a Codex turn with yielded tools still pending, the
-adapter keeps that native client alive for a bounded receipt grace period (up to
-10 seconds, within the original task deadline). It drains late tool completions
-from both the failed turn and any preceding settlement turn before closing the
-client and compacting. This issues no model or tool calls. User Stop still wins;
-missing receipts remain unresolved and continue to block automatic restart.
+When context rejection ends a Codex turn, the adapter compacts the same native
+thread while commands remain alive. Only explicit native compaction can pass
+the relay's context-pressure latch; authentication, model-call limits and the
+original deadline still apply. Overflow during compaction uses the pinned
+runtime's SSE error contract so Codex can trim history and retry. Completion
+events from earlier turns remain attached to their original calls, and private
+native summaries never enter the public journal. After verified compaction the
+same thread continues; failed compaction still permits a fresh runtime only
+when all tool outcomes are confirmed. User Stop retains priority.
+
+After a terminal failure, the adapter allows up to 10 seconds for queued and
+late command receipts before closing the native client, within the original
+task deadline. This grace period issues no model or tool calls. Stop permits
+saving already-queued receipts but cancels the wait; unknown outcomes continue
+to block automatic restart.
 
 ## Claude Agent SDK
 

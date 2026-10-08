@@ -54,6 +54,7 @@ def install_codex_client(monkeypatch, agent, stream, late_items=(), late_notific
             observed.homes.append(home)
             self.notifications = stream()
             self.turn_count = 0
+            self.completed_turns = set()
             self.late_items = iter(late_items)
 
         async def __aenter__(self): return self
@@ -78,7 +79,7 @@ def install_codex_client(monkeypatch, agent, stream, late_items=(), late_notific
 
         async def next_turn_notification(self, turn_id):
             from openai_codex.errors import TransportClosedError
-            if turn_id != f'fresh-turn-{self.turn_count}':
+            if turn_id != f'fresh-turn-{self.turn_count}' or turn_id in self.completed_turns:
                 if late_notifications:
                     return late_notifications(turn_id, self.turn_count)
                 try:
@@ -86,9 +87,12 @@ def install_codex_client(monkeypatch, agent, stream, late_items=(), late_notific
                 except StopIteration:
                     raise TransportClosedError('Turn is no longer streaming') from None
             try:
-                return await anext(self.notifications)
+                event = await anext(self.notifications)
             except StopAsyncIteration:
                 raise TransportClosedError('Turn is no longer streaming') from None
+            if event.method == 'turn/completed':
+                self.completed_turns.add(turn_id)
+            return event
 
     monkeypatch.setattr('openai_codex.async_client.AsyncCodexClient', Client)
     monkeypatch.setattr(agent, 'validate', lambda: None)
@@ -279,7 +283,6 @@ def test_settlement_uses_original_receipts_and_budget_before_publishing(codex_ag
     started, finished = native_item('commandExecution')
     namespaces = []
     if outcome == 'timeout': agent.context.spec['timeout'] = 0.05
-    if outcome == 'failed': monkeypatch.setattr(codex_harness, 'RECEIPT_TIMEOUT_SECONDS', 0.02)
 
     async def stream():
         assert agent.before_model()
@@ -291,7 +294,6 @@ def test_settlement_uses_original_receipts_and_budget_before_publishing(codex_ag
         if outcome == 'boundary': agent.boundary_failed = True
         if outcome == 'limit': agent.context.spec['max_iterations'] = 1
         yield sdk_event('turn/completed', {'turn': {'status': 'failed' if outcome == 'failed' else 'completed'}})
-        if outcome == 'failed': return
         if outcome == 'timeout': await asyncio.Event().wait()
         if outcome == 'limit':
             assert not agent.before_model()
@@ -321,6 +323,73 @@ def test_settlement_uses_original_receipts_and_budget_before_publishing(codex_ag
         assert result['sdk_failure']['boundary_reason'] == 'model call limit reached'
     if outcome == 'timeout':
         assert result['sdk_failure']['exception_type'] == 'TimeoutError'
+
+
+@pytest.mark.parametrize('outcome', ['receipt', 'queued', 'unknown', 'unconfirmed', 'failed', 'stop', 'deadline'])
+def test_native_compaction_keeps_receipts_private_and_respects_controls(codex_agent, outcome):
+    from openai_codex.errors import TransportClosedError
+    agent, events, store = codex_agent
+    started, finished = native_item('commandExecution')
+    agent.record_item(started, completed=False)
+    pressure = {'input_tokens': 30000, 'input_budget': 20000}
+    agent.context.relay.context_required = pressure
+    compacted = {'type': 'contextCompaction', 'id': 'summary'}
+    queued = [sdk_event('item/completed', {'item': finished})] if outcome == 'queued' else []
+    messages = [sdk_event('turn/started', {'turn': {'id': 'compact'}}),
+        sdk_event('rawResponseItem/completed', {'item': {'type': 'custom_tool_call_output',
+            'call_id': started['id'], 'output': 'raw-private-marker'}}),
+        sdk_event('item/completed', {'item': {'type': 'agentMessage', 'id': 'private-summary',
+            'text': 'native-private-marker'}})]
+    if outcome == 'receipt':
+        messages.extend([sdk_event('item/completed', {'item': finished})] * 2)
+    if outcome != 'unconfirmed':
+        messages.append(sdk_event('item/completed', {'item': compacted}))
+    messages.append(sdk_event('turn/completed', {'turn': {
+        'id': 'compact', 'status': 'failed' if outcome == 'failed' else 'completed'}}))
+    cleanup = []
+    closed = asyncio.Event()
+    def wake():
+        cleanup.append('wake')
+        closed.set()
+    route = SimpleNamespace(wake_notification_reader=wake)
+
+    class Client:
+        def register_goal_operation(self, thread_id):
+            assert thread_id == 'same-thread'
+            return route
+        def unregister_goal_operation(self, value):
+            assert value is route
+            cleanup.append('unregister')
+        async def thread_compact(self, thread_id):
+            assert agent.context.relay.native_compacting
+            assert agent.before_model() == (outcome != 'stop')
+        async def next_turn_notification(self, turn_id):
+            assert turn_id == 'original'
+            if queued:
+                return queued.pop()
+            raise TransportClosedError('Turn is no longer streaming')
+        async def next_goal_notification(self, value):
+            if outcome == 'stop':
+                agent.interrupt()
+            if not messages or outcome in {'stop', 'deadline'}:
+                await closed.wait()
+                raise TransportClosedError('Compaction reader closed')
+            return messages.pop(0)
+
+    async def run():
+        if outcome == 'deadline':
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(0.02):
+                    await agent.compact_context(Client(), 'same-thread', ['original'])
+        else:
+            assert await agent.compact_context(Client(), 'same-thread', ['original']) == (outcome not in {'unconfirmed', 'failed', 'stop'})
+    asyncio.run(run())
+    assert bool(agent.journal.pending) == bool(store.pending) == (outcome not in {'receipt', 'queued'})
+    assert agent.journal.completed_tools == int(outcome in {'receipt', 'queued'})
+    assert agent.model_calls == int(outcome != 'stop') and cleanup == ['unregister', 'wake']
+    assert agent.context.relay.context_required is pressure and not agent.context.relay.native_compacting
+    saved = json.dumps([agent.journal.messages, events, store.history()])
+    assert 'raw-private-marker' not in saved and 'native-private-marker' not in saved
 
 
 @pytest.mark.parametrize('outcome', ['receipt', 'unknown', 'stop', 'deadline'])
@@ -406,8 +475,8 @@ def test_live_transport_keeps_tools_all_prior_turns_and_queued_input(codex_agent
     monkeypatch.setattr(codex_harness.asyncio, 'sleep', backoff)
 
     def late(turn_id, current_turn):
-        # Both receipts arrive after two transport continuations and the normal
-        # settlement turn. Reading only the latest retired turn loses them.
+        # Both receipts arrive as settlement starts, after two transport
+        # continuations. Reading only the latest retired turn loses them.
         item = {'fresh-turn-1': first_done, 'fresh-turn-2': second_done}.get(turn_id)
         if current_turn == 4 and item and turn_id not in delivered:
             delivered.add(turn_id)
@@ -427,7 +496,10 @@ def test_live_transport_keeps_tools_all_prior_turns_and_queued_input(codex_agent
         yield sdk_event('item/completed', {'item': {'id': 'premature', 'type': 'agentMessage',
             'phase': 'final_answer', 'text': 'Unconfirmed answer.'}})
         yield sdk_event('turn/completed', {'turn': {'status': 'completed'}})
-        assert len(observed.prompts) == 4 and agent.journal.pending
+        # Compaction's receipt pump also serves transport recovery: completions
+        # on older turns are saved before the next model request is admitted.
+        assert len(observed.prompts) == 4 and not agent.journal.pending
+        assert agent.journal.completed_tools == 2
         assert agent.before_model()
         namespaces.append(agent.journal.call_namespace)
         yield sdk_event('item/completed', {'item': {'id': 'confirmed', 'type': 'agentMessage',
@@ -574,12 +646,11 @@ def test_live_transport_cannot_bypass_recovery_guards(codex_agent, monkeypatch, 
         status = {'native_interrupted': 'interrupted', 'native_unknown': 'unknown'}.get(guard, 'failed')
         yield sdk_event('turn/completed', {'turn': {'status': status,
             'error': {'codexErrorInfo': {'httpConnectionFailed': {'httpStatusCode': 502}}}}})
-        if late_receipt:
-            # Already queued by the native runtime: rejecting another inference
-            # must not discard this authoritative result while closing its client.
-            yield sdk_event('item/completed', {'item': finished})
 
-    observed = install_codex_client(monkeypatch, agent, stream)
+    # Already queued by the native runtime: rejecting another inference must
+    # still save its authoritative result from the completed turn's channel.
+    late_items = [sdk_event('item/completed', {'item': native_item('commandExecution')[1]})] if late_receipt else []
+    observed = install_codex_client(monkeypatch, agent, stream, late_items=late_items)
     result = asyncio.run(agent._run('Work', 'Moyai'))
     assert not result['completed'] and not resumed and len(observed.prompts) == 1
     assert len(observed.homes) == len(observed.thread_options) == 1
@@ -624,6 +695,105 @@ def test_native_restart_accepts_reused_message_ids(codex_agent, monkeypatch):
     assert assistant_prose(results[-1]['messages']) == expected
     assert_public_messages(results[-1], events, store, saved=expected,
                            commentary=['Update.', 'Update.'], response='Answer 2.')
+
+
+@pytest.mark.parametrize('arrival', ['request', 'summary', 'handoff'])
+def test_compaction_drains_late_receipts_with_pinned_sdk_routing(codex_agent, monkeypatch, arrival):
+    from openai_codex.async_client import AsyncCodexClient
+    from openai_codex.models import Notification, UnknownNotification
+    agent, events, store = codex_agent
+    monkeypatch.setattr(codex_harness, 'RECEIPT_TIMEOUT_SECONDS', 0.5)
+    started, finished = native_item('commandExecution')
+    agent.record_item(started, completed=False)
+    routed = []
+
+    class Client(AsyncCodexClient):
+        def emit(self, method, body, turn_id='original'):
+            self._sync._router.route_notification(Notification(method, UnknownNotification({
+                'threadId': 'same-thread', 'turnId': turn_id, **body})))
+
+        async def thread_compact(self, thread_id):
+            self.emit('turn/started', {'turn': {'id': 'compact'}}, 'compact')
+            if arrival == 'request':
+                self.emit('item/completed', {'item': finished})
+                # Admission can wait for a receipt while the RPC is outstanding.
+                assert await asyncio.to_thread(agent.before_model, json.dumps({'input': [
+                    {'type': 'function_call_output', 'call_id': started['id'], 'output': 'wire-only'}]}))
+            if arrival == 'summary':
+                self.emit('item/completed', {'item': finished})
+            self.emit('item/completed', {'item': {'type': 'contextCompaction', 'id': 'summary'}}, 'compact')
+            self.emit('turn/completed', {'turn': {'id': 'compact', 'status': 'completed'}}, 'compact')
+            if arrival == 'handoff':
+                # The SDK reader can queue a tool completion behind the compact
+                # turn's completion before the adapter closes the goal route.
+                self.emit('item/completed', {'item': finished})
+
+        async def next_goal_notification(self, route):
+            event = await super().next_goal_notification(route)
+            routed.append(event.method)
+            return event
+
+    async def run():
+        client = Client()
+        client._sync._router.register_turn('original')
+        client.emit('turn/completed', {'turn': {'id': 'original', 'status': 'failed'}})
+        assert await agent.compact_context(client, 'same-thread', ['original'])
+        assert not client._sync._router.has_goal('same-thread')
+
+    asyncio.run(run())
+    assert not agent.boundary_failed and not store.pending
+    assert agent.journal.completed_tools == 1
+    assert routed.count('item/completed') == 2
+    assert sum(message['role'] == 'tool' for message in agent.journal.messages) == 1
+
+
+def test_turn_start_keeps_prior_receipts_flowing(codex_agent, monkeypatch):
+    from openai_codex.errors import TransportClosedError
+    agent, events, store = codex_agent
+    monkeypatch.setattr(codex_harness, 'RECEIPT_TIMEOUT_SECONDS', 0.5)
+    started, finished = native_item('commandExecution')
+    queued = []
+    original = [sdk_event('item/started', {'item': started}),
+                sdk_event('turn/completed', {'turn': {'status': 'failed'}})]
+    continued = [sdk_event('item/completed', {'item': {'type': 'agentMessage',
+        'id': 'answer', 'phase': 'final_answer', 'text': 'Confirmed answer.'}}),
+        sdk_event('turn/completed', {'turn': {'status': 'completed'}})]
+
+    class Client:
+        def __init__(self, config): self.turns = 0
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def initialize(self): pass
+        async def thread_start(self, options):
+            return SimpleNamespace(thread=SimpleNamespace(id='same-thread'))
+        async def turn_start(self, thread_id, prompt):
+            self.turns += 1
+            if self.turns == 1:
+                return SimpleNamespace(turn=SimpleNamespace(id='original'))
+            queued.append(sdk_event('item/completed', {'item': finished}))
+            admitted = await asyncio.to_thread(agent.before_model, json.dumps({'input': [
+                {'type': 'function_call_output', 'call_id': started['id'], 'output': 'wire-only'}]}))
+            assert admitted
+            return SimpleNamespace(turn=SimpleNamespace(id='continued'))
+
+        async def next_turn_notification(self, turn_id):
+            if turn_id == 'continued':
+                return continued.pop(0)
+            if original:
+                agent.context.relay.context_required = {'input_tokens': 30000, 'input_budget': 20000}
+                return original.pop(0)
+            if queued:
+                return queued.pop(0)
+            raise TransportClosedError('Turn is no longer streaming')
+
+    async def compact(*args): return True
+    monkeypatch.setattr(agent, 'compact_context', compact)
+    monkeypatch.setattr(agent, 'validate', lambda: None)
+    monkeypatch.setattr('openai_codex.async_client.AsyncCodexClient', Client)
+    result = agent.run_conversation('Work', conversation_history=[], system_message='Moyai')
+    assert result['completed'] and result['final_response'] == 'Confirmed answer.'
+    assert not agent.boundary_failed and not store.pending
+    assert agent.journal.completed_tools == 1
 
 
 def native_item(kind, *, failed=False):

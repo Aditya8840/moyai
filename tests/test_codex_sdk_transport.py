@@ -11,8 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from sandbox.codex_harness import CodexAgent
-from sandbox.broker_relay import BrokerRelay
-from sandbox.context_store import ContextStore
+from sandbox.context_store import ContextStore, ContextUnavailable
 
 
 def send_response(handler, output, sequence, input_tokens=500):
@@ -34,13 +33,12 @@ def send_response(handler, output, sequence, input_tokens=500):
 
 
 @pytest.mark.parametrize('outcome', [
-    'complete', 'interrupt', 'provider-error', 'compaction', 'context-recovery-limit', 'iteration-limit', 'startup-reconnect'])
+    'complete', 'interrupt', 'provider-error', 'compaction', 'context-recovery-limit', 'iteration-limit'])
 def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, outcome):
     requests, attempts, calls, events, faults = [], [], [], [], []
     samples, summaries = [], []
     boundaries, recovered = [], []
-    successful = outcome in {'complete', 'compaction', 'context-recovery-limit', 'startup-reconnect'}
-    context_reads = []
+    successful = outcome in {'complete', 'compaction', 'context-recovery-limit'}
     max_iterations = {'context-recovery-limit': 4, 'iteration-limit': 2}.get(outcome, 12)
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
@@ -69,11 +67,6 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
             self.wfile.write(raw)
 
         def do_GET(self):
-            if self.path == '/context/window' and outcome == 'startup-reconnect':
-                context_reads.append(len(requests))
-                status = 502 if len(context_reads) == 1 else 200
-                print(f'Context GET: HTTP {status}; model requests so far: {len(requests)}', flush=True)
-                return self.reply({'input_budget': 64000}, status)
             if self.path != '/tools':
                 faults.append('Unexpected GET ' + self.path)
                 return self.reply({'error': {'message': 'Unknown route'}}, 404)
@@ -139,10 +132,6 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     relay.url = f'http://127.0.0.1:{server.server_port}'
-    if outcome == 'startup-reconnect':
-        context_relay = BrokerRelay(relay.url, 'fixture-capability', notify=lambda message: print(message, flush=True))
-        context_relay.server.server_close()  # Only its direct metadata reader is needed.
-        relay.context_window = context_relay.context_window
     if outcome == 'compaction':
         relay.context_window = lambda: {'input_budget': 35000}
     store = ContextStore(tmp_path / 'context.sqlite3', 'codex-transport')
@@ -256,10 +245,6 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
         assert 'requester-private-first-marker' not in json.dumps(requests[-1])
         assert 'requester-private-second-marker' in json.dumps(requests[-1])
         assert 'codex-mcp-ok' in json.dumps(requests[-1])
-        if outcome == 'startup-reconnect':
-            assert context_reads == [0, 0, 4]
-            print('PASS: recovered startup, completed 3 real tools, cold-restored SQLite receipts; '
-                  'MCP action executed once across both invocations.', flush=True)
         saved = ''.join(row[0] for row in store.db.execute('SELECT message FROM journal'))
         assert 'requester-private-first-marker' not in saved
         assert 'requester-private-second-marker' not in saved
@@ -310,11 +295,22 @@ def test_native_settlement_collects_late_command_receipts(tmp_path, monkeypatch,
         '1 unresolved tool(s)). Saved tool receipts are preserved.' if limited else 'yield-test-complete')
 
 
-def test_context_rejection_collects_late_native_receipt_before_restart(tmp_path, monkeypatch):
-    proof = native_yield_case(tmp_path, monkeypatch, 1000, 'settle-context')
+@pytest.mark.parametrize('outcome,delay,rounds,rejections', [
+    ('settle-context', 12, 1, 0), ('settle-context-preview', 0, 2, 1),
+    ('settle-context-during-compaction', 0, 1, 0), ('settle-context-transport-preview', 0, 1, 0)])
+def test_context_rejection_compacts_in_place_with_live_tools(tmp_path, monkeypatch, outcome, delay, rounds, rejections):
+    proof = native_yield_case(tmp_path, monkeypatch, 1000, outcome,
+                             context_delay=delay, context_rounds=rounds, compact_rejections=rejections)
     assert proof['completed'] and not proof['pending_tools'], proof
     assert proof['tool_executions'] == proof['completed_receipts'] == 1
-    assert proof['upstream_requests'] == 3
+    assert proof['native_clients'] == proof['native_threads'] == 1
+    assert proof['native_compactions'] == rejections + rounds
+    transport_retry = int(outcome == 'settle-context-transport-preview')
+    assert proof['transport_attempt'] == transport_retry
+    assert proof['upstream_requests'] == proof['model_calls'] == 3 + 2 * rounds + rejections + transport_retry
+    assert proof['corrections_delivered'] == int(rounds > 1)
+    assert proof['receipt_during_compaction'] == (outcome == 'settle-context-during-compaction')
+    assert 'private-native-summary-marker' not in proof['saved_prose']
     assert proof['final_response'] == 'yield-test-complete'
 
 
@@ -332,7 +328,8 @@ def test_native_transport_recovery_preserves_running_commands(tmp_path, monkeypa
 
 
 def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
-                      agent_class=CodexAgent, progress=lambda text: None):
+                      agent_class=CodexAgent, progress=lambda text: None, context_delay=0.3,
+                      context_rounds=1, compact_rejections=0):
     """Real Codex + MCP + relay, including the default ~30-second exec yield.
 
     The tool waits for the next model request to reach the upstream server.
@@ -347,7 +344,12 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     workspace.mkdir()
     settlement = outcome.startswith('settle-')
     preview = outcome.endswith('preview')
-    transport = outcome.startswith('settle-transport-')
+    transport = outcome.startswith('settle-transport-') or outcome == 'settle-context-transport-preview'
+    context_case = outcome.startswith('settle-context')
+    finish_during_compaction = outcome == 'settle-context-during-compaction'
+    receipt_during_compaction = threading.Event()
+    compactions = []
+    corrections = []
     if settlement:
         (workspace / 'command.py').write_text(
             'import http.server, pathlib, signal, sys, time\n'
@@ -358,7 +360,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 ' print("preview-ready", flush=True)\n server.serve_forever()\n'
                 if preview else
                 ' while not pathlib.Path("release").exists(): time.sleep(0.05)\n'
-                + (' time.sleep(0.3)\n' if outcome == 'settle-context' else '')) +
+                + (f' time.sleep({context_delay})\n' if context_case else '')) +
             'finally:\n print("slow-tool-complete", flush=True)\n')
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', capability)
     agent = None
@@ -383,8 +385,8 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
 
         async def next_turn_notification(self, turn_id):
             event = await super().next_turn_notification(turn_id)
-            if (outcome == 'settle-context' and event.method == 'turn/completed'
-                    and agent.context.relay.context_required):
+            if (context_case and event.method == 'turn/completed'
+                    and agent.context.relay.context_required and not finish_during_compaction):
                 # Finish only after the failed turn: recovery must keep the
                 # original runtime alive to obtain this command's receipt.
                 (workspace / 'release').touch()
@@ -434,7 +436,36 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 return self.reply({'text': 'slow-tool-complete'})
             assert self.path == '/v1/responses'
             requests.append(body)
-            sequence = len(requests)
+            if context_case and relay.native_compacting:
+                compactions.append(body)
+                progress('Native compaction request; original command remains live')
+                assert agent.journal.pending
+                if len(compactions) <= compact_rejections:
+                    return self.reply({'detail': {'code': 'context_compaction_required',
+                        'input_tokens': 300000, 'input_budget': 200000}}, 409)
+                if len(compactions) == compact_rejections + 1 and compact_rejections:
+                    assert len(json.dumps(body)) < len(json.dumps(compactions[0]))
+                if context_rounds > 1 and len(compactions) == compact_rejections + context_rounds:
+                    assert agent.accept_input({'id': 42, 'content': 'Keep the final response concise.'})
+                if preview:
+                    from urllib.request import urlopen
+                    port = (workspace / 'preview-port').read_text()
+                    with urlopen(f'http://127.0.0.1:{port}/command.py', timeout=2) as response:
+                        assert response.status == 200
+                    progress('Original preview still serves HTTP 200 during compaction')
+                sessions = re.findall(r'session_id(?:\\?"\s*:\s*|:\s*)(\d+)', json.dumps(body))
+                assert sessions, 'Native summary must retain the running command handle'
+                if finish_during_compaction:
+                    (workspace / 'release').touch()
+                    assert receipt_during_compaction.wait(5), 'Receipt must be saved while compaction is still running'
+                    assert not agent.journal.pending and agent.journal.completed_tools == 1
+                    progress('Original command receipt saved before the compaction response')
+                output = {'type': 'message', 'id': 'native-summary', 'role': 'assistant',
+                    'status': 'completed', 'content': [{'type': 'output_text', 'text':
+                    'private-native-summary-marker. A command is still running, session_id: ' + sessions[-1]
+                    + '. Collect its result using write_stdin; do not rerun it.'}]}
+                return send_response(self, output, len(requests))
+            sequence = len(requests) - len(compactions)
             progress(f'Model request {sequence} admitted; pending tools: {len(agent.journal.pending)}')
             if sequence == 1:
                 code = ('text(await tools.exec_command(' + json.dumps({
@@ -445,14 +476,16 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                     code = '// @exec: ' + json.dumps({'yield_time_ms': yield_ms}) + '\n' + code
                 output = {'type': 'custom_tool_call', 'id': 'exec_1', 'call_id': 'outer_1',
                           'name': 'exec', 'namespace': 'functions', 'input': code}
+            elif transport and sequence == 2:
+                assert agent.journal.pending and steps == [0]
+                progress('Injecting an edge HTTP 502 with the existing command still running')
+                return self.reply({}, 502)
+            elif context_case and 2 + int(transport) <= sequence <= context_rounds + 1 + int(transport):
+                assert agent.journal.pending and steps == [0]
+                return self.reply({'detail': {'code': 'context_compaction_required',
+                    'input_tokens': 300000, 'input_budget': 200000}}, 409)
             elif settlement and sequence == 2:
                 assert agent.journal.pending and steps == [0]
-                if outcome == 'settle-context':
-                    return self.reply({'detail': {'code': 'context_compaction_required',
-                        'input_tokens': 300000, 'input_budget': 200000}}, 409)
-                if transport:
-                    progress('Injecting an edge HTTP 502 with the existing command still running')
-                    return self.reply({}, 502)
                 if preview:
                     from urllib.request import urlopen
                     port = (workspace / 'preview-port').read_text()
@@ -462,22 +495,24 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 output = {'type': 'message', 'id': 'premature', 'role': 'assistant',
                     'phase': 'final_answer', 'status': 'completed',
                     'content': [{'type': 'output_text', 'text': 'premature-answer'}]}
-            elif settlement and sequence == 3 and outcome != 'settle-context':
-                assert agent.journal.pending and agent.model_calls == 3
+            elif settlement and sequence == (context_rounds + 2 + int(transport) if context_case else 3):
+                assert bool(agent.journal.pending) != finish_during_compaction
+                assert agent.model_calls == sequence + len(compactions)
                 if transport and preview:
                     from urllib.request import urlopen
                     port = (workspace / 'preview-port').read_text()
                     with urlopen(f'http://127.0.0.1:{port}/command.py', timeout=2) as response:
                         assert response.status == 200
                     progress('After reconnect: original preview server still answers HTTP 200')
-                sessions = re.findall(r'session_id\\?"\s*:\s*(\d+)', json.dumps(body))
+                corrections.extend(item for item in body['input'] if 'Keep the final response concise.' in json.dumps(item))
+                sessions = re.findall(r'session_id(?:\\?"\s*:\s*|:\s*)(\d+)', json.dumps(body))
                 assert sessions, 'Native command must return a running session'
                 (workspace / 'release').touch()
                 progress('Settlement turn stops the preview or waits for finite work')
                 output = {'type': 'custom_tool_call', 'id': 'settle', 'call_id': 'settle',
                     'name': 'exec', 'namespace': 'functions',
                     'input': 'text(await tools.write_stdin(' + json.dumps({
-                        'session_id': int(sessions[-1]), 'yield_time_ms': 1000,
+                        'session_id': int(sessions[-1]), 'yield_time_ms': 20000 if context_case else 1000,
                         'chars': '\u0003' if preview else ''}) + '));'}
             elif sequence == 2:
                 assert len(calls) == 1 and agent.journal.pending
@@ -503,7 +538,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                         report_error=diagnostics.append).start()
     store = ContextStore(tmp_path / 'context.sqlite3', 'yield-test')
     store.initialize([])
-    if outcome == 'settle-context':
+    if context_case:
         def compact(previous, entries, **kwargs):
             assert not agent.journal.pending
             assert 'slow-tool-complete' in json.dumps(entries)
@@ -518,29 +553,40 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
         if outcome == 'interrupt' and agent.journal.completed_tools:
             agent.interrupt()
 
+    def completed(*args):
+        events.append(('complete', args))
+        if relay.native_compacting:
+            receipt_during_compaction.set()
+
     agent = agent_class(spec={'model': 'openai/gpt-6-astra', 'timeout': 60,
-        'max_iterations': 2 if outcome == 'settle-limit' else 6},
+        'max_iterations': 2 if outcome == 'settle-limit' else 8},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
             'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
         activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
-            complete=lambda *args: events.append(('complete', args)), commentary=lambda text: None),
+            complete=completed, commentary=lambda text: None),
         step=step, cwd=str(workspace), definition=None, context_store=store)
     try:
-        result = agent.run_conversation('Run the local slow tool once.', conversation_history=[],
-                                        system_message='Local yield regression fixture.')
+        try:
+            result = agent.run_conversation('Run the local slow tool once.', conversation_history=[],
+                                            system_message='Local yield regression fixture.')
+        except ContextUnavailable as exc:
+            result = {'completed': False, 'interrupted': False, 'failed': True,
+                      'messages': agent.journal.messages, 'final_response': str(exc)}
         assert calls == ([] if settlement else [{'name': 'slow_echo', 'arguments': {}}])
         receipts = [m for m in result['messages'] if m['role'] == 'tool']
         assert all('slow-tool-complete' in receipt['content'] for receipt in receipts)
         proof = {key: result[key] for key in ('completed', 'interrupted', 'failed', 'final_response')}
         proof.update(boundary_failed=agent.boundary_failed, model_calls=agent.model_calls,
-            transport_attempt=getattr(agent, 'transport_attempt', 0),
-            native_clients=len(native_clients), native_threads=len(native_threads),
             upstream_requests=len(requests), lifecycle_steps=steps,
             tool_executions=sum(kind == 'start' for kind, _ in events),
             completed_receipts=len(receipts), pending_tools=len(store.pending),
             tool_events=[kind for kind, _ in events], faults=faults, transport_errors=diagnostics,
             sdk_failure=result.get('sdk_failure'), native_errors=native_errors, native_plugins=native_plugins,
+            native_clients=len(native_clients), native_threads=len(native_threads),
+            transport_attempt=agent.transport_attempt, native_compactions=len(compactions),
+            receipt_during_compaction=receipt_during_compaction.is_set(),
+            corrections_delivered=len(corrections),
             saved_prose='\n'.join(m.get('content') or '' for m in result['messages'] if m['role'] == 'assistant'))
         progress('Result: ' + json.dumps({key: proof[key] for key in (
             'completed', 'boundary_failed', 'upstream_requests', 'tool_executions', 'completed_receipts', 'pending_tools')}))
