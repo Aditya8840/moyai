@@ -46,7 +46,9 @@ class AgentTracing:
         destinations = settings.trace_destinations()
         self.enabled = bool(destinations)
         self.resource = Resource({'service.name': 'moyai',
-                                  'deployment.environment.name': settings.trace_environment})
+                                  'deployment.environment.name': settings.trace_environment,
+                                  'deployment.environment': settings.trace_environment,
+                                  **({'agent.version': settings.moyai_build_sha} if settings.moyai_build_sha else {})})
         self.processor = processor
         with store.connect() as conn:
             conn.execute('''CREATE TABLE IF NOT EXISTS trace_contexts (
@@ -156,6 +158,10 @@ class AgentTracing:
                       # Raindrop groups spans into conversations and turns by these keys.
                       'traceloop.association.properties.convo_id': session,
                       'traceloop.association.properties.event_id': format(trace_id, '032x'), **attrs}
+        attributes['deployment.environment'] = self.settings.trace_environment
+        attributes.pop('agent.version', None)
+        if self.settings.moyai_build_sha:
+            attributes['agent.version'] = self.settings.moyai_build_sha
         user = self.user_identity(run, message_id, connection)
         if user:
             attributes['user.id'] = user

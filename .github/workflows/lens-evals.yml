@@ -1,0 +1,107 @@
+name: Lens evals
+
+on:
+  pull_request:
+    paths:
+      - 'evals/**'
+      - 'tests/test_lens_evals.py'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/lens-evals.yml'
+  workflow_dispatch:
+    inputs:
+      agent-url:
+        description: HTTPS origin of the dedicated, ready Moyai eval deployment
+        required: true
+        type: string
+      agent-build-sha:
+        description: Full build SHA deployed there (must match its MOYAI_BUILD_SHA)
+        required: true
+        type: string
+      eval-name:
+        description: Saved Lens evaluation
+        default: moyai-coding-regressions
+        type: string
+      lens-url:
+        description: Lens server origin (defaults to the LENS_BASE_URL repository variable)
+        type: string
+  workflow_call:
+    inputs:
+      agent-url:
+        required: true
+        type: string
+      agent-build-sha:
+        required: true
+        type: string
+      eval-name:
+        default: moyai-coding-regressions
+        type: string
+      lens-url:
+        default: ''
+        type: string
+    secrets:
+      LENS_API_KEY:
+        required: true
+      MOYAI_EVAL_PASSWORD:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify-sdk:
+    # No deployment credentials or agent tasks: prove the real GitHub SDK builds/imports.
+    if: github.event_name == 'pull_request' && inputs.agent-url == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      RUSTUP_TOOLCHAIN: 1.99.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install native SDK build toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Install pinned Lens SDK from GitHub
+        run: uv sync --frozen --python 3.13 --group eval
+      - name: Verify named SDK import
+        run: >-
+          uv run --frozen --group eval python -c
+          'from lens import Lens, _native; assert callable(_native.run_named); print("Named Lens SDK imported successfully")'
+      - name: Test deployment readiness checks without credentials
+        run: uv run --frozen --group eval pytest tests/test_lens_evals.py -q --tb=short
+  evaluate:
+    # Call this only from a trusted deployment workflow with its own ready URL/build.
+    if: >-
+      inputs.agent-url != '' && inputs.agent-build-sha != '' &&
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    env:
+      MOYAI_EVAL_URL: ${{ inputs.agent-url }}
+      MOYAI_EVAL_PASSWORD: ${{ secrets.MOYAI_EVAL_PASSWORD }}
+      LENS_VERSION: ${{ inputs.agent-build-sha }}
+      LENS_BASE_URL: ${{ inputs.lens-url || vars.LENS_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - name: Install readiness checker dependencies
+        run: python -m pip install 'httpx>=0.28,<1' 'pydantic>=2.11,<3'
+      - name: Verify deployed Moyai build and runtime
+        run: python -m evals.preflight
+      - name: Evaluate saved Lens dataset
+        uses: BerriAI/lens/src/sdk/action@45b11ae53b740e77c0f8cea804bb4aa9bbc8f760
+        with:
+          eval-name: ${{ inputs.eval-name }}
+          api-key: ${{ secrets.LENS_API_KEY }}
+          base-url: ${{ env.LENS_BASE_URL }}
+          install-from-source: 'true'
