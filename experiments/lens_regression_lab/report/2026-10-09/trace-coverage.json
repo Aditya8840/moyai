@@ -1,0 +1,13 @@
+{
+  "captured_at": "2026-10-09T23:10:34.170866+00:00",
+  "window": "API default last 24 hours at initial snapshot",
+  "trace_count": 33,
+  "environment_counts": {
+    "unknown": 3,
+    "production": 30
+  },
+  "tool_calls": 2138,
+  "error_containing_traces": 22,
+  "note": "Tool errors may be recovered and are not task-level failures. At most100 spans sampled pertrace; environment unknown when root not present in firstpage. Model names and counts are observations, not correctness labels.",
+  "publication_note": "Per-production-trace identifiers and telemetry are omitted from this public report. Aggregate totals preserve the measured snapshot."
+}

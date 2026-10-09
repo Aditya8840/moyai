@@ -1,0 +1,28 @@
+{
+  "measurement": "Actual historical default_harness method, current Settings context; no model inference",
+  "expected_harness": "codex",
+  "cases": [
+    {
+      "revision": "61818fa91f3cd37db38b0d3d25ce4a8f6a1fce82",
+      "reference": "5fd2114^",
+      "model": "openai/gpt-6.1-sol",
+      "effective_harness": "claude-agent-sdk",
+      "explicit_override": false
+    },
+    {
+      "revision": "5fd2114a74fd48cd6be7fa27175cb9c45a459946",
+      "reference": "5fd2114",
+      "model": "openai/gpt-6.1-sol",
+      "effective_harness": "codex",
+      "explicit_override": false
+    },
+    {
+      "revision": "ffcc83e054d45242a8a1a6465d1f775761ad6452",
+      "reference": "HEAD",
+      "model": "openai/gpt-6.1-sol",
+      "effective_harness": "codex",
+      "explicit_override": false
+    }
+  ],
+  "limitation": "Confirms routing defect only, not the relative quality of model/SDK pairings"
+}

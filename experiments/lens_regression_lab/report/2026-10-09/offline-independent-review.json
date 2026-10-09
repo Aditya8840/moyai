@@ -1,0 +1,136 @@
+{
+  "experiment": "handcrafted-output-mutation-sensitivity",
+  "model_calls": 0,
+  "warning": "A deterministic verifier experiment, not agent/model execution or estimated real-world recall. Additional checks were selected after identifying these gaps; validate on held-out mutations next.",
+  "source_revision": "ffcc83e054d45242a8a1a6465d1f775761ad6452",
+  "fixture_sha256": "a5d1b87395b77552bbb0a3f67521dd95a8af46d36ec794a798a8e5e55f909a29",
+  "python": "3.14.5",
+  "created_at": "2026-10-09T23:06:11.606743+00:00",
+  "controls": [
+    {
+      "case": "stable-deduplication",
+      "current_passed": true,
+      "stronger_passed": true
+    },
+    {
+      "case": "merge-intervals",
+      "current_passed": true,
+      "stronger_passed": true
+    },
+    {
+      "case": "iterable-chunking",
+      "current_passed": true,
+      "stronger_passed": true
+    },
+    {
+      "case": "strict-boolean-parsing",
+      "current_passed": true,
+      "stronger_passed": true
+    }
+  ],
+  "mutations": [
+    {
+      "mutation": "sort-deduplication",
+      "case": "stable-deduplication",
+      "defect": "Sorts unique values instead of preserving their first occurrence",
+      "solution_sha256": "6ad7fd47d8a5abf8ab36b4692b302081a9f4f5efe1609076d9d539b0a5b1a62a",
+      "current_detected": true,
+      "stronger_detected": true
+    },
+    {
+      "mutation": "mutate-deduplication-input",
+      "case": "stable-deduplication",
+      "defect": "Replaces the caller list with deduplicated values",
+      "solution_sha256": "4f74e2bdd4385c51bca332e59e793a8401ac536de5087c816ade88b1dba3a971",
+      "current_detected": true,
+      "stronger_detected": true
+    },
+    {
+      "mutation": "stringify-deduplication-keys",
+      "case": "stable-deduplication",
+      "defect": "Conflates distinct hashable values with the same string representation",
+      "solution_sha256": "7006dc1370332468e369f38a4939b09c85aeeb4d40a863346a0de402a880213e",
+      "current_detected": false,
+      "stronger_detected": true
+    },
+    {
+      "mutation": "exclude-touching-intervals",
+      "case": "merge-intervals",
+      "defect": "Does not merge touching endpoints",
+      "solution_sha256": "b25878d09724b5e83e15e002c24ac080ac61146ae78421ead60e04d2b87fec66",
+      "current_detected": true,
+      "stronger_detected": true
+    },
+    {
+      "mutation": "sort-intervals-in-place",
+      "case": "merge-intervals",
+      "defect": "Mutates the caller list while sorting",
+      "solution_sha256": "2ade4025460e479843c622ba27f7f6b966e556df2bfd36b8876f5eb1dba21948",
+      "current_detected": true,
+      "stronger_detected": true
+    },
+    {
+      "mutation": "drop-zero-width-intervals",
+      "case": "merge-intervals",
+      "defect": "Discards valid zero-width intervals",
+      "solution_sha256": "d71af54cc3b10645e60247635d1df1a4d164316b28476da7c10f62f20a123043",
+      "current_detected": false,
+      "stronger_detected": true
+    },
+    {
+      "mutation": "slice-generator",
+      "case": "iterable-chunking",
+      "defect": "Assumes all iterables support length and slicing",
+      "solution_sha256": "a86c87baf3890af021ad36a5aab1ade83e1dfd8d79da98f15f036e10ad8a1fa2",
+      "current_detected": true,
+      "stronger_detected": true
+    },
+    {
+      "mutation": "drop-remainder-chunk",
+      "case": "iterable-chunking",
+      "defect": "Discards the final shorter chunk",
+      "solution_sha256": "74c350219eeb3f79be7bb47d3c9030ef9c9b42715ca454865e98efeb447eb94d",
+      "current_detected": true,
+      "stronger_detected": true
+    },
+    {
+      "mutation": "size-one-shortcut",
+      "case": "iterable-chunking",
+      "defect": "Returns the flat input for chunk size one",
+      "solution_sha256": "8e7fb71a78e0d6e68d23124249f4a7ffa3d3990c24f768da3a4067a5a94632e0",
+      "current_detected": false,
+      "stronger_detected": true
+    },
+    {
+      "mutation": "skip-whitespace-normalization",
+      "case": "strict-boolean-parsing",
+      "defect": "Rejects accepted tokens surrounded by whitespace",
+      "solution_sha256": "507ebca7c6fd98628afbbd8ed2f5b5bc1f34d981affb85053a67a8f38dc974b1",
+      "current_detected": true,
+      "stronger_detected": true
+    },
+    {
+      "mutation": "python-truthiness",
+      "case": "strict-boolean-parsing",
+      "defect": "Treats every nonempty string, including false, as true",
+      "solution_sha256": "15cdc066ed5c564f6af5af45e6b1ff514f44907fc78d434393a54b3d2206ea39",
+      "current_detected": true,
+      "stronger_detected": true
+    },
+    {
+      "mutation": "accept-numeric-aliases",
+      "case": "strict-boolean-parsing",
+      "defect": "Accepts unspecified numeric strings such as +1 and 1.0",
+      "solution_sha256": "f3403e21741432f3670bc7d6554d643ea341ba9fd91bc1cfec397cc110e2627f",
+      "current_detected": false,
+      "stronger_detected": true
+    }
+  ],
+  "summary": {
+    "known_bad_outputs": 12,
+    "current_detected": 8,
+    "stronger_detected": 12,
+    "correct_controls_current_passed": 4,
+    "correct_controls_stronger_passed": 4
+  }
+}

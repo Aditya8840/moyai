@@ -1,0 +1,346 @@
+{
+  "date": "2026-10-09",
+  "head": "ffcc83e054d45242a8a1a6465d1f775761ad6452",
+  "native_controls_detected": 3,
+  "routing_controls_detected": 1,
+  "live_model_quality_experiments": 0,
+  "lens_uploaded": false,
+  "scope": "Actual native SDK and tool behavior with deterministic loopback provider responses; no quality-inference or statistical sensitivity claim",
+  "reporting_compatibility": "Old Codex class gets transport_attempt=0 only for the current proof serializer; all historical execution methods remain unchanged",
+  "experiments": [
+    {
+      "id": "yielded-tool",
+      "title": "Keep a yielded tool alive while the model polls",
+      "type": "native SDK regression",
+      "source_pr": "https://github.com/BerriAI/moyai/pull/183",
+      "baseline_ref": "1500076",
+      "inference": "synthetic local model replies",
+      "baseline": {
+        "completed": false,
+        "interrupted": false,
+        "failed": true,
+        "final_response": "Codex stopped before completing the response. Saved tool receipts are preserved.",
+        "boundary_failed": true,
+        "model_calls": 1,
+        "upstream_requests": 1,
+        "lifecycle_steps": [
+          0
+        ],
+        "tool_executions": 1,
+        "completed_receipts": 0,
+        "pending_tools": 1,
+        "tool_events": [
+          "start"
+        ],
+        "faults": [],
+        "transport_errors": [],
+        "sdk_failure": null,
+        "native_errors": [
+          {
+            "source": "native_error",
+            "code": "httpConnectionFailed",
+            "http_status": 409,
+            "will_retry": false
+          }
+        ],
+        "native_plugins": [
+          true
+        ],
+        "native_clients": 1,
+        "native_threads": 1,
+        "transport_attempt": 0,
+        "native_compactions": 0,
+        "read_attempts": 1,
+        "receipt_during_compaction": false,
+        "corrections_delivered": 0,
+        "native_error_payloads": [
+          {
+            "error": {
+              "additionalDetails": null,
+              "codexErrorInfo": {
+                "httpConnectionFailed": {
+                  "httpStatusCode": 409
+                }
+              },
+              "message": "unexpected status 409 Conflict: Saving at a complete tool boundary., url: http://127.0.0.1:60093/v1/responses",
+              "misalignment": null
+            },
+            "threadId": "01a122e9-1012-77f2-8359-c223f298302a",
+            "turnId": "01a122e9-1048-76b2-a46d-91602428ff8a",
+            "willRetry": false
+          }
+        ],
+        "command_starts": 0,
+        "outage_elapsed": 0,
+        "readiness_statuses": [],
+        "preview_samples": [],
+        "status_events": [],
+        "saved_prose": ""
+      },
+      "candidate": {
+        "completed": true,
+        "interrupted": false,
+        "failed": false,
+        "final_response": "yield-test-complete",
+        "boundary_failed": false,
+        "model_calls": 3,
+        "upstream_requests": 3,
+        "lifecycle_steps": [
+          0,
+          1
+        ],
+        "tool_executions": 1,
+        "completed_receipts": 1,
+        "pending_tools": 0,
+        "tool_events": [
+          "start",
+          "complete"
+        ],
+        "faults": [],
+        "transport_errors": [],
+        "sdk_failure": null,
+        "native_errors": [],
+        "native_plugins": [
+          false
+        ],
+        "native_clients": 1,
+        "native_threads": 1,
+        "transport_attempt": 0,
+        "native_compactions": 0,
+        "read_attempts": 1,
+        "receipt_during_compaction": false,
+        "corrections_delivered": 0,
+        "native_error_payloads": [],
+        "command_starts": 0,
+        "outage_elapsed": 0,
+        "readiness_statuses": [],
+        "preview_samples": [],
+        "status_events": [],
+        "saved_prose": "\nyield-test-complete"
+      },
+      "grader": "Complete task, exactly one execution and receipt, no unresolved tools",
+      "detected": true,
+      "evidence": "yield/codex-yield-proof.json"
+    },
+    {
+      "id": "context-compaction",
+      "title": "Finish a running command through context compaction",
+      "type": "native SDK regression",
+      "source_pr": "https://github.com/BerriAI/moyai/pull/235",
+      "baseline_ref": "e70f696",
+      "inference": "synthetic local model replies",
+      "baseline": {
+        "completed": false,
+        "interrupted": false,
+        "failed": true,
+        "final_response": "Context needs compaction, but tool outcomes are pending. Verify their receipts before resuming.",
+        "boundary_failed": false,
+        "model_calls": 2,
+        "upstream_requests": 2,
+        "lifecycle_steps": [
+          0
+        ],
+        "tool_executions": 1,
+        "completed_receipts": 0,
+        "pending_tools": 1,
+        "tool_events": [
+          "start"
+        ],
+        "faults": [],
+        "transport_errors": [],
+        "sdk_failure": null,
+        "native_errors": [
+          {
+            "source": "native_error",
+            "code": "other",
+            "will_retry": false
+          }
+        ],
+        "native_plugins": [
+          false
+        ],
+        "native_clients": 1,
+        "native_threads": 1,
+        "transport_attempt": 0,
+        "native_compactions": 0,
+        "read_attempts": 0,
+        "receipt_during_compaction": false,
+        "corrections_delivered": 0,
+        "native_error_payloads": [
+          {
+            "error": {
+              "additionalDetails": null,
+              "codexErrorInfo": "other",
+              "message": "{\"error\": {\"message\": \"Context length exceeded. Compact history before the next model call.\", \"type\": \"context_length_exceeded\", \"code\": \"context_length_exceeded\"}}",
+              "misalignment": null
+            },
+            "threadId": "01a122ea-5831-7ea3-9821-3a3760e6525e",
+            "turnId": "01a122ea-58c7-7f00-b2aa-428797a21c4a",
+            "willRetry": false
+          }
+        ],
+        "command_starts": 1,
+        "outage_elapsed": 0,
+        "readiness_statuses": [],
+        "preview_samples": [],
+        "status_events": [],
+        "saved_prose": ""
+      },
+      "candidate": {
+        "completed": true,
+        "interrupted": false,
+        "failed": false,
+        "final_response": "yield-test-complete",
+        "boundary_failed": false,
+        "model_calls": 5,
+        "upstream_requests": 5,
+        "lifecycle_steps": [
+          0,
+          1
+        ],
+        "tool_executions": 1,
+        "completed_receipts": 1,
+        "pending_tools": 0,
+        "tool_events": [
+          "start",
+          "complete"
+        ],
+        "faults": [],
+        "transport_errors": [],
+        "sdk_failure": null,
+        "native_errors": [
+          {
+            "source": "native_error",
+            "code": "other",
+            "will_retry": false
+          }
+        ],
+        "native_plugins": [
+          false
+        ],
+        "native_clients": 1,
+        "native_threads": 1,
+        "transport_attempt": 0,
+        "native_compactions": 1,
+        "read_attempts": 0,
+        "receipt_during_compaction": false,
+        "corrections_delivered": 0,
+        "native_error_payloads": [
+          {
+            "error": {
+              "additionalDetails": null,
+              "codexErrorInfo": "other",
+              "message": "{\"error\": {\"message\": \"Context length exceeded. Compact history before the next model call.\", \"type\": \"context_length_exceeded\", \"code\": \"context_length_exceeded\"}}",
+              "misalignment": null
+            },
+            "threadId": "01a122ea-88dc-7133-8241-2f7c9c03b35e",
+            "turnId": "01a122ea-8985-7de0-918a-76551fbdc91e",
+            "willRetry": false
+          }
+        ],
+        "command_starts": 1,
+        "outage_elapsed": 0,
+        "readiness_statuses": [],
+        "preview_samples": [],
+        "status_events": [],
+        "saved_prose": "\nyield-test-complete"
+      },
+      "grader": "Complete task, one native client, exactly one execution and receipt, no unresolved tools",
+      "detected": true,
+      "evidence": "compaction/codex-yield-proof.json"
+    },
+    {
+      "id": "large-image",
+      "title": "Read a large image without crashing the native SDK",
+      "type": "native SDK regression",
+      "source_pr": "https://github.com/BerriAI/moyai/pull/185",
+      "baseline_ref": "SDK default 1 MiB buffer",
+      "inference": "scripted loopback; real Claude SDK and native image Read",
+      "baseline": {
+        "completed": false,
+        "model_requests": 2,
+        "image_received": true,
+        "image_marker_verified": true,
+        "completed_tools": 1,
+        "pending_tools": 0,
+        "largest_frame": {
+          "type": "control_request",
+          "bytes": 582792
+        },
+        "sdk_failure": {
+          "version": 1,
+          "sdk": "claude-agent-sdk",
+          "source": "exception",
+          "exception_type": "CLIJSONDecodeError",
+          "pending_tools": 0,
+          "boundary_failed": false,
+          "model_calls": 0
+        },
+        "answer": "Claude Agent SDK stopped (CLIJSONDecodeError). Saved tool receipts are preserved.",
+        "native_mirror_enabled": true
+      },
+      "candidate": {
+        "completed": true,
+        "model_requests": 2,
+        "image_received": true,
+        "image_marker_verified": true,
+        "completed_tools": 1,
+        "pending_tools": 0,
+        "largest_frame": {
+          "type": "transcript_mirror",
+          "bytes": 1216435
+        },
+        "sdk_failure": null,
+        "answer": "Large image received; tool completed once.",
+        "native_mirror_enabled": true
+      },
+      "grader": "Complete task, decoded image dimensions and marker verified, one receipt, zero pending tools",
+      "detected": true,
+      "evidence": "claude-buffer.json"
+    },
+    {
+      "id": "model-harness-routing",
+      "title": "Select the intended SDK when the model changes",
+      "type": "configuration regression",
+      "source_pr": "https://github.com/BerriAI/moyai/pull/178",
+      "baseline": {
+        "revision": "61818fa91f3cd37db38b0d3d25ce4a8f6a1fce82",
+        "reference": "5fd2114^",
+        "model": "openai/gpt-6.1-sol",
+        "effective_harness": "claude-agent-sdk",
+        "explicit_override": false
+      },
+      "candidate": {
+        "revision": "ffcc83e054d45242a8a1a6465d1f775761ad6452",
+        "reference": "HEAD",
+        "model": "openai/gpt-6.1-sol",
+        "effective_harness": "codex",
+        "explicit_override": false
+      },
+      "inference": "none",
+      "grader": "Resolved openai/gpt-6.1-sol default uses codex, absent an explicit override",
+      "detected": true,
+      "evidence": "model-routing.json",
+      "limitation": "Confirms routing defect only, not the relative quality of model/SDK pairings"
+    }
+  ],
+  "excluded_attempts": [
+    {
+      "phase": "initial host probes",
+      "reason": "ENOSPC while writing fixture files; infrastructure error"
+    },
+    {
+      "phase": "container attempt",
+      "reason": "Colima cannot bind /private/tmp source path; execution never started"
+    },
+    {
+      "phase": "unmodified historical yield script",
+      "reason": "Expected HTTP409 observed, then report serializer missing historical transport_attempt field; reporting-only compatibility wrapper used"
+    },
+    {
+      "phase": "first compaction retry",
+      "reason": "Current native process closed before any provider request amid disk exhaustion; invalid comparison, rerun after cleanup",
+      "evidence": "compaction-infrastructure-failure.log"
+    }
+  ]
+}

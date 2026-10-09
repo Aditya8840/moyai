@@ -1,0 +1,331 @@
+{
+  "eval": "moyai-regression-lab-20261009",
+  "source_eval": "moyai-python-coding-regressions",
+  "dataset_id": "d244dee9-3a07-4e50-b39f-e0f0bad639a9",
+  "revision": 1,
+  "scorers": [
+    {
+      "kind": "task_completed"
+    },
+    {
+      "kind": "judge",
+      "prompt": "The actual output is a JSON object with answer and verification. Give score 1 only when verification.passed is true, its detail reports independent checks passed, and the recorded tool activity and final answer support completion of the expected coding task. Otherwise give 0. Do not treat a claim in the answer as proof that tests ran.",
+      "model": "moyai-judge"
+    }
+  ],
+  "gate": {
+    "regressions": 0,
+    "critical": 0,
+    "pass_rate": 1.0,
+    "cost_per_case": null,
+    "min": {
+      "judge": 1.0,
+      "task_completed": 1.0
+    }
+  },
+  "note": "Execution errors fail the Lens check but are not automatically evidence of model-quality degradation.",
+  "runs": [
+    {
+      "variant": "baseline",
+      "evidence_sha256": "d2df372e2ffc404565d0db5b7ed8550251390572acfaa3aa87bd2157f195120a",
+      "run": {
+        "id": "18444952486414348544_398ad0e4422e4a3d831505adbce730ef",
+        "status": "done",
+        "eval": "moyai-regression-lab-20261009",
+        "agent": "moyai",
+        "version": "ffcc83e054d45242a8a1a6465d1f775761ad6452",
+        "branch": "main",
+        "pr": null,
+        "url": "https://litellm-lens.onrender.com/ui/?tab=evals&eval=moyai-regression-lab-20261009&eval_run=18444952486414348544_398ad0e4422e4a3d831505adbce730ef",
+        "expected_trials": 4,
+        "received_trials": 4,
+        "summary": {
+          "passed": 4,
+          "total": 4,
+          "pass_rate": 1.0,
+          "cost_per_case": -0.0,
+          "scores": {
+            "judge": 1.0,
+            "task_completed": 1.0
+          },
+          "errors": 0,
+          "baseline_run_id": null,
+          "baseline_version": null,
+          "regressions": [],
+          "fixed": [],
+          "gate": {
+            "passed": true,
+            "reasons": [
+              "no baseline on main for rev 1"
+            ]
+          }
+        },
+        "failure": ""
+      },
+      "cases": [
+        {
+          "case_id": "72d2a6e4f62818b1c8304b31fd8e9f09146024139920a8d1926bf3a55e2d8798",
+          "title": "72d2a6e4f62818b1c8304b31fd8e9f09146024139920a8d1926bf3a55e2d8798",
+          "critical": false,
+          "passed": true
+        },
+        {
+          "case_id": "a2434ed336f58ae3af01a7624ee99bafbfe40a769297374f86f2a3b07358c781",
+          "title": "a2434ed336f58ae3af01a7624ee99bafbfe40a769297374f86f2a3b07358c781",
+          "critical": false,
+          "passed": true
+        },
+        {
+          "case_id": "9927f372807271f4fc7568b77c2c21e4cbb7dfc1ae78c4a641106304fff0f1f0",
+          "title": "9927f372807271f4fc7568b77c2c21e4cbb7dfc1ae78c4a641106304fff0f1f0",
+          "critical": false,
+          "passed": true
+        },
+        {
+          "case_id": "90b6892d01ce5d5eb2da156da8dd0ceb70b70a9d7f9f8c7c784d5012feae892a",
+          "title": "90b6892d01ce5d5eb2da156da8dd0ceb70b70a9d7f9f8c7c784d5012feae892a",
+          "critical": false,
+          "passed": true
+        }
+      ]
+    },
+    {
+      "variant": "max-turns-1",
+      "evidence_sha256": "27f80354ff40b722a24bddea884060e95ad547599b404e80156150a39f9009e8",
+      "run": {
+        "id": "18444952486143753552_8ebd1603049d4ce78f4a976410d61bb7",
+        "status": "done",
+        "eval": "moyai-regression-lab-20261009",
+        "agent": "moyai",
+        "version": "ffcc83e054d45242a8a1a6465d1f775761ad6452",
+        "branch": "lab-max-turns-1",
+        "pr": null,
+        "url": "https://litellm-lens.onrender.com/ui/?tab=evals&eval=moyai-regression-lab-20261009&eval_run=18444952486143753552_8ebd1603049d4ce78f4a976410d61bb7",
+        "expected_trials": 4,
+        "received_trials": 4,
+        "summary": {
+          "passed": 0,
+          "total": 4,
+          "pass_rate": 0.0,
+          "cost_per_case": 0.0,
+          "scores": {
+            "judge": 0.0,
+            "task_completed": 0.0
+          },
+          "errors": 4,
+          "baseline_run_id": "18444952486414348544_398ad0e4422e4a3d831505adbce730ef",
+          "baseline_version": "ffcc83e054d45242a8a1a6465d1f775761ad6452",
+          "regressions": [
+            {
+              "case_id": "72d2a6e4f62818b1c8304b31fd8e9f09146024139920a8d1926bf3a55e2d8798",
+              "title": "72d2a6e4f62818b1c8304b31fd8e9f09146024139920a8d1926bf3a55e2d8798",
+              "critical": false,
+              "baseline_url": "https://litellm-lens.onrender.com/ui/?tab=evals&eval=moyai-regression-lab-20261009&eval_run=18444952486414348544_398ad0e4422e4a3d831505adbce730ef&eval_case=72d2a6e4f62818b1c8304b31fd8e9f09146024139920a8d1926bf3a55e2d8798",
+              "candidate_url": "https://litellm-lens.onrender.com/ui/?tab=evals&eval=moyai-regression-lab-20261009&eval_run=18444952486143753552_8ebd1603049d4ce78f4a976410d61bb7&eval_case=72d2a6e4f62818b1c8304b31fd8e9f09146024139920a8d1926bf3a55e2d8798"
+            },
+            {
+              "case_id": "a2434ed336f58ae3af01a7624ee99bafbfe40a769297374f86f2a3b07358c781",
+              "title": "a2434ed336f58ae3af01a7624ee99bafbfe40a769297374f86f2a3b07358c781",
+              "critical": false,
+              "baseline_url": "https://litellm-lens.onrender.com/ui/?tab=evals&eval=moyai-regression-lab-20261009&eval_run=18444952486414348544_398ad0e4422e4a3d831505adbce730ef&eval_case=a2434ed336f58ae3af01a7624ee99bafbfe40a769297374f86f2a3b07358c781",
+              "candidate_url": "https://litellm-lens.onrender.com/ui/?tab=evals&eval=moyai-regression-lab-20261009&eval_run=18444952486143753552_8ebd1603049d4ce78f4a976410d61bb7&eval_case=a2434ed336f58ae3af01a7624ee99bafbfe40a769297374f86f2a3b07358c781"
+            },
+            {
+              "case_id": "9927f372807271f4fc7568b77c2c21e4cbb7dfc1ae78c4a641106304fff0f1f0",
+              "title": "9927f372807271f4fc7568b77c2c21e4cbb7dfc1ae78c4a641106304fff0f1f0",
+              "critical": false,
+              "baseline_url": "https://litellm-lens.onrender.com/ui/?tab=evals&eval=moyai-regression-lab-20261009&eval_run=18444952486414348544_398ad0e4422e4a3d831505adbce730ef&eval_case=9927f372807271f4fc7568b77c2c21e4cbb7dfc1ae78c4a641106304fff0f1f0",
+              "candidate_url": "https://litellm-lens.onrender.com/ui/?tab=evals&eval=moyai-regression-lab-20261009&eval_run=18444952486143753552_8ebd1603049d4ce78f4a976410d61bb7&eval_case=9927f372807271f4fc7568b77c2c21e4cbb7dfc1ae78c4a641106304fff0f1f0"
+            },
+            {
+              "case_id": "90b6892d01ce5d5eb2da156da8dd0ceb70b70a9d7f9f8c7c784d5012feae892a",
+              "title": "90b6892d01ce5d5eb2da156da8dd0ceb70b70a9d7f9f8c7c784d5012feae892a",
+              "critical": false,
+              "baseline_url": "https://litellm-lens.onrender.com/ui/?tab=evals&eval=moyai-regression-lab-20261009&eval_run=18444952486414348544_398ad0e4422e4a3d831505adbce730ef&eval_case=90b6892d01ce5d5eb2da156da8dd0ceb70b70a9d7f9f8c7c784d5012feae892a",
+              "candidate_url": "https://litellm-lens.onrender.com/ui/?tab=evals&eval=moyai-regression-lab-20261009&eval_run=18444952486143753552_8ebd1603049d4ce78f4a976410d61bb7&eval_case=90b6892d01ce5d5eb2da156da8dd0ceb70b70a9d7f9f8c7c784d5012feae892a"
+            }
+          ],
+          "fixed": [],
+          "gate": {
+            "passed": false,
+            "reasons": [
+              "4 regressions (max 0)",
+              "Pass rate below minimum",
+              "judge below minimum 1",
+              "task_completed below minimum 1"
+            ]
+          }
+        },
+        "failure": ""
+      },
+      "expected_baseline_run_id": "18444952486414348544_398ad0e4422e4a3d831505adbce730ef",
+      "cases": [
+        {
+          "case_id": "72d2a6e4f62818b1c8304b31fd8e9f09146024139920a8d1926bf3a55e2d8798",
+          "title": "72d2a6e4f62818b1c8304b31fd8e9f09146024139920a8d1926bf3a55e2d8798",
+          "critical": false,
+          "passed": false
+        },
+        {
+          "case_id": "a2434ed336f58ae3af01a7624ee99bafbfe40a769297374f86f2a3b07358c781",
+          "title": "a2434ed336f58ae3af01a7624ee99bafbfe40a769297374f86f2a3b07358c781",
+          "critical": false,
+          "passed": false
+        },
+        {
+          "case_id": "9927f372807271f4fc7568b77c2c21e4cbb7dfc1ae78c4a641106304fff0f1f0",
+          "title": "9927f372807271f4fc7568b77c2c21e4cbb7dfc1ae78c4a641106304fff0f1f0",
+          "critical": false,
+          "passed": false
+        },
+        {
+          "case_id": "90b6892d01ce5d5eb2da156da8dd0ceb70b70a9d7f9f8c7c784d5012feae892a",
+          "title": "90b6892d01ce5d5eb2da156da8dd0ceb70b70a9d7f9f8c7c784d5012feae892a",
+          "critical": false,
+          "passed": false
+        }
+      ],
+      "baseline_pairing": {
+        "expected": "18444952486414348544_398ad0e4422e4a3d831505adbce730ef",
+        "actual": "18444952486414348544_398ad0e4422e4a3d831505adbce730ef",
+        "matches": true
+      }
+    },
+    {
+      "variant": "alternate-model",
+      "evidence_sha256": "e69560d85a685de6de6066fa74f1f616be64974a687f557ff0b28f6c385fb6f7",
+      "run": {
+        "id": "18444952486131539470_13658dd7392441c7bb9f35d9dca02e8d",
+        "status": "done",
+        "eval": "moyai-regression-lab-20261009",
+        "agent": "moyai",
+        "version": "ffcc83e054d45242a8a1a6465d1f775761ad6452",
+        "branch": "lab-alternate-model",
+        "pr": null,
+        "url": "https://litellm-lens.onrender.com/ui/?tab=evals&eval=moyai-regression-lab-20261009&eval_run=18444952486131539470_13658dd7392441c7bb9f35d9dca02e8d",
+        "expected_trials": 4,
+        "received_trials": 4,
+        "summary": {
+          "passed": 4,
+          "total": 4,
+          "pass_rate": 1.0,
+          "cost_per_case": -0.0,
+          "scores": {
+            "judge": 1.0,
+            "task_completed": 1.0
+          },
+          "errors": 0,
+          "baseline_run_id": "18444952486414348544_398ad0e4422e4a3d831505adbce730ef",
+          "baseline_version": "ffcc83e054d45242a8a1a6465d1f775761ad6452",
+          "regressions": [],
+          "fixed": [],
+          "gate": {
+            "passed": true,
+            "reasons": []
+          }
+        },
+        "failure": ""
+      },
+      "expected_baseline_run_id": "18444952486414348544_398ad0e4422e4a3d831505adbce730ef",
+      "cases": [
+        {
+          "case_id": "72d2a6e4f62818b1c8304b31fd8e9f09146024139920a8d1926bf3a55e2d8798",
+          "title": "72d2a6e4f62818b1c8304b31fd8e9f09146024139920a8d1926bf3a55e2d8798",
+          "critical": false,
+          "passed": true
+        },
+        {
+          "case_id": "a2434ed336f58ae3af01a7624ee99bafbfe40a769297374f86f2a3b07358c781",
+          "title": "a2434ed336f58ae3af01a7624ee99bafbfe40a769297374f86f2a3b07358c781",
+          "critical": false,
+          "passed": true
+        },
+        {
+          "case_id": "9927f372807271f4fc7568b77c2c21e4cbb7dfc1ae78c4a641106304fff0f1f0",
+          "title": "9927f372807271f4fc7568b77c2c21e4cbb7dfc1ae78c4a641106304fff0f1f0",
+          "critical": false,
+          "passed": true
+        },
+        {
+          "case_id": "90b6892d01ce5d5eb2da156da8dd0ceb70b70a9d7f9f8c7c784d5012feae892a",
+          "title": "90b6892d01ce5d5eb2da156da8dd0ceb70b70a9d7f9f8c7c784d5012feae892a",
+          "critical": false,
+          "passed": true
+        }
+      ],
+      "baseline_pairing": {
+        "expected": "18444952486414348544_398ad0e4422e4a3d831505adbce730ef",
+        "actual": "18444952486414348544_398ad0e4422e4a3d831505adbce730ef",
+        "matches": true
+      }
+    },
+    {
+      "variant": "alternate-harness",
+      "evidence_sha256": "104393b5d45680468bd10fb755ea0b52a2379ac9ed7fe16b7a472759b3a152ff",
+      "run": {
+        "id": "18444952485902138478_c1b72870702a48d88287ca8386e269d1",
+        "status": "done",
+        "eval": "moyai-regression-lab-20261009",
+        "agent": "moyai",
+        "version": "ffcc83e054d45242a8a1a6465d1f775761ad6452",
+        "branch": "lab-alternate-harness",
+        "pr": null,
+        "url": "https://litellm-lens.onrender.com/ui/?tab=evals&eval=moyai-regression-lab-20261009&eval_run=18444952485902138478_c1b72870702a48d88287ca8386e269d1",
+        "expected_trials": 4,
+        "received_trials": 4,
+        "summary": {
+          "passed": 4,
+          "total": 4,
+          "pass_rate": 1.0,
+          "cost_per_case": -0.0,
+          "scores": {
+            "judge": 1.0,
+            "task_completed": 1.0
+          },
+          "errors": 0,
+          "baseline_run_id": "18444952486414348544_398ad0e4422e4a3d831505adbce730ef",
+          "baseline_version": "ffcc83e054d45242a8a1a6465d1f775761ad6452",
+          "regressions": [],
+          "fixed": [],
+          "gate": {
+            "passed": true,
+            "reasons": []
+          }
+        },
+        "failure": ""
+      },
+      "expected_baseline_run_id": "18444952486414348544_398ad0e4422e4a3d831505adbce730ef",
+      "cases": [
+        {
+          "case_id": "72d2a6e4f62818b1c8304b31fd8e9f09146024139920a8d1926bf3a55e2d8798",
+          "title": "72d2a6e4f62818b1c8304b31fd8e9f09146024139920a8d1926bf3a55e2d8798",
+          "critical": false,
+          "passed": true
+        },
+        {
+          "case_id": "a2434ed336f58ae3af01a7624ee99bafbfe40a769297374f86f2a3b07358c781",
+          "title": "a2434ed336f58ae3af01a7624ee99bafbfe40a769297374f86f2a3b07358c781",
+          "critical": false,
+          "passed": true
+        },
+        {
+          "case_id": "9927f372807271f4fc7568b77c2c21e4cbb7dfc1ae78c4a641106304fff0f1f0",
+          "title": "9927f372807271f4fc7568b77c2c21e4cbb7dfc1ae78c4a641106304fff0f1f0",
+          "critical": false,
+          "passed": true
+        },
+        {
+          "case_id": "90b6892d01ce5d5eb2da156da8dd0ceb70b70a9d7f9f8c7c784d5012feae892a",
+          "title": "90b6892d01ce5d5eb2da156da8dd0ceb70b70a9d7f9f8c7c784d5012feae892a",
+          "critical": false,
+          "passed": true
+        }
+      ],
+      "baseline_pairing": {
+        "expected": "18444952486414348544_398ad0e4422e4a3d831505adbce730ef",
+        "actual": "18444952486414348544_398ad0e4422e4a3d831505adbce730ef",
+        "matches": true
+      }
+    }
+  ]
+}

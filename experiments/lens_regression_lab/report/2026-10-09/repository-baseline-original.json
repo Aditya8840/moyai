@@ -1,0 +1,51 @@
+{
+  "experiment": "real-agent-historical-repository-task",
+  "case": "provider-sdk-routing",
+  "status": "infrastructure_error",
+  "started_at": "2026-10-09T23:10:51.823107+00:00",
+  "source_revision": "ffcc83e054d45242a8a1a6465d1f775761ad6452",
+  "fixture": {
+    "task_revision": "61818fa91f3cd37db38b0d3d25ce4a8f6a1fce82",
+    "files_sha256": {
+      "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "app/config.py": "ffe661e7a6e66dea8c6bcf9fe3d905b5c1b87522fc488100166aae75a9c1f59d",
+      "app/context_budget.py": "b9ba340a28ac9e1327975d25d6039c53a520a3ad0e2cb504c6d1fc92e0978b6d",
+      "app/harnesses.py": "ec7794156bfa43315fcb0c5f86a85b2a6597c8fb7c574dc45cf2dd9c83769a08",
+      "sandbox/harness_registry.py": "4867b6a5e894d188c461610fd7c2653588f1177dbf0b2c590efcbceea5f71c81",
+      "sandbox/harness_agent.py": "6e9e8e3f325fa60930b5c25a28f14f612e73a89cb73219ca153ef1c76f3b9984",
+      "sandbox/history_reference.py": "df558fa70de26698088d829bf1000dfcd625b454e38f9b510d3002bdd8a6d1c2",
+      "sandbox/memory_history.py": "9ca54706b3e4545ca22bc8e4218f2e6af24da1ab30e441d945ee4310f9d2aa02",
+      "tests/test_config.py": "7c4143d942d3b20437e3903225bb29c1dc2d98401507f3906ffd1eea354bd46a",
+      "README.md": "a57ee89d893bf5dad0c264b47fde5cb9c2655d07369657b3c072ddd3e33fcdce",
+      "docs/harnesses.md": "9b402672d3bed3601b82edabd164fe4ca996bf60ba3f25700f2d39bc09fd1dbe",
+      "docs/getting-started.md": "f80e40ff78b9988dff7c2c6a8436dcca2401b8eff56191afa877c5ba7e32aa08",
+      "pyproject.toml": "6ea4c1599ab86cd844469d0db5b17bbafaff6727331a4dc6d4f37d3e352d7c75",
+      ".env.example": "40c0f089fbf8fc08384b55c557aafde884e6bb9eface6a4868447d2d073cc3ec"
+    }
+  },
+  "model": "openai/gpt-6.1-sol",
+  "harness": "codex",
+  "max_iterations": 32,
+  "timeout": 360,
+  "runtime": {
+    "openai-codex": "0.161.0",
+    "claude-agent-sdk": "0.2.163",
+    "openai": "2.26.0"
+  },
+  "error": "Lens did not acknowledge all agent, model and tool spans before the deadline.",
+  "failure_kind": "trace_delivery",
+  "verification_status": "not_run",
+  "causality": "unverified",
+  "current_passed": null,
+  "stronger_passed": null,
+  "passed": null,
+  "duration_seconds": 236.959,
+  "changed_files": [
+    "app/config.py",
+    "tests/test_config.py",
+    "README.md",
+    "docs/harnesses.md",
+    "docs/getting-started.md",
+    ".env.example"
+  ]
+}

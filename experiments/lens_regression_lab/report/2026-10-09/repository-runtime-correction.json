@@ -1,0 +1,19 @@
+{
+  "captured_at": "2026-10-09T23:23:44.154222+00:00",
+  "container": "moyai-regression-lab",
+  "memory_bytes": 1073741824,
+  "nano_cpus": 2000000000,
+  "changes": [
+    "Installed Debian ripgrep 14.1.1 (production Dockerfile.sandbox already includes ripgrep)",
+    "Added experiment-only shell profile PATH entry for /app/.venv/bin; verified ordinary python and pytest resolve there",
+    "Appended identical explicit sys.executable pytest command to both agent prompts"
+  ],
+  "budgets": {
+    "max_model_calls": 32,
+    "agent_timeout_seconds": 360,
+    "outer_timeout_seconds": 450
+  },
+  "historical_task_revision": "61818fa91f3cd37db38b0d3d25ce4a8f6a1fce82",
+  "agent_source_revision": "ffcc83e054d45242a8a1a6465d1f775761ad6452",
+  "rule": "One baseline and one alternate-model run, each fresh workspace; no retry selection or WAF bypass"
+}

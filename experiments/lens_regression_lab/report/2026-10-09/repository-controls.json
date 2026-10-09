@@ -1,0 +1,218 @@
+{
+  "experiment": "historical-repository-task-controls",
+  "model_calls": 0,
+  "source": "https://github.com/BerriAI/moyai/pull/178",
+  "scope": "A source slice of the actual repository, graded using full Settings imports and external held-out checks. This is fixture validation, not model execution.",
+  "broken_revision": "61818fa91f3cd37db38b0d3d25ce4a8f6a1fce82",
+  "fixed_revision": "5fd2114a74fd48cd6be7fa27175cb9c45a459946",
+  "before": {
+    "passed": false,
+    "checks": [
+      {
+        "name": "sol-alias",
+        "passed": false,
+        "expected": "codex",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "sol-display-name",
+        "passed": false,
+        "expected": "codex",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "future-openai-default",
+        "passed": false,
+        "expected": "codex",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "future-anthropic-default",
+        "passed": true,
+        "expected": "claude-agent-sdk",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "future-catalog-display-name",
+        "passed": false,
+        "expected": "codex",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "openai-compatible-is-another-provider",
+        "passed": true,
+        "expected": "claude-agent-sdk",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "nested-openai-is-another-provider",
+        "passed": true,
+        "expected": "claude-agent-sdk",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "bare-openai-is-an-alias",
+        "passed": true,
+        "expected": "claude-agent-sdk",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "unprefixed-gateway-model",
+        "passed": true,
+        "expected": "claude-agent-sdk",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "existing-anthropic-alias",
+        "passed": true,
+        "expected": "claude-agent-sdk",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "explicit-init-hermes",
+        "passed": true,
+        "expected": "hermes",
+        "actual": "hermes"
+      },
+      {
+        "name": "explicit-init-claude-agent-sdk",
+        "passed": true,
+        "expected": "claude-agent-sdk",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "explicit-init-codex",
+        "passed": true,
+        "expected": "codex",
+        "actual": "codex"
+      },
+      {
+        "name": "explicit-environment-wins",
+        "passed": true,
+        "expected": "hermes",
+        "actual": "hermes"
+      },
+      {
+        "name": "explicit-dotenv-wins",
+        "passed": true,
+        "expected": "claude-agent-sdk",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "unknown-model-still-rejected",
+        "passed": true,
+        "expected": true,
+        "actual": true
+      }
+    ],
+    "passed_checks": 12,
+    "total_checks": 16,
+    "status": "completed",
+    "verifier_sha256": "bcdc7ff2ed71805011d2fed8b25d697b3a411813a8bcb091257b392c83faf252"
+  },
+  "after": {
+    "passed": true,
+    "checks": [
+      {
+        "name": "sol-alias",
+        "passed": true,
+        "expected": "codex",
+        "actual": "codex"
+      },
+      {
+        "name": "sol-display-name",
+        "passed": true,
+        "expected": "codex",
+        "actual": "codex"
+      },
+      {
+        "name": "future-openai-default",
+        "passed": true,
+        "expected": "codex",
+        "actual": "codex"
+      },
+      {
+        "name": "future-anthropic-default",
+        "passed": true,
+        "expected": "claude-agent-sdk",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "future-catalog-display-name",
+        "passed": true,
+        "expected": "codex",
+        "actual": "codex"
+      },
+      {
+        "name": "openai-compatible-is-another-provider",
+        "passed": true,
+        "expected": "claude-agent-sdk",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "nested-openai-is-another-provider",
+        "passed": true,
+        "expected": "claude-agent-sdk",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "bare-openai-is-an-alias",
+        "passed": true,
+        "expected": "claude-agent-sdk",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "unprefixed-gateway-model",
+        "passed": true,
+        "expected": "claude-agent-sdk",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "existing-anthropic-alias",
+        "passed": true,
+        "expected": "claude-agent-sdk",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "explicit-init-hermes",
+        "passed": true,
+        "expected": "hermes",
+        "actual": "hermes"
+      },
+      {
+        "name": "explicit-init-claude-agent-sdk",
+        "passed": true,
+        "expected": "claude-agent-sdk",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "explicit-init-codex",
+        "passed": true,
+        "expected": "codex",
+        "actual": "codex"
+      },
+      {
+        "name": "explicit-environment-wins",
+        "passed": true,
+        "expected": "hermes",
+        "actual": "hermes"
+      },
+      {
+        "name": "explicit-dotenv-wins",
+        "passed": true,
+        "expected": "claude-agent-sdk",
+        "actual": "claude-agent-sdk"
+      },
+      {
+        "name": "unknown-model-still-rejected",
+        "passed": true,
+        "expected": true,
+        "actual": true
+      }
+    ],
+    "passed_checks": 16,
+    "total_checks": 16,
+    "status": "completed",
+    "verifier_sha256": "bcdc7ff2ed71805011d2fed8b25d697b3a411813a8bcb091257b392c83faf252"
+  }
+}
