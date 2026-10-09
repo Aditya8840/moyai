@@ -197,3 +197,22 @@ def test_should_reject_unrecognized_saved_input():
     from evals.test_moyai import verification_for
     with pytest.raises(ValueError, match='exactly match'):
         verification_for('A prompt that is not in the versioned regression fixture.')
+
+
+def test_should_distinguish_baseline_and_candidate_execution_metadata(monkeypatch):
+    from evals.test_moyai import execution_metadata
+    for key, value in {'LENS_EVAL_BRANCH': 'main', 'LENS_EVAL_ROLE': 'baseline', 'LENS_VERSION': BUILD,
+                       'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2',
+                       'GITHUB_REPOSITORY': 'BerriAI/moyai'}.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv('LENS_EVAL_PR', raising=False)
+    baseline = execution_metadata()
+    assert baseline.branch == 'main' and baseline.pr is None
+    assert baseline.version == BUILD
+    assert baseline.ci_url == 'https://github.com/BerriAI/moyai/actions/runs/123'
+    monkeypatch.setenv('LENS_EVAL_BRANCH', 'feature')
+    monkeypatch.setenv('LENS_EVAL_ROLE', 'candidate')
+    monkeypatch.setenv('LENS_EVAL_PR', '300')
+    candidate = execution_metadata()
+    assert candidate.pr == 300 and candidate.branch == 'feature'
+    assert candidate.identity != baseline.identity

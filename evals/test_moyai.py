@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 from lens import Lens
+from lens.config import Execution
 
 from evals.agent import AgentRunError, MoyaiAgent
 
@@ -33,9 +34,27 @@ def verify_solution(workspace, code):
             'detail': result.stdout[-2000:] if result.returncode == 0 else 'Independent verification failed.'}
 
 
+def execution_metadata():
+    branch = os.environ.get('LENS_EVAL_BRANCH')
+    if not branch:
+        return None
+    run_id = os.environ.get('GITHUB_RUN_ID', '')
+    repository = os.environ.get('GITHUB_REPOSITORY', '')
+    role = os.environ.get('LENS_EVAL_ROLE', branch)
+    pr = os.environ.get('LENS_EVAL_PR')
+    return Execution(
+        version=os.environ['LENS_VERSION'], branch=branch, pr=int(pr) if pr else None,
+        ci_url=(f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{repository}/actions/runs/{run_id}"
+                if run_id and repository else ''),
+        identity=(f"moyai-{run_id}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{role}-{os.environ['LENS_VERSION']}"
+                  if run_id else ''),
+    )
+
+
 def test_moyai(tmp_path):
     lens = Lens(base_url=os.environ['LENS_BASE_URL'], api_key=os.environ['LENS_API_KEY'])
-    with lens.evals.test(os.environ.get('MOYAI_EVAL_NAME', 'moyai-python-coding-regressions')) as evaluation:
+    with lens.evals.test(os.environ.get('MOYAI_EVAL_NAME', 'moyai-python-coding-regressions'),
+                         execution=execution_metadata()) as evaluation:
         for index, case in enumerate(evaluation.cases):
             if case.followups:
                 raise ValueError('The Python coding suite expects single-turn cases.')
