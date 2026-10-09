@@ -25,8 +25,9 @@ The SDK requires Python 3.10 or later; Moyai's sandbox uses Python 3.12 or later
 Published runtime wheels support Linux x86_64 and ARM64. Older workspace snapshots
 install the pinned SDK/runtime on first use.
 
-Codex runs inside Moyai's isolated machine with a fresh, temporary native home and
-an ephemeral thread for every invocation. Native authentication, transcripts and
+Codex runs inside Moyai's isolated machine with an ephemeral thread for every
+invocation. Cold starts use a fresh temporary native home; the warm process below
+owns a temporary home for its bounded lifetime. Native authentication, transcripts and
 summaries are never resumed across requesters. The shared public journal described
 below supplies restored context and records completed actions. Moyai keeps ownership
 of sessions, memory, skills, delegated workers, permissions, checkpoints and delivery.
@@ -66,6 +67,57 @@ uv run pytest -q tests/test_codex_tool_readiness.py tests/test_codex_tool_search
 uv run python scripts/tool_readiness_demo.py --output /tmp/moyai-tool-readiness
 uv run python scripts/codex_tool_search_demo.py --output /tmp/moyai-tool-search
 ```
+
+### Warm runtime and schema caching
+
+With Temporal, `CODEX_RUNTIME_REUSE=true` (default) reuses the native Codex
+app-server inside the chat's already-warm sandbox. Prewarming starts when the
+sandbox receives the run, overlapping repository, attachment and workspace setup.
+It does not allocate a sandbox when someone opens a chat. Non-Temporal runs,
+delegated workers and `SANDBOX_IDLE_SECONDS=0` retain the cold path.
+
+A local lease supervisor keeps the process for at most
+`min(SANDBOX_IDLE_SECONDS, 300)` idle seconds. Reuse requires the same chat, actor,
+model and runtime revision, exclusive ownership, completed tool receipts, background
+terminal cleanup and verified unloading of the finished native thread. A failed or
+interrupted invocation, owner disconnect, idle expiry or scope change discards the
+process. An unavailable lease falls back before inference to the cold launch;
+runtime failures after admission do not introduce an automatic turn replay.
+Unload, SDK shutdown and lease-release errors disable reuse without changing a
+completed answer or replacing the original execution error. Resource cleanup is
+independent, and lease cleanup cannot prevent the broker relay from closing.
+The task deadline covers startup and execution, then exits before teardown.
+Cancellation during teardown waits for owned SDK/lease cleanup before propagating;
+the lease remains attached until release succeeds, preserving the entrypoint fallback.
+Orphaned native files from filesystem snapshots are removed before workspace
+preparation, including on cold runs and delegated workers.
+`CODEX_RUNTIME_REUSE=false` disables prewarming and reuse.
+
+The pinned SDK connects through a local JSON-lines/Unix-WebSocket adapter
+(`websockets==16.1.1`). Each invocation still starts a new native thread with the
+current relay URL, capability, config and permission-filtered MCP catalog.
+The supervisor starts without inherited credentials, and per-thread credentials
+travel over stdin, not process arguments. MCP remains required before inference.
+This reuses the Codex process, not a prior conversation or MCP connection across
+capability boundaries.
+
+The reusable process caches the pinned binary's bundled model metadata. The broker
+also caches up to 256 immutable connector schema templates, copying them for each
+response. Connection selection, policy, token validation and tool authorization
+are reevaluated on every catalog request; authorized catalogs are never cached.
+
+Reproduce locally with real Codex and MCP, using scripted inference:
+
+```sh
+uv run pytest -q tests/test_codex_runtime.py tests/test_tool_schema_cache.py
+uv run python scripts/codex_runtime_demo.py --output /tmp/moyai-runtime --pairs 11
+```
+
+The benchmark reports entry-to-first-inference startup separately from the first
+warm launch. Its steady medians exclude the first pair for both paths. It excludes
+cloud provisioning and model generation and is not an end-to-end production SLA.
+
+### Inference and lifecycle
 
 The SDK receives the run capability and sends Responses requests to Moyai's local
 relay using a custom provider. The broker still pins the selected model, authorizes

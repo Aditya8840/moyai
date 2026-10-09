@@ -1,10 +1,14 @@
 """Native Codex SDK execution within Moyai's existing sandbox and lifecycle."""
 import asyncio
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
 import tempfile
 import threading
+import sys
+import tomllib
 from uuid import uuid4
 
 try:
@@ -142,9 +146,12 @@ class CodexAgent(HarnessAgent):
         env.update(CODEX_HOME=str(home), WORKSPACE_RUN_TOKEN=os.environ['WORKSPACE_RUN_TOKEN'])
         if bundled_path_dir():
             env['PATH'] = str(bundled_path_dir()) + os.pathsep + os.environ.get('PATH', '')
+        lease = getattr(ctx.relay, 'codex_runtime', None)
+        self.runtime_info = lease.ready() if lease else None
         catalog = search_catalog(bundled_codex_path(), home,
             ctx.spec['model'].removeprefix('openai/'),
-            {key: value for key, value in env.items() if key in keep | {'CODEX_HOME'}})
+            {key: value for key, value in env.items() if key in keep | {'CODEX_HOME'}},
+            **({'cached': self.runtime_info['catalog']} if self.runtime_info else {}))
         if catalog:
             settings['model_catalog_json'] = catalog
         settings_args = tuple(name + '=' + toml_value(value) for name, value in settings.items())
@@ -157,6 +164,79 @@ class CodexAgent(HarnessAgent):
         return CodexConfig(cwd=str(home), env=env,
                            launch_args_override=tuple(launch), config_overrides=settings_args,
                            client_name='moyai', client_title='Moyai', experimental_api=True)
+
+    @asynccontextmanager
+    async def native_client(self, home):
+        from openai_codex.async_client import AsyncCodexClient
+        from pydantic import RootModel
+        config = self.sdk_config(home)
+        self.runtime_config, self.runtime_thread, self.runtime_clean = None, None, False
+        lease = getattr(self.context.relay, 'codex_runtime', None)
+        if self.runtime_info:
+            self.runtime_config = tomllib.loads('\n'.join(config.config_overrides))
+            provider = self.runtime_config['model_providers']['moyai']
+            # The reusable process has no capability in its environment. Each
+            # ephemeral thread receives this invocation's relay and token only.
+            provider.pop('env_key', None)
+            provider['http_headers'] = {'Authorization': 'Bearer ' + os.environ['WORKSPACE_RUN_TOKEN']}
+            proxy = Path(__file__).with_name('codex_runtime.py')
+            config = replace(config, launch_args_override=(sys.executable, str(proxy),
+                             'proxy', self.runtime_info['socket']))
+            lease.clean = False
+        if not self.runtime_info:
+            async with AsyncCodexClient(config) as client:
+                yield client
+            return
+
+        # Close the SDK transport before discarding its native process. Keep
+        # teardown separate from the turn so it cannot replace either a saved
+        # answer or the original execution exception/cancellation.
+        stack, unloaded = AsyncExitStack(), False
+        try:
+            client = await stack.enter_async_context(AsyncCodexClient(config))
+            yield client
+            with suppress(Exception):
+                if self.runtime_clean and self.runtime_thread:
+                    async with asyncio.timeout(5):
+                        await client.request('thread/backgroundTerminals/clean',
+                            {'threadId': self.runtime_thread}, response_model=RootModel[dict])
+                        await client.request('thread/unsubscribe', {'threadId': self.runtime_thread},
+                                             response_model=RootModel[dict])
+                        while True:
+                            loaded = await client.request('thread/loaded/list', {}, response_model=RootModel[dict])
+                            if not loaded.root['data']:
+                                unloaded = True
+                                break
+                            await asyncio.sleep(.01)
+        finally:
+            original_error, cancelled = sys.exception(), None
+
+            async def release():
+                clean = False
+                try:
+                    await stack.aclose()
+                    clean = unloaded and cancelled is None
+                except (Exception, asyncio.CancelledError):
+                    pass
+                finally:
+                    lease.clean = clean
+                    if not clean:
+                        with suppress(Exception):
+                            await asyncio.to_thread(lease.close)
+                            self.context.relay.codex_runtime = None
+
+            # Shield and join the owned cleanup, including repeated cancellation.
+            # Keep the lease attached until close finishes so a failed release
+            # still has the synchronous entrypoint as its final owner.
+            cleanup = asyncio.create_task(release())
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+            cleanup.result()
+            if cancelled is not None and original_error is None:
+                raise cancelled
 
     def record_item(self, item, *, completed):
         kind = item.get('type')
@@ -372,7 +452,6 @@ class CodexAgent(HarnessAgent):
                 await asyncio.gather(probe, return_exceptions=True)
 
     async def _run(self, prompt, system_message):
-        from openai_codex.async_client import AsyncCodexClient
         from openai_codex.errors import InvalidRequestError
         # Each fresh SDK invocation has its own local ceiling. The gateway and
         # shared recovery loop retain the whole task's request cap and deadline.
@@ -405,8 +484,11 @@ class CodexAgent(HarnessAgent):
         # journal crosses requester/model changes and filesystem checkpoints.
         try:
             with tempfile.TemporaryDirectory(prefix='moyai-codex-') as home:
-                async with asyncio.timeout(getattr(self, 'context_timeout', self.context.spec.get('timeout')) or None):
-                    async with AsyncCodexClient(self.sdk_config(home)) as client:
+                # The task deadline covers startup and execution. Optional
+                # teardown runs after that deadline scope has exited.
+                async with AsyncExitStack() as clients:
+                    async with asyncio.timeout(getattr(self, 'context_timeout', self.context.spec.get('timeout')) or None):
+                        client = await clients.enter_async_context(self.native_client(home))
                         await client.initialize()
                         thread = await client.thread_start({
                             'model': self.context.spec['model'].removeprefix('openai/'), 'modelProvider': 'moyai',
@@ -417,7 +499,9 @@ class CodexAgent(HarnessAgent):
                             # The pinned SDK exposes this native app-server field
                             # through dict params. Consume output IDs and native
                             # search receipts, never private reasoning/response text.
-                            'experimentalRawEvents': True})
+                            'experimentalRawEvents': True,
+                            **({'config': self.runtime_config} if self.runtime_config else {})})
+                        self.runtime_thread = thread.thread.id
                         turn = await client.turn_start(thread.thread.id, prompt)
                         while True:
                             notification = asyncio.create_task(client.next_turn_notification(turn.turn.id))
@@ -580,6 +664,8 @@ class CodexAgent(HarnessAgent):
                                         late_inputs.clear()
                                         continue
                                 break
+                        self.runtime_clean = (finished and not self.stopped.is_set()
+                                              and not self.boundary_failed and not self.journal.pending)
         except Exception as exc:
             finished = False
             failure.update(exception_details(exc))
