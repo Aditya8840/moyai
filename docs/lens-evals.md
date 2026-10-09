@@ -76,6 +76,19 @@ The test uses Moyai's real `create_agent` / `run_conversation` seam, native Code
 
 It does **not** start the production Modal/Substrate/Lambda lifecycle, Temporal scheduling, Slack, multi-agent coordination, or the full production session prompt. Those still need their own integration tests. The separate [deployment readiness checker](../evals/preflight.py) remains available for testing a deployed Moyai service; it is not required by the Python-in-CI flow.
 
+## Require Lens before merging
+
+The workflow runs on every PR targeting `main`, including documentation-only changes. The `python-regressions` job fails before checkout for fork or Dependabot PRs, so a skipped job cannot satisfy the Lens requirement. A maintainer must review those changes and evaluate them on a trusted same-repository branch. No untrusted PR code runs with model or Lens secrets.
+
+[lens-evals.json](../.github/rulesets/lens-evals.json) defines a separate active ruleset for `main`: require `python-regressions` from the GitHub Actions app, require the branch to be up to date, and allow no bypass actors. Committing this file does not activate branch protection. First deploy this workflow and confirm a real before/after Lens evaluation passes, then an administrator can create the ruleset:
+
+```sh
+gh api --method POST repos/BerriAI/moyai/rulesets \
+  --input .github/rulesets/lens-evals.json
+```
+
+Keep the existing `protect-main` ruleset unchanged. This additional rule adds Lens to the existing merge requirements. If the Lens ruleset already exists, update its resolved ruleset ID instead of creating a duplicate. See [GitHub's ruleset documentation](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#require-status-checks-to-pass-before-merging) for strict checks and expected source apps.
+
 ## Troubleshooting
 
 - **Checkout mismatch:** make `LENS_VERSION` the revision actually checked out, for both base and head. Do not use a PR merge SHA while executing its head SHA.
