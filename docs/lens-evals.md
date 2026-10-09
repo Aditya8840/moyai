@@ -3,17 +3,30 @@
 Lens owns the regression dataset, scorers, and pass/fail gates. GitHub Actions runs the checked-out Moyai Python code, gives it each saved input, and sends the actual outputs and traces to Lens. No deployed Moyai URL or workspace password is needed.
 
 ```python
+import json
+import os
+
 from lens import Lens
 from evals.agent import MoyaiAgent
+from evals.test_moyai import verification_for, verify_solution
 
-lens = Lens(base_url=LENS_BASE_URL, api_key=LENS_API_KEY)
-with lens.evals.test("moyai-python-coding-regressions") as evaluation:
-    for index, case in enumerate(evaluation.cases):
-        agent = MoyaiAgent.from_env(workspace=work_dir / f"case-{index}")
-        result = agent.run(input=case.input)
-        evaluation.record(case, output=result.output, trace_id=result.trace_id)
-    evaluation.assert_passed()
+
+def test_moyai(tmp_path):
+    lens = Lens(base_url=os.environ["LENS_BASE_URL"], api_key=os.environ["LENS_API_KEY"])
+    with lens.evals.test("moyai-python-coding-regressions") as evaluation:
+        for index, case in enumerate(evaluation.cases):
+            workspace = tmp_path / f"case-{index}"
+            result = MoyaiAgent.from_env(workspace=workspace).run(input=case.input)
+            checks = verify_solution(workspace, verification_for(case.input))
+            evaluation.record(
+                case,
+                output=json.dumps({"answer": result.output, "verification": checks}),
+                trace_id=result.trace_id,
+            )
+        evaluation.assert_passed()
 ```
+
+The repository's [test driver](../evals/test_moyai.py) also records independent case errors, explicit base/head metadata, and the report artifact. `evaluation.assert_passed()` finishes scoring and fails pytest if a saved gate fails.
 
 The SDK executes inside the runner. The runner calls the model gateway for inference and Lens for the dataset, trace ingestion, and scoring. Lens does not execute arbitrary Python or start another GitHub runner.
 
@@ -36,7 +49,22 @@ Configure the saved scorer to require `verification.passed` to be `true`, and ju
 
 ## 2. Configure the runner
 
-The workflow installs the pinned Lens SDK from GitHub and Moyai's existing Codex SDK runtime. Set the Lens origin as a repository variable and model/Lens credentials as repository secrets. The workflow maps them to these runtime variables:
+The workflow installs the pinned Lens SDK from GitHub and Moyai's existing Codex SDK runtime. In **GitHub → Settings → Secrets and variables → Actions**, configure these exact names:
+
+| Kind | GitHub name | Value |
+| --- | --- | --- |
+| Variable | `LENS_BASE_URL` | Lens origin, for example `https://litellm-lens.onrender.com` |
+| Variable | `LENS_TRACE_ENDPOINT` | Lens origin plus `/v1/traces` |
+| Variable | `MOYAI_EVAL_GATEWAY_URL` | Model gateway origin |
+| Variable | `MOYAI_EVAL_MODEL` | Gateway model, for example `openai/gpt-6.1-sol` |
+| Variable | `MOYAI_EVAL_NAME` | Optional; defaults to `moyai-python-coding-regressions` |
+| Secret | `LENS_API_KEY` | Lens evaluation API key |
+| Secret | `LENS_TRACE_API_KEY` | Lens trace ingestion key |
+| Secret | `MOYAI_EVAL_GATEWAY_KEY` | Model inference credential |
+
+GitHub supplies the workflow's `GITHUB_TOKEN`; no personal access token is needed for the Lens PR comment. The workflow grants it check and PR-write permissions only for the evaluation job.
+
+The workflow maps those values to the following runtime variables. For a local run, set these runtime names directly:
 
 | Variable | Purpose |
 | --- | --- |
