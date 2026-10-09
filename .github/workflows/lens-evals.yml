@@ -64,7 +64,7 @@ jobs:
         id: announce
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: uv run --frozen --group eval python -m lens.cli report-start --name "$MOYAI_EVAL_NAME" --pr "$PR_NUMBER"
+        run: GITHUB_SHA="$HEAD_SHA" uv run --frozen --group eval python -m lens.cli report-start --name "$MOYAI_EVAL_NAME" --pr "$PR_NUMBER"
       - name: Prepare the same eval driver for before and after
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -108,7 +108,7 @@ jobs:
           if [ -f lens-results/after.json ] && [ -f lens-results/before.json ]; then
             uv run --frozen --group eval python -m lens.github lens-results/after.json
           else
-            uv run --frozen --group eval python -m lens.cli report-failed --name "$MOYAI_EVAL_NAME" --pr "$PR_NUMBER"
+            GITHUB_SHA="$HEAD_SHA" uv run --frozen --group eval python -m lens.cli report-failed --name "$MOYAI_EVAL_NAME" --pr "$PR_NUMBER"
             exit 1
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
