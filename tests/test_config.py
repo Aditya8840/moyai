@@ -3,6 +3,27 @@ import pytest
 from pydantic import ValidationError
 
 
+@pytest.mark.parametrize('value', ['', 'a1' * 20, 'B2' * 32])
+def test_build_sha_accepts_only_full_optional_commit_identity(monkeypatch, value):
+    monkeypatch.setenv('MOYAI_BUILD_SHA', value)
+    assert Settings(_env_file=None).moyai_build_sha == value.lower()
+
+
+@pytest.mark.parametrize('value', ['main', 'abcdef1', 'a' * 39, 'a' * 41, 'a' * 63, 'a' * 65, 'g' * 40, ' ' + 'a' * 40])
+def test_build_sha_rejects_partial_or_invalid_commit_identity(monkeypatch, value):
+    monkeypatch.setenv('MOYAI_BUILD_SHA', value)
+    with pytest.raises(ValidationError, match='MOYAI_BUILD_SHA'):
+        Settings(_env_file=None)
+
+
+def test_build_identity_remains_optional_and_environment_keeps_its_default(monkeypatch):
+    monkeypatch.delenv('MOYAI_BUILD_SHA', raising=False)
+    monkeypatch.delenv('TRACE_ENVIRONMENT', raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.moyai_build_sha == ''
+    assert settings.trace_environment == 'development'
+
+
 def test_project_gateway_key_overrides_unrelated_shell_key(tmp_path, monkeypatch):
     monkeypatch.setenv("LITELLM_API_KEY", "unrelated-shell-key")
     env = tmp_path / ".env"

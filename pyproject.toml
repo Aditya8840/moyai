@@ -32,6 +32,10 @@ dev = [
     "claude-agent-sdk==0.2.163",
     "openai-codex==0.161.0",
 ]
+eval = [
+    "lens-evals==0.1.0a3",
+    "pytest>=8,<10",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -40,3 +44,12 @@ pythonpath = ["."]
 
 [tool.uv.sources]
 agentchat = { git = "https://github.com/BerriAI/agentchat.git", rev = "8876e361c4071b4906916452ff3e6c35b1a9c78b" }
+lens-evals = { git = "https://github.com/BerriAI/lens.git", rev = "45b11ae53b740e77c0f8cea804bb4aa9bbc8f760", subdirectory = "src/sdk" }
+
+[tool.lens]
+project = "moyai"
+
+[tool.lens.connections.moyai]
+base_url_env = "MOYAI_EVAL_URL"
+auth = "moyai_session"
+password_env = "MOYAI_EVAL_PASSWORD"

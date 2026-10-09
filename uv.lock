@@ -759,6 +759,10 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
+eval = [
+    { name = "lens-evals" },
+    { name = "pytest" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -788,6 +792,10 @@ dev = [
     { name = "openai-codex", specifier = "==0.161.0" },
     { name = "pytest", specifier = ">=8,<10" },
     { name = "pytest-asyncio", specifier = ">=0.25,<2" },
+]
+eval = [
+    { name = "lens-evals", git = "https://github.com/BerriAI/lens.git?subdirectory=src%2Fsdk&rev=45b11ae53b740e77c0f8cea804bb4aa9bbc8f760" },
+    { name = "pytest", specifier = ">=8,<10" },
 ]
 
 [[package]]
@@ -1001,6 +1009,14 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/19/74/a633ee74eb36c44aa6d1095e7cc5569bebf04342ee146178e2d36600708b/jsonschema_specifications-2025.9.1.tar.gz", hash = "sha256:b540987f239e745613c7a9176f3edb72b832a4ac465cf02712288397832b5e8d", size = 32855, upload-time = "2025-09-08T01:34:59.186Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl", hash = "sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe", size = 18437, upload-time = "2025-09-08T01:34:57.871Z" },
+]
+
+[[package]]
+name = "lens-evals"
+version = "0.1.0a3"
+source = { git = "https://github.com/BerriAI/lens.git?subdirectory=src%2Fsdk&rev=45b11ae53b740e77c0f8cea804bb4aa9bbc8f760#45b11ae53b740e77c0f8cea804bb4aa9bbc8f760" }
+dependencies = [
+    { name = "pydantic" },
 ]
 
 [[package]]

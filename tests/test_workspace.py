@@ -149,6 +149,28 @@ def test_auth_csrf_host_and_repository_boundaries(workspace):
     assert client.get("/api/runs").status_code == 401
 
 
+@pytest.mark.parametrize('endpoint,key,enabled', [('', '', False),
+    ('https://lens.example/lens-ingest/v1/traces', '', False), ('', 'lens-private-key', False),
+    ('https://lens.example/lens-ingest/v1/traces', 'lens-private-key', True)])
+def test_config_exposes_safe_server_evaluation_capability(workspace, endpoint, key, enabled):
+    app, client = workspace
+    settings = app.state.settings
+    settings.trace_environment = 'lens-eval'
+    settings.moyai_build_sha = 'a1' * 20
+    settings.litellm_trace_endpoint = endpoint
+    settings.litellm_trace_api_key = key
+    # Another configured tracing backend must not claim that Lens is enabled.
+    settings.raindrop_write_key = 'raindrop-private-key'
+    response = client.get('/api/config?agent_version=request-controlled-version&environment=production')
+    assert response.status_code == 200
+    assert response.json()['evaluation'] == {
+        'environment': 'lens-eval', 'agent_version': 'a1' * 20, 'tracing_enabled': enabled}
+    for private in ['lens-private-key', 'raindrop-private-key', 'lens.example', 'request-controlled-version']:
+        assert private not in response.text
+    client.cookies.clear()
+    assert client.get('/api/config').status_code == 401
+
+
 def test_stop_run_revokes_capability(workspace):
     app, client = workspace
     app.state.settings.demo_step_seconds = 0.2

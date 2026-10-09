@@ -453,6 +453,8 @@ def create_app(settings: Settings | None = None):
         missing = missing_cloud()
         from .harnesses import choices
         return {"harnesses": choices(), "harness": settings.default_harness(), "cloud_ready": not missing, "missing": missing,
+                "evaluation": {"environment": settings.trace_environment, "agent_version": settings.moyai_build_sha,
+                               "tracing_enabled": bool(settings.litellm_trace_endpoint and settings.litellm_trace_api_key)},
                 "model": user_model(request), "models": [{**model, "default_harness": settings.default_harness(model["id"])} for model in settings.model_choices()],
                 "sandbox_provider": settings.sandbox_provider, "sandbox_providers": sandbox_settings.view(False)["providers"],
                 "public_url": settings.public_url, "max_concurrent_runs": settings.max_concurrent_runs,

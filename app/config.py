@@ -132,6 +132,7 @@ class Settings(BaseSettings):
                                              pattern=r"^[a-z0-9_-]+$")
     trace_environment: str = Field(default="development", min_length=1, max_length=40,
                                    pattern=r"^[a-z0-9_-]+$")
+    moyai_build_sha: str = ""
     langsmith_endpoint: str = "https://api.smith.langchain.com"
     langsmith_api_key: str = ""
     langsmith_project: str = "moyai"
@@ -259,6 +260,13 @@ class Settings(BaseSettings):
         if len(items) > 100 or any(not re.fullmatch(r'[A-Za-z0-9-]{1,100}', item) for item in items):
             raise ValueError('Use at most 100 comma-separated Modal object IDs.')
         return ','.join(items)
+
+    @field_validator('moyai_build_sha')
+    @classmethod
+    def validate_build_sha(cls, value: str) -> str:
+        if value and not re.fullmatch(r'(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})', value):
+            raise ValueError('MOYAI_BUILD_SHA must be a full 40- or 64-character hexadecimal commit ID.')
+        return value.lower()
 
     @field_validator('litellm_trace_endpoint', 'raindrop_trace_endpoint')
     @classmethod

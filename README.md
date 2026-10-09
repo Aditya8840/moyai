@@ -124,4 +124,5 @@ To stop compute charges, stop the web app and remaining sandboxes in the Modal d
 - [Models and harnesses](docs/getting-started.md#choose-a-harness)
 - [Deployment, backups, and security](docs/deployment.md) · [Access boundaries](docs/security-and-scope.md)
 - [Local UI preview](docs/getting-started.md#optional-local-ui-development-only) (simulated responses)
+- [Evaluate deployed builds with Lens](docs/lens-evals.md)
 - [All documentation](docs/README.md)

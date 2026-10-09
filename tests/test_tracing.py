@@ -28,15 +28,45 @@ class Processor:
         pass
 
 
-def setup(tmp_path):
+def setup(tmp_path, *, build_sha='', environment='development'):
     store = Store(tmp_path)
     settings = Settings(_env_file=None, litellm_trace_endpoint='https://gateway-dev.litellm-sandbox.ai/lens-ingest/v1/traces',
-                        litellm_trace_api_key='trace-secret', litellm_api_key='model-secret')
+                        litellm_trace_api_key='trace-secret', litellm_api_key='model-secret',
+                        moyai_build_sha=build_sha, trace_environment=environment)
     processor = Processor()
     tracing = store.tracing = AgentTracing(store, settings, processor)
     run = store.create_run('Inspect a file', '', 'modal', [], chat_enabled=True)
     message = store.claim_message(run['id'])
     return store, tracing, processor, store.run(run['id']), message
+
+
+@pytest.mark.parametrize('build_sha,environment', [('', 'development'), ('a1' * 20, 'lens-eval'),
+                                                 ('b2' * 32, 'preview')])
+def test_otlp_build_and_environment_metadata_comes_from_server_settings(tmp_path, build_sha, environment):
+    store, tracing, processor, run, message = setup(tmp_path, build_sha=build_sha, environment=environment)
+    stamp = time.time_ns()
+    tracing.emit(run, message['id'], 'read_file', 'tool-1', stamp, stamp,
+                 {'openinference.span.kind': 'TOOL', 'input.value': 'file.txt', 'output.value': 'hello',
+                  'agent.version': 'request-controlled-version', 'deployment.environment': 'production'})
+    store.finish_message(run['id'], message['id'], 'It says hello')
+
+    # Inspect the actual OTLP protobuf that all configured destinations receive.
+    encoded = encode_spans(processor.spans)
+    resource_spans = encoded.resource_spans[0]
+    resource = {attribute.key: attribute.value.string_value for attribute in resource_spans.resource.attributes}
+    assert resource['deployment.environment'] == resource['deployment.environment.name'] == environment
+    spans = [span for scope in resource_spans.scope_spans for span in scope.spans]
+    assert {span.name for span in spans} == {'read_file', 'moyai'}
+    span_attributes = [{attribute.key: attribute.value.string_value for attribute in span.attributes} for span in spans]
+    for attributes in [resource, *span_attributes]:
+        assert attributes['deployment.environment'] == environment
+        if build_sha:
+            assert attributes['agent.version'] == build_sha
+        else:
+            assert 'agent.version' not in attributes
+    payload = encoded.SerializeToString()
+    assert b'request-controlled-version' not in payload
+    assert b'trace-secret' not in payload
 
 
 def test_trace_tree_contains_task_model_tool_and_answer_with_stable_turn_ids(tmp_path):
