@@ -641,8 +641,8 @@ async def test_confirmed_delete_stops_active_family_and_retains_independent_sess
         await lifecycle.close()
 
 
-@pytest.mark.parametrize('old_journal', [False, True])
-async def test_delete_recovers_agent_create_ack_lost_before_worker_restart(durable, monkeypatch, old_journal):
+@pytest.mark.parametrize(('old_journal', 'provision_attempt'), [(False, 0), (True, 0), (False, 1)])
+async def test_delete_recovers_agent_create_ack_lost_before_worker_restart(durable, monkeypatch, old_journal, provision_attempt):
     manager, cloud, run_id = durable
     manager.coordinator = AgentCoordinator(manager.store, manager.settings, manager)
     async def create(**kwargs):
@@ -650,6 +650,9 @@ async def test_delete_recovers_agent_create_ack_lost_before_worker_restart(durab
         raise ConnectionError('Create acknowledgement lost')
     monkeypatch.setattr('app.sandboxes.modal.modal.Sandbox.create', aio(create))
     await drive(manager, run_id, phase='provision')
+    state = manager.state(run_id)
+    state['provision_attempt'] = provision_attempt
+    manager.save(run_id, state)
     with pytest.raises(ConnectionError):
         await manager.advance(run_id)
     assert cloud.machines[0].alive and not manager.state(run_id)['sandbox_id']
