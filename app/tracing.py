@@ -12,11 +12,14 @@ from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.trace import SpanContext, SpanKind, Status, StatusCode, TraceFlags
 
 from sandbox.trace_content import private_tool, trace_content
+from .native_trace import MODEL_TEXT_LIMIT
 from .slack_mentions import MENTION
 from .trace_outbox import RaindropEventOutbox, TraceOutbox
 from .user_preferences import UserPreferences
 
 log = logging.getLogger(__name__)
+# Message text also appears in compatibility attributes on the same OTLP span.
+MODEL_JSON_BYTES = 2 * 1024 * 1024
 
 
 def best_effort(method):
@@ -92,8 +95,8 @@ class AgentTracing:
              format(parent, '016x') if parent else None, session, name))
         return trace_id, span_id, parent, session, name
 
-    def content(self, value):
-        return trace_content(value, secrets=(self.settings.litellm_api_key, self.settings.litellm_trace_api_key,
+    def content(self, value, *, limit=16000):
+        return trace_content(value, limit=limit, secrets=(self.settings.litellm_api_key, self.settings.litellm_trace_api_key,
             self.settings.raindrop_write_key, self.settings.langfuse_secret_key,
             self.settings.langfuse_public_key, self.settings.langsmith_api_key,
             self.settings.braintrust_api_key, self.settings.modal_token_secret))
@@ -104,7 +107,8 @@ class AgentTracing:
         Raindrop accepts legacy content; LangSmith's GenAI mapper requires
         parts. Keep both representations of the same sanitized text.
         """
-        cleaned = [{'role': m['role'], 'content': self.content(m['content']) if m.get('content') is not None else None,
+        cleaned = [{'role': m['role'],
+                    'content': self.content(m['content'], limit=MODEL_TEXT_LIMIT) if m.get('content') is not None else None,
                     **({'tool_names': [self.content(n)[:120] for n in m['tool_names'][:100]]}
                        if 'tool_names' in m else {})} for m in messages]
         while True:
@@ -112,7 +116,7 @@ class AgentTracing:
             genai = json.dumps([{**m, 'parts': [{'type': 'text', 'content': m['content']}] if m['content'] is not None else []}
                                 for m in cleaned],
                                ensure_ascii=False)
-            if max(len(legacy), len(genai)) <= 16000:
+            if max(len(legacy.encode()), len(genai.encode())) <= MODEL_JSON_BYTES:
                 return legacy, genai
             # Shrink values, never the encoded JSON. Output choices are bounded
             # below, and tool names are capped, so content reduction terminates.
