@@ -106,9 +106,9 @@ It does **not** start the production Modal/Substrate/Lambda lifecycle, Temporal 
 
 ## Require Lens before merging
 
-The workflow runs on every PR targeting `main`, including documentation-only changes. The `python-regressions` job fails before checkout for fork or Dependabot PRs, so a skipped job cannot satisfy the Lens requirement. A maintainer must review those changes and evaluate them on a trusted same-repository branch. No untrusted PR code runs with model or Lens secrets.
+The workflow runs on every PR targeting `main`, including documentation-only changes. The **Lens agent regression check** job fails before checkout for fork or Dependabot PRs, so a skipped job cannot satisfy the Lens requirement. A maintainer must review those changes and evaluate them on a trusted same-repository branch. No untrusted PR code runs with model or Lens secrets.
 
-[lens-evals.json](../.github/rulesets/lens-evals.json) defines a separate active ruleset for `main`: require `python-regressions` from the GitHub Actions app, require the branch to be up to date, and allow no bypass actors. Committing this file does not activate branch protection. First deploy this workflow and confirm a real before/after Lens evaluation passes, then an administrator can create the ruleset:
+[lens-evals.json](../.github/rulesets/lens-evals.json) defines a separate active ruleset for `main`: require **Lens agent regression check** from the GitHub Actions app, require the branch to be up to date, and allow no bypass actors. Committing this file does not activate branch protection. First deploy this workflow and confirm a real before/after Lens evaluation passes, then an administrator can create the ruleset:
 
 ```sh
 gh api --method POST repos/BerriAI/moyai/rulesets \

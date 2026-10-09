@@ -5,7 +5,9 @@
   "bypass_actors": [],
   "conditions": {
     "ref_name": {
-      "include": ["refs/heads/main"],
+      "include": [
+        "refs/heads/main"
+      ],
       "exclude": []
     }
   },
@@ -16,7 +18,7 @@
         "strict_required_status_checks_policy": true,
         "required_status_checks": [
           {
-            "context": "python-regressions",
+            "context": "Lens agent regression check",
             "integration_id": 15368
           }
         ]
