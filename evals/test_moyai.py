@@ -5,9 +5,6 @@ from pathlib import Path
 import subprocess
 import sys
 
-from lens import Lens
-from lens.config import Execution
-
 from evals.agent import AgentRunError, MoyaiAgent
 
 
@@ -35,6 +32,8 @@ def verify_solution(workspace, code):
 
 
 def execution_metadata():
+    from lens.config import Execution
+
     branch = os.environ.get('LENS_EVAL_BRANCH')
     if not branch:
         return None
@@ -52,6 +51,8 @@ def execution_metadata():
 
 
 def test_moyai(tmp_path):
+    from lens import Lens
+
     lens = Lens(base_url=os.environ['LENS_BASE_URL'], api_key=os.environ['LENS_API_KEY'])
     with lens.evals.test(os.environ.get('MOYAI_EVAL_NAME', 'moyai-python-coding-regressions'),
                          execution=execution_metadata()) as evaluation:

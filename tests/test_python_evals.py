@@ -200,6 +200,7 @@ def test_should_reject_unrecognized_saved_input():
 
 
 def test_should_distinguish_baseline_and_candidate_execution_metadata(monkeypatch):
+    pytest.importorskip('lens')
     from evals.test_moyai import execution_metadata
     for key, value in {'LENS_EVAL_BRANCH': 'main', 'LENS_EVAL_ROLE': 'baseline', 'LENS_VERSION': BUILD,
                        'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2',
