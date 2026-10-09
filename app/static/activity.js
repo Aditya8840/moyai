@@ -168,6 +168,30 @@
   function updates(run,turns=groups(run)){
     return new Map([...timeline(run,turns)].map(([id,items])=>[id,items.filter(item=>item.type==='update').map(({id,content})=>({id,content}))]).filter(([,items])=>items.length));
   }
+  function completedHistory(run,turns=groups(run)){
+    const histories=new Map(),answered=new Set(),pending=[];
+    // The API orders messages by delivery, not enqueue time. Match each
+    // answer to its delivered root input, skipping queues and steering.
+    // A stack also handles an inline session-ID exchange during live work.
+    for(const message of run.messages||[]){
+      if(message.role==='user'){
+        if(!message.steering_parent_id&&!['queued','steered'].includes(message.status)&&message.started_at!=='')pending.push(String(message.id));
+      }else if(message.role==='assistant'&&message.status!=='steered'){
+        const id=pending.pop();
+        if(id&&message.status==='completed')answered.add(id);
+      }
+    }
+    for(const turn of turns.values()){
+      // A failed, interrupted, or waiting turn may still need a reply. Keep
+      // commentary visible until its successful answer is in the transcript:
+      // streamed save/idle events can arrive before the fresh message list.
+      if(!['completed','idle'].includes(turn.status)||!answered.has(turn.id))continue;
+      const ids=new Set([turn.id,...(run.messages||[]).filter(message=>String(message.steering_parent_id)===turn.id).map(message=>String(message.id)),
+        ...turn.events.filter(event=>event.data?.phase==='steering'&&event.data.message_id).map(event=>String(event.data.message_id))]);
+      for(const id of ids)histories.set(id,id===turn.input?(turn.start?`Worked for ${duration(turn.start,turn.end)}`:'Work history'):'Earlier activity');
+    }
+    return histories;
+  }
   function updateHTML(update,markdown=esc){
     // Exact legacy runtime notices only; ordinary assistant prose (including
     // quotations of these notices) must keep its normal Markdown rendering.
@@ -226,8 +250,8 @@
   function html(turn){
     if(!turn||(!turn.start&&!turn.rows.length))return '';
     const key='turn:'+turn.id;
-    // Public assistant text belongs in visible chat updates, never inside a
-    // collapsible tool-history section (including "earlier updates").
+    // Commentary stays separate from individual tool blocks. Completed
+    // conversation history wraps both at the input level in sync().
     const rows=turn.rows.filter(row=>row.kind!=='message');
     const older=rows.slice(0,-7),recent=rows.slice(-7);
     return `<details class="turn-work ${turn.pulse?'is-live':''}" data-work-key="${esc(key)}" data-turn="${esc(turn.id)}">
@@ -257,10 +281,31 @@
   function sync(container,run,options={}){
     if(!container)return;
     const nearBottom=container.scrollHeight-container.scrollTop-container.clientHeight<100;
-    const byInput=timeline(run);
-    container.querySelectorAll('[data-activity-slot]').forEach(slot=>syncItems(slot,byInput.get(slot.dataset.activitySlot)||[],options));
+    const turns=groups(run),byInput=timeline(run,turns),histories=completedHistory(run,turns);
+    container.querySelectorAll('[data-activity-slot]').forEach(slot=>{
+      const items=byInput.get(slot.dataset.activitySlot)||[];
+      const title=items.some(item=>item.type==='update')?histories.get(slot.dataset.activitySlot):null;
+      let history=slot.querySelector?.(':scope > .completed-work');
+      if(title){
+        if(!history){
+          history=slot.ownerDocument.createElement('details');history.className='turn-work completed-work';
+          history.innerHTML='<summary class="work-heading"><span class="work-chevron" aria-hidden="true">›</span><span class="work-title"></span></summary><div class="work-body"></div>';
+          const body=history.querySelector('.work-body');
+          const focused=slot.contains(slot.ownerDocument.activeElement);
+          // Move the existing nodes so links, copy controls, and manually
+          // expanded tool details survive the transition to saved history.
+          body.append(...slot.children);slot.append(history);
+          if(focused)history.querySelector('summary').focus({preventScroll:true});
+        }
+        history.querySelector('.work-title').textContent=title;
+        syncItems(history.querySelector('.work-body'),items,options);
+      }else{
+        if(history){slot.append(...history.querySelector('.work-body').children);history.remove();}
+        syncItems(slot,items,options);
+      }
+    });
     if(nearBottom)container.scrollTop=container.scrollHeight;
   }
-  const api={groups,current,isFocus,visibleEvents,terminalAnswer,terminalError,timeline,updates,updateHTML,html,duration,tick,sync,syncWork};root.MoyaiActivity=api;
+  const api={groups,current,isFocus,visibleEvents,terminalAnswer,terminalError,timeline,updates,completedHistory,updateHTML,html,duration,tick,sync,syncWork};root.MoyaiActivity=api;
   if(typeof module!=='undefined')module.exports=api;
 })(typeof globalThis!=='undefined'?globalThis:window);
