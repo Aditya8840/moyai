@@ -10,18 +10,21 @@ from uuid import uuid4
 try:
     from .harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
     from .harness_dependencies import prepare_codex
+    from .codex_catalog import search_catalog
     from .context_recovery import run_with_context_recovery, prepare_context, maintain_context
     from .sdk_failure import codex_details, exception_details, failure_diagnostic, failure_summary
     from .transport_recovery import MAX_TRANSPORT_ATTEMPTS, retryable_failure
 except ImportError:
     from harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
     from harness_dependencies import prepare_codex
+    from codex_catalog import search_catalog
     from context_recovery import run_with_context_recovery, prepare_context, maintain_context
     from sdk_failure import codex_details, exception_details, failure_diagnostic, failure_summary
     from transport_recovery import MAX_TRANSPORT_ATTEMPTS, retryable_failure
 
 
 RECEIPT_TIMEOUT_SECONDS = 10
+MCP_STARTUP_TIMEOUT_SECONDS = 60
 
 
 def toml_value(value):
@@ -71,7 +74,8 @@ class CodexAgent(HarnessAgent):
                     if not isinstance(items, (list, str)):
                         raise ValueError('Invalid input')
                     expected = {item['call_id'] for item in items if isinstance(item, dict)
-                                and item.get('type') in {'function_call_output', 'custom_tool_call_output'}}
+                                and item.get('type') in {'function_call_output', 'custom_tool_call_output',
+                                                        'tool_search_output'}}
                     if not all(isinstance(call_id, str) and call_id for call_id in expected):
                         raise ValueError('Invalid call ID')
                 except (ValueError, TypeError, KeyError, AttributeError):
@@ -115,7 +119,10 @@ class CodexAgent(HarnessAgent):
                 'name': 'Moyai', 'base_url': ctx.relay.url + '/v1', 'wire_api': 'responses',
                 'env_key': 'WORKSPACE_RUN_TOKEN', 'requires_openai_auth': False,
                 'supports_websockets': False, 'request_max_retries': 0, 'stream_max_retries': 0}},
-            'mcp_servers': {'moyai': ctx.config['mcp_servers']['workspace']},
+            # Optional MCP servers connect asynchronously in Codex. Without
+            # required=True, inference can start with only the native tools.
+            'mcp_servers': {'moyai': {**ctx.config['mcp_servers']['workspace'],
+                'required': True, 'startup_timeout_sec': MCP_STARTUP_TIMEOUT_SECONDS}},
             'projects': {str(Path(ctx.cwd).resolve()): {'trust_level': 'untrusted'}},
             'project_doc_max_bytes': 0, 'web_search': 'disabled',
             # Moyai owns plugins; native marketplace sync outlives SDK shutdown.
@@ -135,6 +142,11 @@ class CodexAgent(HarnessAgent):
         env.update(CODEX_HOME=str(home), WORKSPACE_RUN_TOKEN=os.environ['WORKSPACE_RUN_TOKEN'])
         if bundled_path_dir():
             env['PATH'] = str(bundled_path_dir()) + os.pathsep + os.environ.get('PATH', '')
+        catalog = search_catalog(bundled_codex_path(), home,
+            ctx.spec['model'].removeprefix('openai/'),
+            {key: value for key, value in env.items() if key in keep | {'CODEX_HOME'}})
+        if catalog:
+            settings['model_catalog_json'] = catalog
         settings_args = tuple(name + '=' + toml_value(value) for name, value in settings.items())
         # The SDK merges env, and empty native feature/originator variables still
         # have meaning. Remove them before exec instead of treating blank as unset.
@@ -166,9 +178,22 @@ class CodexAgent(HarnessAgent):
         elif kind == 'imageView':
             name, args = 'view_image', {'path': item.get('path', '')}
             output, failed = 'Image viewed.', False
+        elif kind in {'tool_search_call', 'tool_search_output'}:
+            call_id = item.get('call_id')
+            if not call_id or item.get('execution') != 'client':
+                return
+            name = 'tool_search'
+            if kind == 'tool_search_call':
+                args, output, failed = item.get('arguments') or {}, '', False
+            else:
+                if call_id not in self.calls:
+                    return
+                _, args = self.calls[call_id]
+                output = json.dumps({'tools': item.get('tools', [])}, ensure_ascii=False)
+                failed = item.get('status') != 'completed'
         else:
             return
-        call_id = item['id']
+        call_id = item['call_id'] if kind.startswith('tool_search_') else item['id']
         with self.receipts:
             if call_id in self.completed:
                 return
@@ -196,7 +221,9 @@ class CodexAgent(HarnessAgent):
     def record_tool_event(self, method, payload):
         item = payload.get('item', {})
         if method == 'rawResponseItem/completed':
-            if item.get('type') in {'function_call_output', 'custom_tool_call_output'}:
+            if item.get('type') in {'tool_search_call', 'tool_search_output'}:
+                self.record_item(item, completed=item['type'] == 'tool_search_output')
+            elif item.get('type') in {'function_call_output', 'custom_tool_call_output'}:
                 # Observation permits polling; only native completion is a receipt.
                 with self.receipts:
                     self.observed_outputs.add(item['call_id'])
@@ -388,7 +415,8 @@ class CodexAgent(HarnessAgent):
                                 'Do not start detached work. Moyai owns credentials, memory, skills and delegation.',
                             'approvalPolicy': 'never', 'sandbox': 'danger-full-access',
                             # The pinned SDK exposes this native app-server field
-                            # through dict params. Only output IDs are consumed.
+                            # through dict params. Consume output IDs and native
+                            # search receipts, never private reasoning/response text.
                             'experimentalRawEvents': True})
                         turn = await client.turn_start(thread.thread.id, prompt)
                         while True:

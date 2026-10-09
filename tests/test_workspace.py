@@ -94,7 +94,8 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
     safe = set('''agents_results agents_read_artifact automation_environments automation_webhook_info
         credentials_list github_rulesets github_ruleset github_repositories github_repository github_checkout
         github_pull_request github_pull_request_comments linear_my_issues linear_teams linear_search linear_issue
-        slack_search slack_thread slack_me notion_search notion_page media_list sessions_search model_list'''.split())
+        slack_search slack_thread slack_me notion_search notion_page media_list sessions_search model_list
+        workspace_diagnostics'''.split())
     # Read hints describe presentation, not replay safety: these mutate context
     # selection or reconcile remote schedules and must remain one-shot.
     read_effects = set('''automation_list memory_search skills_search skills_load skills_read_file'''.split())
@@ -299,12 +300,12 @@ def test_org_policy_blocks_direct_tool_calls_and_survives_reconnection(workspace
     assert client.patch("/api/connections/linear/policy", json={"enabled": True, "read_only": True}).status_code == 200
     app.state.connectors.save("linear", {"access_token": "replacement-token", "kind": "oauth"}, "Team")
     names = {x["name"] for x in client.get(f"/broker/{run_id}/tools", headers=headers).json()}
-    media = {"media_list", "media_share", "media_revoke"}
-    assert names == {"linear_teams", "linear_search", "linear_issue", "linear_my_issues"} | media
+    builtins = {"media_list", "media_share", "media_revoke", "workspace_diagnostics"}
+    assert names == {"linear_teams", "linear_search", "linear_issue", "linear_my_issues"} | builtins
     assert client.post(f"/broker/{run_id}/tools/call", headers=headers,
                        json={"name": "linear_comment", "arguments": {"issue_id": "LIT-1", "body": "Blocked"}}).status_code == 403
     client.patch("/api/connections/linear/policy", json={"enabled": False, "read_only": True})
-    assert {tool["name"] for tool in client.get(f"/broker/{run_id}/tools", headers=headers).json()} == media
+    assert {tool["name"] for tool in client.get(f"/broker/{run_id}/tools", headers=headers).json()} == builtins
     assert client.post(f"/broker/{run_id}/tools/call", headers=headers,
                        json={"name": "linear_search", "arguments": {"query": "MCP"}}).status_code == 403
     assert not app.state.store.approvals(run_id)
