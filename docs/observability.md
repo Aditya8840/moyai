@@ -149,18 +149,23 @@ messages, public assistant text and requested tool names, for both JSON and
 streaming responses. Streaming deltas are assembled before redaction; completed
 Responses snapshots replace those deltas so text is exported once. Failed and
 incomplete snapshots preserve any text and tool names already received. Text capture
-is bounded at 16,000 characters per input/output aggregate; overflowing text is
-omitted as a whole. Tool arguments and results remain in their separate tool
-spans. Internal context-compaction calls export usage and status only. Capture
+is bounded at 1,000,000 characters per input/output aggregate; overflowing native
+text is omitted as a whole before redaction. Model text is sanitized with that
+larger limit, and each serialized message representation is capped at 2 MiB of
+UTF-8 JSON. Text that exceeds the serialized budget is shortened after redaction
+with an explicit `[truncated]` marker. Tool arguments and results remain in their
+separate tool spans. Internal context-compaction calls export usage and status only. Capture
 uses the existing inference connection and does not add a network hop.
 
 System prompts, loaded skills, private reasoning, images and credential-tool
 payloads are excluded. Known credentials and common secret fields are redacted;
-ordinary task/tool text is sent to the configured gateway. Text is capped at
-16,000 characters per field. Moyai writes encoded spans to a SQLite outbox on
-Render's persistent disk before export. A background worker retries delivery after
+ordinary task/tool text is sent to the configured gateway. Agent and tool text
+retains its 16,000-character per-field limit. Moyai writes encoded spans to a SQLite
+outbox on Render's persistent disk before export. A background worker retries delivery after
 outages and restarts using the same IDs. It keeps delivery receipts and removes
-acknowledged payloads. The gateway must deduplicate by trace/span ID if it accepted
+acknowledged payloads. Export batches are bounded by encoded bytes as well as
+span count so larger model traces do not overflow Lens's 16 MiB request limit.
+The gateway must deduplicate by trace/span ID if it accepted
 a batch but its acknowledgment was lost. Pending payloads occupy disk until delivery;
 back up and protect that disk with the rest of the workspace data. A crash before
 capture, a lost disk, or a model response that never reaches Moyai can still leave

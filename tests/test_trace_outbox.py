@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import contextmanager
+import json
 import time
 
 import httpx
@@ -12,6 +13,7 @@ from app.agents import AgentCoordinator
 from app.config import Settings
 from app.db import Store
 from app.tracing import AgentTracing
+from sandbox.trace_content import trace_content
 
 
 def setup(tmp_path):
@@ -170,6 +172,113 @@ async def test_failed_delivery_retries_same_ids_and_payload(tmp_path, failure):
     assert await tracing.outboxes[0].export_once()
     assert delivered[0] == delivered[1]
     assert spans(delivered[0])[0].span_id.hex() == row['span_id']
+    await tracing.close()
+
+
+async def test_large_trace_backlog_is_delivered_in_byte_bounded_batches(tmp_path):
+    from app.trace_outbox import MAX_BATCH_BYTES
+
+    store, tracing, run, message = setup(tmp_path)
+    content = trace_content('Readable evidence 📖 ' * 60_000 + ' trace-secret',
+                            secrets=('trace-secret',), limit=2 * 1024 * 1024)
+    for index in range(8):
+        stamp = time.time_ns()
+        tracing.emit(run, message['id'], 'chat test', f'large-{index}', stamp, stamp,
+                     {'openinference.span.kind': 'LLM', 'input.value': content, 'output.value': ''})
+    queued = store.rows('SELECT span_id,length(payload) AS size FROM trace_outbox ORDER BY created_at,rowid')
+    assert sum(row['size'] for row in queued) > 16 * 1024 * 1024
+    delivered, sizes = [], []
+
+    def gateway(request):
+        sizes.append(len(request.content))
+        for span in spans(request.content):
+            delivered.append(span.span_id.hex())
+            attributes = {attribute.key: attribute.value.string_value for attribute in span.attributes}
+            assert attributes['input.value'] == content
+        assert b'trace-secret' not in request.content
+        return httpx.Response(200)
+
+    await transport(tracing, gateway)
+    while await tracing.outboxes[0].export_once():
+        pass
+    assert len(sizes) > 1 and max(sizes) <= MAX_BATCH_BYTES
+    assert delivered == [row['span_id'] for row in queued]
+    receipts = store.rows('SELECT delivered_at,payload,attempts FROM trace_outbox')
+    assert all(row['delivered_at'] and row['payload'] is None and row['attempts'] == 1 for row in receipts)
+    await tracing.close()
+
+
+async def test_failed_byte_bounded_batch_only_retries_attempted_rows(tmp_path, monkeypatch):
+    store, tracing, run, message = setup(tmp_path)
+    for index in range(3):
+        stamp = time.time_ns()
+        tracing.emit(run, message['id'], 'chat test', f'batch-{index}', stamp, stamp,
+                     {'openinference.span.kind': 'LLM', 'input.value': 'hello', 'output.value': ''})
+    queued = store.rows('SELECT * FROM trace_outbox ORDER BY created_at,rowid')
+    monkeypatch.setattr('app.trace_outbox.MAX_BATCH_BYTES', len(queued[0]['payload']))
+    delivered = []
+
+    def gateway(request):
+        delivered.append(request.content)
+        return httpx.Response(503 if len(delivered) == 1 else 200)
+
+    await transport(tracing, gateway)
+    assert not await tracing.outboxes[0].export_once()
+    rows = store.rows('SELECT * FROM trace_outbox ORDER BY created_at,rowid')
+    assert [row['attempts'] for row in rows] == [1, 0, 0]
+    assert rows[0]['next_attempt_at'] > time.time()
+    assert [row['next_attempt_at'] for row in rows[1:]] == [0, 0]
+    assert all(row['delivered_at'] is None for row in rows)
+    store.execute('UPDATE trace_outbox SET next_attempt_at=0')
+    assert await tracing.outboxes[0].export_once()
+    assert delivered[0] == delivered[1] == queued[0]['payload']
+    assert [row['attempts'] for row in store.rows('SELECT attempts FROM trace_outbox ORDER BY created_at,rowid')] == [2, 0, 0]
+    while await tracing.outboxes[0].export_once():
+        pass
+    assert [span.span_id.hex() for payload in delivered[1:] for span in spans(payload)] == [row['span_id'] for row in queued]
+    await tracing.close()
+
+
+async def test_oversized_existing_span_is_attempted_alone_without_changing_payload(tmp_path, monkeypatch):
+    store, tracing, run, message = setup(tmp_path)
+    store.finish_message(run['id'], message['id'], 'hello')
+    payload = store.rows('SELECT payload FROM trace_outbox')[0]['payload']
+    monkeypatch.setattr('app.trace_outbox.MAX_BATCH_BYTES', 1)
+    delivered = []
+
+    def gateway(request):
+        delivered.append(request.content)
+        return httpx.Response(200)
+
+    await transport(tracing, gateway)
+    assert await tracing.outboxes[0].export_once()
+    assert delivered == [payload]
+    await tracing.close()
+
+
+async def test_raindrop_batch_budget_includes_json_framing_and_unicode(tmp_path, monkeypatch):
+    store, tracing, run, message = setup_both(tmp_path)
+    for index in range(2):
+        stamp = time.time_ns()
+        tracing.emit(run, message['id'] + index, 'moyai', '', stamp, stamp,
+                     {'openinference.span.kind': 'AGENT', 'input.value': 'Evidence 📖 ' * 100,
+                      'output.value': 'Done', 'moyai.status': 'completed'}, root=True)
+    queued = store.rows('SELECT payload FROM trace_outbox_raindrop_events ORDER BY created_at,rowid')
+    budget = sum(len(row['payload']) for row in queued) + 3
+    monkeypatch.setattr('app.trace_outbox.MAX_BATCH_BYTES', budget)
+    delivered = []
+
+    def gateway(request):
+        assert len(request.content) <= budget
+        delivered.append(json.loads(request.content))
+        return httpx.Response(204)
+
+    await tracing.events.client.aclose()
+    tracing.events.client = httpx.AsyncClient(transport=httpx.MockTransport(gateway))
+    assert await tracing.events.export_once()
+    assert await tracing.events.export_once()
+    assert not await tracing.events.export_once()
+    assert delivered == [[json.loads(row['payload'])] for row in queued]
     await tracing.close()
 
 

@@ -17,11 +17,14 @@ log = logging.getLogger(__name__)
 
 TABLES = frozenset({'trace_outbox', 'trace_outbox_raindrop', 'trace_outbox_langfuse',
                    'trace_outbox_langsmith', 'trace_outbox_braintrust', 'trace_outbox_raindrop_events'})
+MAX_BATCH_BYTES = 8 * 1024 * 1024
 
 
 class TraceOutbox:
     # One table per receiver: each keeps its own retries and receipts, so an
     # outage at one destination never delays or duplicates delivery to another.
+    batch_row_overhead = 0
+
     def __init__(self, store, table, endpoint, headers):
         if table not in TABLES:
             raise ValueError('Unknown trace outbox')
@@ -101,10 +104,24 @@ class TraceOutbox:
 
     async def export_once(self):
         async with self.lock:
-            rows = self.store.rows(f'''SELECT * FROM {self.table} WHERE delivered_at IS NULL
-                AND next_attempt_at<=? ORDER BY created_at LIMIT 64''', (time.time(),))
-            if not rows:
+            pending = self.store.rows(f'''SELECT rowid AS queue_id,length(payload) AS payload_bytes
+                FROM {self.table} WHERE delivered_at IS NULL AND next_attempt_at<=?
+                ORDER BY created_at,rowid LIMIT 64''', (time.time(),))
+            queue_ids, size = [], 0
+            for row in pending:
+                row_size = row['payload_bytes'] + self.batch_row_overhead
+                if queue_ids and size + row_size > MAX_BATCH_BYTES:
+                    break
+                # An existing oversized span is still attempted unchanged by
+                # itself. Do not strand it or silently discard trace content.
+                queue_ids.append(row['queue_id'])
+                size += row_size
+            if not queue_ids:
                 return False
+            # Read payloads only after selecting a byte-bounded batch; 64 large
+            # spans must not all be loaded into memory to send just a few.
+            rows = self.store.rows(f'''SELECT * FROM {self.table}
+                WHERE rowid IN ({','.join('?' for _ in queue_ids)}) ORDER BY created_at,rowid''', tuple(queue_ids))
             error = ''
             retry_after = 0
             try:
@@ -148,6 +165,10 @@ class TraceOutbox:
 
 class RaindropEventOutbox(TraceOutbox):
     """Raindrop interactions power Events/Signals; OTLP spans alone do not."""
+
+    # json.dumps adds two brackets and a comma/space between stored JSON
+    # objects: exactly two extra bytes per event for every nonempty batch.
+    batch_row_overhead = 2
 
     def __init__(self, store, endpoint, headers):
         super().__init__(store, 'trace_outbox_raindrop_events', endpoint, headers)

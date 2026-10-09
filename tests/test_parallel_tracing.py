@@ -7,7 +7,7 @@ import pytest
 
 from app.config import Settings
 from app.db import Store
-from app.tracing import AgentTracing
+from app.tracing import AgentTracing, MODEL_JSON_BYTES
 from test_trace_outbox import spans, transport
 
 
@@ -117,8 +117,10 @@ async def test_message_json_stays_valid_when_large_and_errors_have_sanitized_exc
     content = 'ls-secret ' + '\\"\n' * 16000
     legacy, genai = tracing.model_content([{'role': 'user', 'content': content}] * 5)
     for value in (legacy, genai):
-        assert len(value) <= 16000
-        assert len(json.loads(value)) == 5
+        assert len(value.encode()) <= MODEL_JSON_BYTES
+        messages = json.loads(value)
+        assert len(messages) == 5
+        assert all(message['content'] == content.replace('ls-secret', '[redacted]') for message in messages)
         assert 'ls-secret' not in value
     legacy, genai = tracing.model_content([{'role': 'assistant', 'content': None, 'tool_names': ['read_file']}])
     assert json.loads(legacy)[0]['content'] is None

@@ -226,19 +226,51 @@ def test_model_broker_emits_span_without_rerouting_or_exposing_system_prompts(wo
     tracing.enabled = True
     tracing.processor = Processor()
     run = active(app)
+    prompt = 'Inspect this file: ' + 'line of code\n' * 3000
+    answer = 'Review findings\n' * 2000 + 'Done'
     def gateway(request):
         assert str(request.url) == 'https://existing-model-gateway.example/v1/chat/completions'
         assert request.headers['authorization'] == 'Bearer existing-model-key'
-        return httpx.Response(200, json={'choices': [{'message': {'content': 'Done'}}], 'usage': {'prompt_tokens': 2, 'completion_tokens': 1}})
+        assert json.loads(request.content)['messages'][-1]['content'] == prompt
+        return httpx.Response(200, json={'choices': [{'message': {'content': answer}}], 'usage': {'prompt_tokens': 2, 'completion_tokens': 1}})
     real = httpx.AsyncClient
     monkeypatch.setattr('app.main.httpx.AsyncClient', lambda **kw: real(transport=httpx.MockTransport(gateway), **kw))
     response = client.post(f"/broker/{run['id']}/v1/chat/completions", headers={'Authorization': 'Bearer capability'},
-                           json={'messages': [{'role': 'system', 'content': 'private-system-prompt'}, {'role': 'user', 'content': 'Hello'}]})
+                           json={'messages': [{'role': 'system', 'content': 'private-system-prompt'}, {'role': 'user', 'content': prompt}]})
     assert response.status_code == 200
+    assert response.json()['choices'][0]['message']['content'] == answer
     assert len(tracing.processor.spans) == 1
     span = tracing.processor.spans[0]
     assert 'private-system-prompt' not in str(span.attributes)
-    assert 'Hello' in span.attributes['input.value'] and 'Done' in span.attributes['output.value']
+    for direction, text in [('input', prompt), ('output', answer)]:
+        assert json.loads(span.attributes[f'{direction}.value'])[0]['content'] == text
+        assert json.loads(span.attributes[f'gen_ai.{direction}.messages'])[0]['parts'] == [
+            {'type': 'text', 'content': text}]
+
+
+def test_model_span_with_large_unicode_and_escaped_text_fits_lens_ingestion(tmp_path):
+    _, tracing, processor, run, _ = setup(tmp_path)
+    # Both UTF-8 width and JSON escaping count toward the upload limit. Exercise
+    # all retained messages and choices, including the duplicated GenAI content.
+    text = '🗿"\\\n' * 150_000 + ' model-secret <think>private-reasoning</think>'
+    tracing.model(run, 'large-request', time.time_ns(), [{'role': 'user', 'content': text}] * 5,
+                  {'choices': [{'message': {'content': text}}] * 5}, 'completed')
+    assert len(processor.spans) == 1
+    attrs = processor.spans[0].attributes
+    for direction in ['input', 'output']:
+        legacy = json.loads(attrs[f'{direction}.value'])
+        genai = json.loads(attrs[f'gen_ai.{direction}.messages'])
+        assert len(legacy) == len(genai) == 5
+        for message, modern in zip(legacy, genai):
+            assert message['content'].startswith(text[:16000])
+            assert message['content'].endswith(' [truncated]')
+            assert modern['content'] == message['content']
+            assert modern['parts'] == [{'type': 'text', 'content': message['content']}]
+        assert len(attrs[f'{direction}.value'].encode()) <= 2 * 1024 * 1024
+        assert len(attrs[f'gen_ai.{direction}.messages'].encode()) <= 2 * 1024 * 1024
+    payload = encode_spans(processor.spans).SerializeToString()
+    assert len(payload) < 16 * 1024 * 1024
+    assert b'model-secret' not in payload and b'private-reasoning' not in payload
 
 
 @pytest.mark.parametrize('route', ['messages', 'responses'])
@@ -256,7 +288,16 @@ def test_native_model_content_preserves_wire_and_spend(workspace, monkeypatch, r
             pytest.fail('Disabled tracing must not retain native content')
         monkeypatch.setattr('app.harness_gateway.NativeModelContent', unexpected_capture)
     run = active(app)
-    public = 'Hello configured-secret <think>private-thought</think>world'
+    input_prefix = 'Inspect ' + 'i' * 15_980 + ' '
+    output_prefix = 'Hello ' + 'o' * 15_982 + ' '
+    prompt = input_prefix + 'configured-secret ' + 'input-tail ' * 2000
+    # Split a secret at the old 16,000-character limit and a stream delta
+    # boundary. Long text must survive while redaction sees the complete value.
+    parts = [output_prefix + 'configured-', 'secret <thi',
+             'nk>private-thought</think>world ' + 'output-tail ' * 2000]
+    public = ''.join(parts)
+    expected_input = prompt.replace('configured-secret', '[redacted]')
+    expected_output = output_prefix + '[redacted] world ' + 'output-tail ' * 2000
     usage = {'input_tokens': 12, 'output_tokens': 3}
     if route == 'messages':
         value = {'id': 'provider-id', 'content': [
@@ -266,7 +307,7 @@ def test_native_model_content_preserves_wire_and_spend(workspace, monkeypatch, r
         frames = [{'type': 'message_start', 'message': {'id': 'provider-id', 'content': [], 'usage': usage}},
                   {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}},
                   *[{'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': part}}
-                    for part in ['Hello configured-', 'secret <thi', 'nk>private-thought</think>world']],
+                    for part in parts],
                   {'type': 'content_block_delta', 'index': 1,
                    'delta': {'type': 'thinking_delta', 'thinking': 'private-reasoning'}},
                   {'type': 'content_block_start', 'index': 2, 'content_block': value['content'][2]},
@@ -279,7 +320,7 @@ def test_native_model_content_preserves_wire_and_spend(workspace, monkeypatch, r
             {'type': 'function_call', 'name': 'read_file', 'arguments': 'private-arguments'}], 'usage': usage,
             'x_litellm_response_cost': '0.00123'}
         frames = [*({'type': 'response.output_text.delta', 'delta': part}
-                    for part in ['Hello configured-', 'secret <thi', 'nk>private-thought</think>world']),
+                    for part in parts),
                   {'type': 'response.output_item.added', 'item': value['output'][2]},
                   {'type': 'response.completed', 'response': value}]
     wire = (''.join('data: ' + json.dumps(frame) + '\n\n' for frame in frames).encode()
@@ -287,10 +328,12 @@ def test_native_model_content_preserves_wire_and_spend(workspace, monkeypatch, r
 
     class Chunks(httpx.AsyncByteStream):
         async def __aiter__(self):
-            for start in range(0, len(wire), 17):
-                yield wire[start:start + 17]
+            for start in range(0, len(wire), 4093):
+                yield wire[start:start + 4093]
 
     def gateway(request):
+        field = 'messages' if route == 'messages' else 'input'
+        assert json.loads(request.content)[field] == messages
         return httpx.Response(200, stream=Chunks(), headers={'x-litellm-response-cost': '0.00123'})
     real = httpx.AsyncClient
     monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient',
@@ -298,7 +341,7 @@ def test_native_model_content_preserves_wire_and_spend(workspace, monkeypatch, r
     messages = [{'role': 'system', 'content': 'private-system'},
                 {'role': 'developer', 'content': 'private-developer'},
                 {'role': 'user', 'content': [
-                    {'type': 'text' if route == 'messages' else 'input_text', 'text': 'Inspect configured-secret'},
+                    {'type': 'text' if route == 'messages' else 'input_text', 'text': prompt},
                     {'type': 'tool_result', 'content': 'private-result'}]}]
     response = client.post(f"/broker/{run['id']}/v1/{route}", headers={'Authorization': 'Bearer capability'},
                            json={'messages' if route == 'messages' else 'input': messages, 'stream': stream})
@@ -312,11 +355,12 @@ def test_native_model_content_preserves_wire_and_spend(workspace, monkeypatch, r
         return
     assert len(tracing.processor.spans) == 1
     attrs = tracing.processor.spans[0].attributes
-    assert json.loads(attrs['input.value']) == [{'role': 'user', 'content': 'Inspect [redacted]'}]
+    assert json.loads(attrs['input.value']) == [{'role': 'user', 'content': expected_input}]
     assert json.loads(attrs['output.value']) == [
-        {'role': 'assistant', 'content': 'Hello [redacted] world', 'tool_names': ['read_file']}]
-    assert json.loads(attrs['gen_ai.output.messages'])[0]['parts'] == [
-        {'type': 'text', 'content': 'Hello [redacted] world'}]
+        {'role': 'assistant', 'content': expected_output, 'tool_names': ['read_file']}]
+    for direction, text in [('input', expected_input), ('output', expected_output)]:
+        assert json.loads(attrs[f'gen_ai.{direction}.messages'])[0]['parts'] == [
+            {'type': 'text', 'content': text}]
     assert 'private-' not in str(attrs) and 'configured-secret' not in str(attrs)
     assert attrs['gen_ai.usage.total_tokens'] == 15
 
@@ -372,21 +416,21 @@ def test_unsuccessful_snapshot_cannot_erase_or_shorten_observed_output(status, s
 @pytest.mark.parametrize('route', ['/v1/messages', '/v1/responses'])
 def test_native_projection_bounds_and_private_blocks_never_enter_usage(route):
     from app.harness_gateway import NativeUsageCapture
-    from app.native_trace import LIMIT, OMITTED, NativeModelContent
+    from app.native_trace import MODEL_TEXT_LIMIT, OMITTED, NativeModelContent
 
     field = 'messages' if route == '/v1/messages' else 'input'
     messages = [{'role': 'user', 'content': str(i)} for i in range(8)]
     content = NativeModelContent({field: messages}, route)
     assert [m['content'] for m in content.messages] == ['3', '4', '5', '6', '7']
-    for values in [[{'role': 'user', 'content': 'private-prefix' + 'x' * LIMIT}],
-                   [{'role': 'user', 'content': 'x' * 3500} for _ in range(5)]]:
+    for values in [[{'role': 'user', 'content': 'private-prefix' + 'x' * MODEL_TEXT_LIMIT}],
+                   [{'role': 'user', 'content': 'x' * (MODEL_TEXT_LIMIT // 5 + 1)} for _ in range(5)]]:
         assert NativeModelContent({field: values}, route).messages == [{'role': 'user', 'content': OMITTED}]
     private = [None, 'private-string', {'type': []}, {'type': 'image', 'source': 'private-image'},
                {'type': 'reasoning', 'summary': 'private-reasoning'},
                {'type': 'tool_result', 'content': 'private-result'}, {'type': 'text', 'text': {'private': 1}}]
     assert NativeModelContent({field: [{'role': 'user', 'content': private}]}, route).messages == []
     blocks = [{'type': 'text' if route == '/v1/messages' else 'output_text',
-               'text': 'private-prefix' + 'x' * LIMIT}, *private]
+               'text': 'private-prefix' + 'x' * MODEL_TEXT_LIMIT}, *private]
     tools = [{'type': 'tool_use' if route == '/v1/messages' else 'custom_tool_call',
               'name': 'read_file', 'arguments': 'private-arguments'} for _ in range(101)]
     value = ({'content': blocks + tools} if route == '/v1/messages' else
@@ -399,6 +443,12 @@ def test_native_projection_bounds_and_private_blocks_never_enter_usage(route):
     assert 'private-' not in json.dumps(content.choices)
     assert capture.response == {'usage': {'input_tokens': 2, 'output_tokens': 1,
                                         'prompt_tokens': 2, 'completion_tokens': 1, 'total_tokens': 3}}
+    streamed = NativeModelContent({}, route)
+    for part in ['private-prefix', 'x' * MODEL_TEXT_LIMIT, 'private-suffix']:
+        event = ({'type': 'content_block_delta', 'delta': {'type': 'text_delta', 'text': part}}
+                 if route == '/v1/messages' else {'type': 'response.output_text.delta', 'delta': part})
+        streamed.consume(event)
+    assert streamed.choices[0]['message']['content'] == OMITTED
 
 
 def test_internal_compaction_traces_remain_content_free(workspace, monkeypatch):
