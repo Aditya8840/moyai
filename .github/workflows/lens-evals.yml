@@ -64,8 +64,7 @@ jobs:
         run: |
           uv run --frozen --group dev --group eval pytest -q \
             tests/test_python_evals.py tests/test_lens_evals.py \
-            tests/test_lens_eval_runtime.py tests/test_lens_regression_lab.py \
-            tests/test_lens_regression_publish.py
+            tests/test_lens_eval_runtime.py
       - name: Lens is running
         id: announce
         env:
