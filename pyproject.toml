@@ -44,7 +44,7 @@ pythonpath = ["."]
 
 [tool.uv.sources]
 agentchat = { git = "https://github.com/BerriAI/agentchat.git", rev = "8876e361c4071b4906916452ff3e6c35b1a9c78b" }
-lens-evals = { git = "https://github.com/BerriAI/lens.git", rev = "45b11ae53b740e77c0f8cea804bb4aa9bbc8f760", subdirectory = "src/sdk" }
+lens-evals = { git = "https://github.com/BerriAI/lens.git", rev = "0054665e59200d72b969c4e10c999e5044b7a608", subdirectory = "src/sdk" }
 
 [tool.lens]
 project = "moyai"
