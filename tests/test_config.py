@@ -136,3 +136,48 @@ def test_explicit_harness_configuration_overrides_model_pairings(tmp_path, monke
     assert settings.default_harness() == harness
     assert settings.default_harness('opus') == harness
     assert settings.default_harness('sol') == harness
+
+
+def test_lens_feedback_target_derives_gateway_and_standalone_origins_and_honors_override():
+    gateway = Settings(_env_file=None, litellm_trace_endpoint='https://gateway.example/lens-ingest/v1/traces',
+                       litellm_trace_api_key='gateway-key')
+    assert gateway.lens_feedback_target() == (
+        'https://gateway.example/lens/feedback', {'Authorization': 'Bearer gateway-key'})
+
+    standalone = Settings(_env_file=None, litellm_trace_endpoint='https://lens.example/v1/traces',
+                          litellm_trace_api_key='lens-key')
+    assert standalone.lens_feedback_target() == (
+        'https://lens.example/lens/feedback', {'Authorization': 'Bearer lens-key'})
+
+    explicit = Settings(_env_file=None, lens_feedback_endpoint='https://feedback.example/lens/feedback',
+                        litellm_trace_endpoint='https://gateway.example/v1/traces',
+                        litellm_trace_api_key='explicit-key')
+    assert explicit.lens_feedback_target() == (
+        'https://feedback.example/lens/feedback', {'Authorization': 'Bearer explicit-key'})
+
+    feedback_key = Settings(_env_file=None, lens_feedback_endpoint='https://feedback.example/lens/feedback',
+                            litellm_trace_api_key='trace-key', lens_feedback_api_key='feedback-key')
+    assert feedback_key.lens_feedback_target() == (
+        'https://feedback.example/lens/feedback', {'Authorization': 'Bearer feedback-key'})
+    assert 'feedback-key' not in repr(feedback_key)
+    assert 'trace-key' not in repr(feedback_key)
+
+    feedback_key_only = Settings(_env_file=None, lens_feedback_endpoint='https://feedback.example/lens/feedback',
+                                 lens_feedback_api_key='feedback-only-key')
+    assert feedback_key_only.lens_feedback_target() == (
+        'https://feedback.example/lens/feedback', {'Authorization': 'Bearer feedback-only-key'})
+
+    assert Settings(_env_file=None, litellm_trace_endpoint='https://gateway.example/v1/traces').lens_feedback_target() is None
+    assert Settings(_env_file=None, litellm_trace_api_key='key').lens_feedback_target() is None
+
+
+@pytest.mark.parametrize('endpoint', [
+    'http://lens.example/lens/feedback',
+    'https://user:password@lens.example/lens/feedback',
+    'https://lens.example/lens/feedback?token=secret',
+    'https://lens.example/lens/feedback#fragment',
+    'https://lens.example/other',
+])
+def test_lens_feedback_endpoint_requires_https_feedback_path_without_url_extras(endpoint):
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, lens_feedback_endpoint=endpoint)

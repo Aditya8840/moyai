@@ -97,6 +97,7 @@ class AgentTracing:
 
     def content(self, value, *, limit=16000):
         return trace_content(value, limit=limit, secrets=(self.settings.litellm_api_key, self.settings.litellm_trace_api_key,
+            self.settings.lens_feedback_api_key,
             self.settings.raindrop_write_key, self.settings.langfuse_secret_key,
             self.settings.langfuse_public_key, self.settings.langsmith_api_key,
             self.settings.braintrust_api_key, self.settings.modal_token_secret))

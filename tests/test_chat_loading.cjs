@@ -310,6 +310,24 @@ test('appending a message reuses existing Markdown templates and active turn his
   assert.equal(run.messages[0].content,'First /personal:team question');
 });
 
+test('reply feedback is shown only for completed assistant messages when Lens is enabled',()=>{
+  const f=transcriptFixture();
+  const run={id:runId,mode:'modal',status:'completed',events:[],feedback_enabled:true,messages:[
+    {id:1,role:'user',status:'completed',content:'Question'},
+    {id:2,role:'assistant',status:'completed',content:'Answer'},
+  ]};
+  f.context.updateChat(structuredClone(run),true);
+  assert.match(f.node('#conversation').innerHTML,/class="feedback-message primary"/);
+  run.messages[1].feedback={score:8,comment:'Helpful',status:'pending'};
+  f.context.updateChat(structuredClone(run));
+  assert.ok(f.node('#conversation').innerHTML.includes('8/10'));
+  assert.match(f.node('#conversation').innerHTML,/Feedback pending/);
+  run.feedback_enabled=false;f.context.updateChat(structuredClone(run));
+  assert.doesNotMatch(f.node('#conversation').innerHTML,/data-feedback-message=/);
+  run.feedback_enabled=true;run.messages[1].status='running';f.context.updateChat(structuredClone(run));
+  assert.doesNotMatch(f.node('#conversation').innerHTML,/feedback-message/);
+});
+
 test('the summary cursor keeps earlier streamed goal events from overriding an authoritative detail goal',()=>{
   const f=transcriptFixture();
   f.state.chatRun={id:runId,events:[{id:50,data:{phase:'goal',goal_version:1,goal:{status:'old'}}}],loaded_activity:[]};

@@ -7,6 +7,7 @@ SQLite receipts, sessions and the outbox remain the authoritative durable state.
 """
 import asyncio
 import hashlib
+import json
 from collections.abc import Sequence
 from types import MappingProxyType
 from weakref import WeakValueDictionary
@@ -22,6 +23,21 @@ from . import captures, pr_delivery
 
 class MissingFileScope(RuntimeError):
     pass
+
+
+def mrkdwn_sections(text, limit=3000):
+    chunks = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+        end = text.rfind('\n', 0, limit + 1)
+        if end <= 0:
+            end = limit
+        chunks.append(text[:end])
+        text = text[end:].lstrip('\n')
+    return [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': chunk, 'verbatim': True}}
+            for chunk in chunks]
 
 
 class SessionState:
@@ -167,16 +183,34 @@ class SlackWebhookChannel:
             content + '\n\n' + self.owner.chat.link(source.metadata['run_id']))
         return response.metadata['slack_ts']
 
-    def build_rich_reply(self, source, content, pull_requests=(), body_blocks=None):
+    def build_rich_reply(self, source, content, pull_requests=(), body_blocks=None, feedback_message_id=None):
         """Build a payload with the session footer and PR cards; does not send it."""
         link = self.owner.chat.link(source.metadata['run_id'])
         body = content.removesuffix('\n\n' + link)
-        blocks = list(body_blocks) if body_blocks else [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': body, 'verbatim': True}}]
+        if body_blocks:
+            blocks = list(body_blocks)
+        elif len(body) <= 3000:
+            blocks = [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': body, 'verbatim': True}}]
+        elif feedback_message_id is not None:
+            blocks = mrkdwn_sections(body)
+        else:
+            blocks = []
         if body != content:
             blocks.append({'type': 'context', 'elements': [{'type': 'mrkdwn', 'text': link, 'verbatim': True}]})
+        feedback_added = False
+        if feedback_message_id is not None and len(blocks) < 50:
+            blocks.append({'type': 'actions', 'block_id': 'moyai_feedback', 'elements': [{
+                'type': 'button',
+                'action_id': 'feedback_open',
+                'text': {'type': 'plain_text', 'text': 'Give feedback'},
+                'value': json.dumps({'run_id': source.metadata['run_id'],
+                                     'message_id': feedback_message_id}),
+            }]})
+            feedback_added = True
         cards = tuple(pr_delivery.attachment(pr_delivery.PullRequest.model_validate(pr),
             self.owner.settings.public_url, source.metadata['run_id']) for pr in pull_requests)
-        return RichReply(text=content, blocks=tuple(blocks) if body_blocks or len(body) <= 3000 else (), attachments=cards)
+        return RichReply(text=content, blocks=tuple(blocks) if body_blocks or len(body) <= 3000 or feedback_added else (),
+                         attachments=cards)
 
     async def reply(self, source, content):
         return await self.reply_rich(source, self.build_rich_reply(source, content))

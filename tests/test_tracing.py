@@ -126,6 +126,12 @@ def test_sensitive_content_is_redacted_and_private_tools_are_omitted(monkeypatch
     assert next(event for event in events if event[0] == 'trace')[2]['output'] == '[private tool payload omitted]'
 
 
+def test_lens_feedback_api_key_is_redacted_from_trace_content(tmp_path):
+    store = Store(tmp_path)
+    tracing = AgentTracing(store, Settings(_env_file=None, lens_feedback_api_key='feedback-secret'), Processor())
+    assert 'feedback-secret' not in tracing.content('feedback-secret')
+
+
 @pytest.mark.parametrize('name', ['memory_save', 'mcp_workspace_memory_save', 'mcp__workspace__memory_search',
                                        'mcp__moyai__skills_load', 'credentials_request', 'workspace_call', 'call'])
 def test_server_omits_private_payloads_when_enabled_even_if_sandbox_did_not_scrub_it(tmp_path, name):

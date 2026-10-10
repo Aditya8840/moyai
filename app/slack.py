@@ -15,6 +15,7 @@ from .db import now
 from .slack_chat import SlackChat, USER_MENTION
 from .slack_files import SlackFiles, file_ids as slack_file_ids
 from .slack_credentials import SlackCredentials
+from .slack_feedback import SlackFeedback
 from .slack_references import attachment_reference
 
 
@@ -39,9 +40,10 @@ def routing_text(text: str, mention: str) -> tuple[str, str]:
 
 
 class SlackSessions:
-    def __init__(self, store, connectors, manager, checkpoints, settings):
+    def __init__(self, store, connectors, manager, checkpoints, settings, lens_feedback=None):
         self.store, self.connectors, self.manager = store, connectors, manager
         self.checkpoints, self.settings = checkpoints, settings
+        self.lens_feedback = lens_feedback
         self.jobs = set()
         self.identities = None
         self.automation_events = None
@@ -49,6 +51,7 @@ class SlackSessions:
         self.files = SlackFiles(self)
         self.chat = SlackChat(self)
         self.access = SlackCredentials(self)
+        self.feedback = SlackFeedback(self, lens_feedback)
         self.agentchat, self.channel = connect_agentchat(self)
 
     def status(self):
