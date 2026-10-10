@@ -155,6 +155,18 @@ def test_lens_feedback_target_derives_gateway_and_standalone_origins_and_honors_
     assert explicit.lens_feedback_target() == (
         'https://feedback.example/lens/feedback', {'Authorization': 'Bearer explicit-key'})
 
+    feedback_key = Settings(_env_file=None, lens_feedback_endpoint='https://feedback.example/lens/feedback',
+                            litellm_trace_api_key='trace-key', lens_feedback_api_key='feedback-key')
+    assert feedback_key.lens_feedback_target() == (
+        'https://feedback.example/lens/feedback', {'Authorization': 'Bearer feedback-key'})
+    assert 'feedback-key' not in repr(feedback_key)
+    assert 'trace-key' not in repr(feedback_key)
+
+    feedback_key_only = Settings(_env_file=None, lens_feedback_endpoint='https://feedback.example/lens/feedback',
+                                 lens_feedback_api_key='feedback-only-key')
+    assert feedback_key_only.lens_feedback_target() == (
+        'https://feedback.example/lens/feedback', {'Authorization': 'Bearer feedback-only-key'})
+
     assert Settings(_env_file=None, litellm_trace_endpoint='https://gateway.example/v1/traces').lens_feedback_target() is None
     assert Settings(_env_file=None, litellm_trace_api_key='key').lens_feedback_target() is None
 

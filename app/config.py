@@ -134,8 +134,9 @@ class Settings(BaseSettings):
     audio_transcription_prompt: str = Field(default="", max_length=800)
     # Separate destination/key; enabling traces never reroutes inference.
     litellm_trace_endpoint: str = ""
-    litellm_trace_api_key: str = ""
+    litellm_trace_api_key: str = Field(default="", repr=False)
     lens_feedback_endpoint: str = ""
+    lens_feedback_api_key: str = Field(default="", repr=False)
     raindrop_trace_endpoint: str = "https://api.raindrop.ai/v1/traces"
     raindrop_write_key: str = ""
     raindrop_project_id: str = ""
@@ -308,9 +309,10 @@ class Settings(BaseSettings):
         if not endpoint and self.litellm_trace_endpoint:
             parsed = urlsplit(self.litellm_trace_endpoint)
             endpoint = f'{parsed.scheme}://{parsed.netloc}/lens/feedback'
-        if not endpoint or not self.litellm_trace_api_key:
+        api_key = self.lens_feedback_api_key or self.litellm_trace_api_key
+        if not endpoint or not api_key:
             return None
-        return endpoint, {'Authorization': 'Bearer ' + self.litellm_trace_api_key}
+        return endpoint, {'Authorization': 'Bearer ' + api_key}
 
     @field_validator('langfuse_base_url', 'langsmith_endpoint', 'braintrust_api_url')
     @classmethod
