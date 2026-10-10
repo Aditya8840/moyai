@@ -267,12 +267,13 @@ body { color: var(--text); letter-spacing: -0.006em; }
 .chat-message { margin-bottom: 20px; }
 .chat-message.assistant { position: relative; padding-right: 34px; }
 .chat-message.assistant > .message-content > :last-child { margin-bottom: 0; }
-.chat-message .copy-message, .chat-message .feedback-message, .assistant-update .copy-update { position: absolute; top: 0; display: flex; align-items: center; justify-content: center; gap: 4px; margin: 0; min-width: 28px; height: 28px; padding: 0 5px !important; border-radius: 6px; color: #858585; opacity: 0; transition: opacity .12s; }
+.chat-message .copy-message, .assistant-update .copy-update { position: absolute; top: 0; display: flex; align-items: center; justify-content: center; gap: 4px; margin: 0; min-width: 28px; height: 28px; padding: 0 5px !important; border-radius: 6px; color: #858585; opacity: 0; transition: opacity .12s; }
 .chat-message .copy-message { right: 0; }
-.chat-message .feedback-message { right: 32px; }
-.chat-message:hover > .copy-message, .chat-message:hover > .feedback-message, .chat-message:hover > .copy-update, .chat-message:focus-within > .copy-message, .chat-message:focus-within > .feedback-message, .chat-message:focus-within > .copy-update { opacity: 1; }
-.chat-message .copy-message:hover, .chat-message .feedback-message:hover, .assistant-update .copy-update:hover { background: #f3f3f3; color: #333; }
-@media (hover: none) { .chat-message .copy-message, .chat-message .feedback-message, .assistant-update .copy-update { opacity: 1; } }
+.chat-message .message-actions { margin-top: 12px; }
+.chat-message .feedback-message { display: inline-flex; align-items: center; gap: 6px; height: 30px; margin: 0; padding: 0 12px; border-radius: 7px; font-size: 13px; font-weight: 500; }
+.chat-message:hover > .copy-message, .chat-message:hover > .copy-update, .chat-message:focus-within > .copy-message, .chat-message:focus-within > .copy-update { opacity: 1; }
+.chat-message .copy-message:hover, .assistant-update .copy-update:hover { background: #f3f3f3; color: #333; }
+@media (hover: none) { .chat-message .copy-message, .assistant-update .copy-update { opacity: 1; } }
 .reply-feedback-dialog { width: min(520px, calc(100% - 32px)); border: 0; border-radius: 12px; padding: 0; box-shadow: 0 18px 55px #211a2c38; }
 .reply-feedback-form { display: grid; gap: 16px; padding: 24px; }
 .reply-feedback-form h2 { margin: 0; font-size: 18px; font-weight: 600; }
