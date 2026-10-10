@@ -678,10 +678,13 @@ function updateChat(run,initial=false){
     MoyaiActivity.sync(box,run,{markdown:renderMarkdown,copy:copyText,loadActivity});
     box.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=()=>showAttachment(run.messages.flatMap(message=>message.attachments||[]).find(file=>file.id===button.dataset.attachment)));
     box.querySelectorAll('.copy-message').forEach(b=>b.onclick=()=>copyText(run.messages.find(m=>String(m.id)===b.dataset.message).content,b));
-    box.querySelectorAll('.feedback-message').forEach(button=>button.onclick=()=>showReplyFeedback(
-      state.chatRun,
-      state.chatRun.messages.find(message=>String(message.id)===button.dataset.feedbackMessage),
-    ));
+    box.querySelectorAll('.feedback-message:not([data-feedback-bound])').forEach(button=>{
+      button.dataset.feedbackBound='';
+      button.addEventListener('click',()=>showReplyFeedback(
+        state.chatRun,
+        state.chatRun.messages.find(message=>String(message.id)===button.dataset.feedbackMessage),
+      ));
+    });
     box.querySelectorAll('.copy-code').forEach(b=>b.onclick=()=>copyText(b.closest('.code-block').querySelector('code').textContent,b));
     if(atBottom)box.scrollTop=box.scrollHeight;
   }
