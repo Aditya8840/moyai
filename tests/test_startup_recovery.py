@@ -347,6 +347,11 @@ def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
             assert 'before the first tool call' in instructions
             assert 'Do not send only a status tag as the opening' in instructions
             assert 'Before delegating to agents' in instructions
+            assert 'delivery includes a normal ready-for-review PR by default' in instructions
+            assert 'local-only work, no PR, or review/investigation only' in instructions
+            assert 'verify the publication tool returned a PR URL' in instructions
+            assert 'report the specific verified blocker' in instructions
+            assert 'Do not push, merge, deploy, or publish unless explicitly requested' not in instructions
             calls.append('inference')
             self.commentary('<status>Auditing UI and schema changes</status>I’m checking the UI and schema before making changes.')
             self.commentary('<status>Verifying the corrected behavior</status>One public milestone.',

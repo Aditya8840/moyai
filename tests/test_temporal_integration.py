@@ -80,6 +80,28 @@ async def test_activity_timings_preserve_errors_without_payloads(durable, caplog
     assert record['error_type'] == 'ValueError' and 'private-provider-detail' not in caplog.text
 
 
+async def test_queue_trace_uses_newly_claimed_turn_and_is_optional(durable, monkeypatch):
+    from unittest.mock import Mock
+    manager, _, run_id = durable
+    captured = Mock()
+    manager.store.tracing = SimpleNamespace(runtime_phase=captured)
+    assert await ActivityEnvironment().run(manager.advance_session, run_id) is True
+    current = manager.state(run_id)
+    args = captured.call_args_list[-1].args
+    assert args[:3] == (run_id, current['message_id'], 'activity_queue')
+    assert args[4] >= args[3]
+
+    # A failure to reload tracing metadata after the step must not mask its result.
+    manager.advance = AsyncMock(return_value='receipt')
+    monkeypatch.setattr(manager, 'state', Mock(side_effect=[current, ValueError('private body')]))
+    assert await ActivityEnvironment().run(manager.advance_session, run_id) == 'receipt'
+
+    captured.reset_mock()
+    monkeypatch.setattr(manager, 'state', Mock(return_value={**current, 'phase': 'warm'}))
+    assert await ActivityEnvironment().run(manager.advance_session, run_id) == 'receipt'
+    captured.assert_not_called()  # Idle cleanup must not extend the previous turn.
+
+
 async def test_real_temporal_restarts_worker_and_drains_offline_followup(durable):
     manager, cloud, run_id = durable
     cloud.finished = False
