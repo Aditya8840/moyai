@@ -21,8 +21,12 @@ if name not in {'durable_process.py', 'computer.py', 'environment_build.py'}:
 script = root / 'sandbox' / name
 if not script.is_file():
     script = root / name
+sys.path.insert(0, str(root))
 sys.argv[0] = str(script)
-runpy.run_path(str(script), run_name='__main__')
+if script.parent == root:
+    runpy.run_path(str(script), run_name='__main__')
+else:
+    runpy.run_module('sandbox.' + script.stem, run_name='__main__')
 """
 
 # Sent by the controller: old snapshots need no installed helper or version
