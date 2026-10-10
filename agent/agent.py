@@ -1,4 +1,5 @@
 """Moyai's conversation lifecycle, shared by production and evaluations."""
+from contextlib import ExitStack
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -66,25 +67,24 @@ def run(spec, *, relay, workspace: Path, session: Path, config, emit, workspace_
     # Otherwise an agent's `git add -A` could commit the private conversation.
     history_path = session / "conversation.json"
     history_path.parent.mkdir(exist_ok=True, mode=0o700)
-    context_store = open_context(history_path.parent, spec) if definition.durable_context else None
-    if spec.get('transport_recovery'):
-        try:
+    with ExitStack() as cleanup:
+        context_store = open_context(history_path.parent, spec) if definition.durable_context else None
+        if context_store is not None:
+            cleanup.callback(context_store.close)
+        if spec.get('transport_recovery'):
             validate_recovery(context_store, spec['transport_recovery'])
-        except ContextUnavailable:
-            if context_store is not None:
-                context_store.close()
-            raise
-    agent = create_agent(harness, spec={**spec, 'history_reference_dir': str(history_path.parent)},
-                         relay=relay, config=config, activity=harness_activity, step=step,
-                         cwd=str(workspace), **({'context_store': context_store} if context_store is not None else {}))
-    result = {}
-    history = spec.get("history_fallback", [])
-    if context_store is not None:
-        history = context_store.history()
-    elif spec.get("chat_enabled") and history_path.exists() and not spec.get("workspace_warning") and not spec.get('fresh_child'):
-        history = json.loads(history_path.read_text())
-    history = scrub_memory_history(history)
-    try:
+        agent = create_agent(harness, spec={**spec, 'history_reference_dir': str(history_path.parent)},
+                             relay=relay, config=config, activity=harness_activity, step=step,
+                             cwd=str(workspace), **({'context_store': context_store} if context_store is not None else {}))
+        cleanup.callback(agent.close)
+        cleanup.callback(steering.close)
+        result = {}
+        history = spec.get("history_fallback", [])
+        if context_store is not None:
+            history = context_store.history()
+        elif spec.get("chat_enabled") and history_path.exists() and not spec.get("workspace_warning") and not spec.get('fresh_child'):
+            history = json.loads(history_path.read_text())
+        history = scrub_memory_history(history)
         agent.validate()
         prompt = conversation_prompt(spec, has_history=bool(history))
         if spec.get("continuation"):
@@ -164,8 +164,3 @@ def run(spec, *, relay, workspace: Path, session: Path, config, emit, workspace_
         return {'result': result, 'summary': summary,
                 'exit_code': 75 if transport_retry else 0 if completed or continuing or steered else 1,
                 'context_pending': bool(context_store.pending) if context_store is not None else False}
-    finally:
-        steering.close()
-        agent.close()
-        if context_store is not None:
-            context_store.close()

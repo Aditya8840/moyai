@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent import agent as lifecycle
+from sandbox import agent as lifecycle
 from agent.context_store import ContextStore, ContextUnavailable, open_context
 from agent.harnesses.harness_agent import TurnJournal
 from test_runner import runner
@@ -149,8 +149,8 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
         def listen(self, *a): pass
         def close(self): pass
         def can_continue(self, *a): return False
-    monkeypatch.setattr(lifecycle, 'ActiveTurnSteering', Steering)
-    monkeypatch.setattr('agent.continuation.AgentSteer', Steering)
+    monkeypatch.setattr('agent.agent.ActiveTurnSteering', Steering)
+    monkeypatch.setattr('agent.agent.AgentSteer', Steering)
     events, prompts, actions = [], [], []
     monkeypatch.setattr(lifecycle, 'emit', lambda kind, message, data=None, **kw: events.append((kind, message, data, kw)))
     maintenance = []
@@ -180,7 +180,7 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
             journal.tool_finished(f'call{number}', f'receipt-{number}')
             journal.finish('Done')
             return {'completed': True, 'messages': journal.messages, 'final_response': 'Done'}
-    monkeypatch.setattr('agent.harnesses.harness_registry.create_agent', lambda *a, **kw: Adapter(kw['context_store'], kw['activity']))
+    monkeypatch.setattr('agent.agent.create_agent', lambda *a, **kw: Adapter(kw['context_store'], kw['activity']))
     session = tmp_path / 'session'
     session.mkdir()
     legacy = [{'role': 'user', 'content': 'Keep Escape support; do not deploy.'},

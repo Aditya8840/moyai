@@ -19,20 +19,8 @@ from .runner import RunManager, SAVE_WARNING, TERMINAL, completed_response, safe
 from .security import digest
 from .sandboxes import ProvisioningTerminated
 from .db import database
+from .runtime_files import RUNTIME_COMMAND, RUNTIME_ROOT, SANDBOX_PYTHON
 from agent.transport_recovery import MAX_TRANSPORT_ATTEMPTS, valid_retry
-
-
-# An in-flight run can resume monitoring before its next runtime refresh.
-# Let its existing flat supervisor finish; refreshed machines use the package.
-SUPERVISOR_SCRIPT = """
-import pathlib, runpy, sys
-root = pathlib.Path(sys.argv.pop(1))
-script = root / 'sandbox/durable_process.py'
-if not script.is_file():
-    script = root / 'durable_process.py'
-sys.argv[0] = str(script)
-runpy.run_path(str(script), run_name='__main__')
-"""
 
 
 class LostExecution(Exception):
@@ -610,8 +598,8 @@ class DurableRunner(RunManager):
         # Pass capabilities only in the exec environment, never in a persisted
         # task spec, command argument or Temporal payload. Reused machines have
         # an older creation-time environment, so every launch overrides it.
-        process = await sandbox.exec.aio('/usr/local/bin/python', '-I', '-c', SUPERVISOR_SCRIPT,
-                                         '/opt/workspace-runner', *args,
+        process = await sandbox.exec.aio(SANDBOX_PYTHON, '-I', '-c', RUNTIME_COMMAND,
+                                         RUNTIME_ROOT, 'durable_process.py', *args,
                                          timeout=30, env=self.settings.broker_environment(token) if token else {})
         output, _ = await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
         if await process.wait.aio() != 0:

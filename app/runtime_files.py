@@ -10,6 +10,21 @@ import zlib
 RUNTIME_ROOT = '/opt/workspace-runner'
 SANDBOX_PYTHON = '/usr/local/bin/python'
 
+# Live supervisors and desktops can predate their next runtime refresh. Only
+# these controller-owned entrypoints may fall back to the old flat layout.
+RUNTIME_COMMAND = """
+import pathlib, runpy, sys
+root = pathlib.Path(sys.argv.pop(1))
+name = sys.argv.pop(1)
+if name not in {'durable_process.py', 'computer.py', 'environment_build.py'}:
+    raise RuntimeError('Invalid runtime command')
+script = root / 'sandbox' / name
+if not script.is_file():
+    script = root / name
+sys.argv[0] = str(script)
+runpy.run_path(str(script), run_name='__main__')
+"""
+
 # Sent by the controller: old snapshots need no installed helper or version
 # marker. Isolated Python also ignores modules planted in the workspace.
 SYNC_SCRIPT = r'''
@@ -123,12 +138,17 @@ async def _sync_command(sandbox, expected: dict[str, str], bundle: str = '') -> 
     return changed
 
 
+def runtime_sources(source: Path) -> list[Path]:
+    """The complete guest runtime, shared by refreshes and prepared-pool identity."""
+    return [path for package in ('agent', 'sandbox')
+            for path in sorted((source / package).rglob('*'))
+            if path.is_file() and not path.is_symlink()
+            and path.suffix in {'.py', '.md', '.patch'} and '__pycache__' not in path.parts]
+
+
 async def sync_runtime(sandbox, source: Path) -> None:
     files = {path.relative_to(source).as_posix(): path.read_text(encoding='utf-8')
-             for package in ('agent', 'sandbox')
-             for path in sorted((source / package).rglob('*'))
-             if path.is_file() and not path.is_symlink()
-             and path.suffix in {'.py', '.md', '.patch'} and '__pycache__' not in path.parts}
+             for path in runtime_sources(source)}
     expected = {name: hashlib.sha256(text.encode()).hexdigest() for name, text in files.items()}
     async with asyncio.timeout(60):
         changed = await _sync_command(sandbox, expected)

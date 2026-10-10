@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -12,6 +14,7 @@ from app.environment_templates import TEMPLATES
 from app.db import Store
 from app.config import Settings
 from app.durable_runner import DurableRunner
+from app.runtime_files import RUNTIME_COMMAND
 from test_workspace import workspace  # noqa: F401
 from test_user_roles import users_app, sign_as  # noqa: F401
 from test_durable import durable, drive, aio  # noqa: F401
@@ -446,3 +449,20 @@ async def test_disabled_github_connection_cannot_supply_clone_credentials(worksp
     with pytest.raises(ConnectorError, match='Enable the shared'):
         await env.advance(build)
     token.assert_not_awaited()
+
+
+@pytest.mark.parametrize('packaged', [False, True])
+def test_environment_launcher_supports_existing_flat_and_packaged_builds(tmp_path, packaged):
+    runtime = tmp_path / 'workspace-runner'
+    runtime.mkdir()
+    (runtime / 'environment_build.py').write_text(
+        'import json, sys; print(json.dumps(["legacy", *sys.argv[1:]]))')
+    if packaged:
+        (runtime / 'sandbox').mkdir()
+        (runtime / 'sandbox/environment_build.py').write_text(
+            'import json, sys; print(json.dumps(["packaged", *sys.argv[1:]]))')
+    result = subprocess.run(
+        [sys.executable, '-I', '-c', RUNTIME_COMMAND, str(runtime), 'environment_build.py', 'status'],
+        check=True, capture_output=True, text=True, timeout=10,
+    )
+    assert json.loads(result.stdout) == ['packaged' if packaged else 'legacy', 'status']

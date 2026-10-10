@@ -13,7 +13,8 @@ from app.agents import AgentCoordinator
 from app.config import MODEL_CATALOG, Settings
 from app.db import Store
 from app.main import public_messages
-from app.durable_runner import DurableRunner, SUPERVISOR_SCRIPT
+from app.durable_runner import DurableRunner
+from app.runtime_files import RUNTIME_COMMAND
 from app.temporal_runtime import TemporalRunManager
 from app.runner import RunManager
 from app.session_lifecycle import SessionLifecycle
@@ -828,7 +829,7 @@ def test_supervisor_launcher_can_resume_flat_and_packaged_runtimes(tmp_path, pac
         (runtime / 'sandbox/durable_process.py').write_text(
             'import json, sys; print(json.dumps(["packaged", *sys.argv[1:]]))')
     result = subprocess.run(
-        [sys.executable, '-I', '-c', SUPERVISOR_SCRIPT, str(runtime), 'read', '/journal', '42'],
+        [sys.executable, '-I', '-c', RUNTIME_COMMAND, str(runtime), 'durable_process.py', 'read', '/journal', '42'],
         check=True, capture_output=True, text=True, timeout=10,
     )
     assert json.loads(result.stdout) == ['packaged' if packaged else 'legacy', 'read', '/journal', '42']

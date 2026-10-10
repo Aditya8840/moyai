@@ -120,3 +120,15 @@ def test_packaged_entrypoints_bootstrap_without_controller_or_working_directory(
         cwd=tmp_path, capture_output=True, text=True, timeout=15,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize('name', ['agent.py', '../computer.py', '/tmp/computer.py'])
+def test_runtime_command_rejects_unowned_entrypoints(tmp_path, name):
+    from app.runtime_files import RUNTIME_COMMAND
+
+    result = subprocess.run(
+        [sys.executable, '-I', '-c', RUNTIME_COMMAND, str(tmp_path), name],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode != 0
+    assert 'Invalid runtime command' in result.stderr

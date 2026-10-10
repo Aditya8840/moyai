@@ -209,6 +209,7 @@ class FakeSandbox:
             archive.writestr("result.md", "Test result")
         self.archive = buffer.getvalue()
         self.completed = completed
+        self.runtime_verified = False
         self.filesystem = SimpleNamespace(write_text=aio(self.write), stat=aio(self.stat), read_bytes=aio(self.read))
         self.terminate = aio(self.terminate_sandbox)
         self.wait = aio(self.wait_sandbox)
@@ -234,7 +235,9 @@ class FakeSandbox:
 
     async def execute(self, *command, timeout=None, bufsize=-1, env=None):
         if command[:3] == ('/usr/local/bin/python', '-I', '-c'):
+            self.runtime_verified = True
             return ready_runtime()  # This lifecycle fixture has the baked runtime.
+        assert self.runtime_verified
         assert command[0] == "/opt/hermes-env/bin/python"
         async def wait():
             return 0 if self.completed else 1

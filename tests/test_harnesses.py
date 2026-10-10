@@ -313,7 +313,7 @@ def test_native_images_are_not_translated():
 def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, monkeypatch, transport_failure):
     from types import SimpleNamespace
     from threading import Event
-    from agent import agent
+    from sandbox import agent
     from agent.harnesses import claude_harness
     events = []
     relay = SimpleNamespace(url='http://test', control=lambda body=None: {}, last_error='',
@@ -381,7 +381,7 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
 @pytest.mark.parametrize('boundary', ['rotation', 'agents', 'credentials'])
 def test_recovered_broker_read_preserves_emitted_continuation(tmp_path, monkeypatch, recovery_catalog, boundary):
     """Real relay/journal/final emitter; only the model invocation is scripted."""
-    from agent import agent
+    from sandbox import agent
     from agent.harnesses.codex_harness import CodexAgent
     from agent.context_store import ContextStore
     from test_broker_transport import diagnostic_relay

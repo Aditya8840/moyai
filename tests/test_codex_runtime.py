@@ -240,8 +240,7 @@ def test_lease_close_attempts_all_resources_even_when_one_fails(fault):
 
 @pytest.mark.parametrize('turn_failed', [False, True])
 def test_entrypoint_always_closes_relay_without_changing_turn_outcome(monkeypatch, turn_failed):
-    from agent import agent
-    from sandbox import codex_runtime
+    from sandbox import agent
     calls = []
     relay = SimpleNamespace(url='http://fixture', close=lambda: calls.append('relay'))
     relay.start = lambda: relay
@@ -259,8 +258,8 @@ def test_entrypoint_always_closes_relay_without_changing_turn_outcome(monkeypatc
 
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'fixture-only')
     monkeypatch.setattr(agent, 'BrokerRelay', lambda *args, **kwargs: relay)
-    monkeypatch.setattr(codex_runtime, 'RuntimeLease', lambda *args, **kwargs: SimpleNamespace(close=close))
-    monkeypatch.setattr(codex_runtime, 'discard_orphan', lambda: None)
+    monkeypatch.setattr(agent, 'RuntimeLease', lambda *args, **kwargs: SimpleNamespace(close=close))
+    monkeypatch.setattr(agent, 'discard_orphan', lambda: None)
     monkeypatch.setattr(agent, 'run_agent', run_agent)
     monkeypatch.setattr(agent, 'emit', lambda *args, **kwargs: calls.append('final'))
     spec = {'broker_url': 'http://fixture', 'harness': 'codex', 'model': 'openai/gpt-6-astra',

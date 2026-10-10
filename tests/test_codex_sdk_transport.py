@@ -1202,7 +1202,7 @@ def native_automation_validation_case(tmp_path, monkeypatch, broker_workspace, h
     """Actual app, relay, MCP and native SDK; only inference is scripted."""
     from io import BytesIO
     import httpx
-    from agent import agent as entrypoint
+    from sandbox import agent as entrypoint
     from test_automation_tools import definition
     from test_claude_native_compaction import send_message
     from test_spend import sign_in

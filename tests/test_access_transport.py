@@ -194,7 +194,7 @@ def test_public_activity_and_archives_redact_edge_credentials(monkeypatch, tmp_p
 @pytest.mark.parametrize(('inherit_environment', 'access_enabled'), [(False, True), (True, True), (False, False)])
 def test_real_mcp_git_checkout_and_publication_through_access(
         access_origin, edge_backend, tmp_path, monkeypatch, inherit_environment, access_enabled):
-    from agent.agent import hermes_config
+    from sandbox.agent import hermes_config
     from sandbox.broker_transport import unseal
     from agent.tools.harness_tools import tools_for
 
@@ -277,7 +277,7 @@ def test_real_mcp_git_checkout_and_publication_through_access(
         # Same shared config as every runtime, with only local executable/paths
         # substituted. Check both SDK-sanitized and inherited subprocess envs.
         bootstrap = ('import sys; from pathlib import Path; sys.path.insert(0, ' + repr(str(Path(__file__).resolve().parents[1]))
-                     + '); from sandbox import github_tools, mcp_bridge; github_tools.ROOT=Path('
+                     + '); from agent.tools import github_tools, mcp_bridge; github_tools.ROOT=Path('
                      + repr(str(workspace)) + '); mcp_bridge.serve()')
         server.update(command=sys.executable, args=['-c', bootstrap])
         if inherit_environment:

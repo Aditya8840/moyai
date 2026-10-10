@@ -426,7 +426,7 @@ class RunManager:
 
     def spec(self, run):
         from .attachments import attachment_context
-        from agent.harnesses.registry import resolve
+        from agent.harnesses.harness_registry import resolve
         run_id = run["id"]
         fresh_child = bool(run.get('parent_run_id')) and not run.get('continuation') and not self.store.rows(
             "SELECT 1 FROM messages WHERE run_id=? AND role='assistant' LIMIT 1", (run_id,))
@@ -513,10 +513,9 @@ class RunManager:
         spec = self.spec(run)
         if backend.name == 'lambda':
             spec["rotation_at"] = sandbox.started_at + self.settings.sandbox_rotation_for('lambda')
-        # Restored snapshots can contain an older adapter; refresh only our own
-        # runner files, preserving all user workspace files and agent history.
-        if snapshot_id:
-            await refresh_sandbox_files(sandbox)
+        # Both restored checkpoints and pinned provider images may predate the
+        # controller. Refresh only our own runtime before launching the agent.
+        await refresh_sandbox_files(sandbox)
         if getattr(self, 'computer', None):
             await self.computer.restore(sandbox, run_id, required=False)
         await sandbox.filesystem.write_text.aio(json.dumps(spec), "/tmp/task.json")

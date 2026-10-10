@@ -116,7 +116,7 @@ def test_real_hermes_background_compaction_preserves_tools(runtime, workspace, t
 def test_real_hermes_tool_read_recovers_and_continues_without_replaying_write(runtime, recovery_catalog, tmp_path, monkeypatch):
     import shlex
     from http.server import BaseHTTPRequestHandler
-    from agent.agent import hermes_config
+    from sandbox.agent import hermes_config
     from sandbox.broker_transport import unseal
     from test_broker_transport import diagnostic_relay
     from test_harnesses import background_chat_response

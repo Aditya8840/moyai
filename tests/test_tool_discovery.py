@@ -12,7 +12,7 @@ from threading import Thread
 
 import pytest
 
-from agent.agent import hermes_config
+from sandbox.agent import hermes_config
 from test_workspace import cloud_capability, workspace  # noqa: F401
 from test_spend import sign_in, active
 
