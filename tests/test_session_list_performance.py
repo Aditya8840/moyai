@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 from threading import Event, Timer
 
@@ -28,10 +29,14 @@ def test_list_query_count_stays_bounded_and_full_detail_keeps_answers(users_app,
     seed(store, 'google:tin', 100)
     queries = []
     connect = store.connect
+    measuring = ContextVar('sidebar_query_measurement', default=False)
 
     @contextmanager
-    def counted():
-        with connect() as conn:
+    def counted(*args, **kwargs):
+        with connect(*args, **kwargs) as conn:
+            if not measuring.get():
+                yield conn
+                return
             if store.database:
                 execute = conn.raw.execute
 
@@ -49,13 +54,19 @@ def test_list_query_count_stays_bounded_and_full_detail_keeps_answers(users_app,
                 yield conn
 
     monkeypatch.setattr(store, 'connect', counted)
-    response = client.get('/api/runs?scope=all&view=sidebar')
+    # TestClient and database() propagate this request's context. Background
+    # polling keeps its own context and cannot inflate the N+1 query budget.
+    token = measuring.set(True)
+    try:
+        response = client.get('/api/runs?scope=all&view=sidebar')
+    finally:
+        measuring.reset(token)
     assert response.status_code == 200
     rows = response.json()
     assert len(rows) == 100
     # Includes authentication, identity registration, metadata, PR receipts and
     # agent trees. A per-session read would exceed this even with only 100 rows.
-    assert len(queries) < 40
+    assert 0 < len(queries) < 40
     assert len(response.content) < 150_000
     assert all('summary' not in row and 'pending_result' not in row and 'token_hash' not in row for row in rows)
     assert [row['id'] for row in rows] == [f'{index:032x}' for index in range(100, 0, -1)]
@@ -172,3 +183,40 @@ async def test_sidebar_receipts_still_schedule_pr_refreshes_on_event_loop(users_
         assert second.json()[0]['pr_summary']['label'] == 'PR is ready'
         assert len(calls) == 1
     await unused.close()
+
+
+@pytest.mark.parametrize('operation', ['create', 'detail'])
+async def test_startup_authorization_reads_do_not_block_other_requests(users_app, monkeypatch, operation):
+    app, client = users_app
+    sign_as(app, client, 'tin@berri.ai')
+    run = app.state.store.create_run('Existing session', '', 'demo', [], user_id='google:tin')
+    entered, release = Event(), Event()
+    original = app.state.security.require
+
+    def held(*args, **kwargs):
+        entered.set()
+        assert release.wait(3)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(app.state.security, 'require', held)
+    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+
+    @app.get('/test/startup-ping')
+    async def ping():
+        return {'ready': True}
+
+    fallback = Timer(2, release.set)
+    fallback.start()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=str(client.base_url),
+                                cookies=client.cookies, headers=client.headers) as reader:
+        request = (reader.post('/api/runs', json={'prompt': 'Create a session', 'mode': 'demo'})
+                   if operation == 'create' else reader.get('/api/runs/' + run['id']))
+        pending = asyncio.create_task(request)
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            assert (await reader.get('/test/startup-ping')).json() == {'ready': True}
+            assert not release.is_set(), 'Startup authorization SQL blocked the event loop'
+        finally:
+            release.set()
+            fallback.cancel()
+            assert (await pending).status_code == (201 if operation == 'create' else 200)
