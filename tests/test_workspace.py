@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from contextlib import contextmanager
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -53,6 +54,71 @@ def cloud_capability(app, plugins):
     return run["id"], {"Authorization": f"Bearer {token}"}
 
 
+@pytest.fixture
+def recovery_catalog(tmp_path, monkeypatch):
+    from test_spend import active, sign_in
+
+    # Durable runtime fixtures own tmp_path's database. Even starting another
+    # app there can recover their runs, so catalog discovery has separate storage.
+    with contextmanager(workspace.__wrapped__)(tmp_path / 'catalog', monkeypatch) as (app, client):
+        sign_in(app, client)
+        app.state.settings.temporal_enabled = True
+        plugins = ['github', 'linear', 'slack', 'notion']
+        for provider in plugins:
+            app.state.connectors.save(provider, {'access_token': 'catalog-test-token', 'kind': 'personal'}, 'Test team')
+        run = active(app)
+        app.state.store.execute('UPDATE runs SET plugins=? WHERE id=?', (json.dumps(plugins), run['id']))
+        response = client.get(f"/broker/{run['id']}/tools", headers={'Authorization': 'Bearer capability'})
+        assert response.status_code == 200
+        return response.json()
+
+
+def test_every_broker_tool_has_an_audited_replay_classification(workspace, recovery_catalog):
+    from test_automation_tools import create
+    from test_spend import active, sign_in
+
+    app, client = workspace
+    sign_in(app, client)
+    app.state.settings.temporal_enabled = True
+    run = active(app)
+    automation = create(client, run)
+    app.state.store.execute("INSERT INTO automation_runs VALUES('catalog-tick',?,1,?,'started','',?)",
+                            (automation['id'], run['id'], run['created_at']))
+    response = client.get(f"/broker/{run['id']}/tools", headers={'Authorization': 'Bearer capability'})
+    assert response.status_code == 200
+    catalogs = [recovery_catalog, response.json()]
+    app.state.store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (run['id'], run['id']))
+    response = client.get(f"/broker/{run['id']}/tools", headers={'Authorization': 'Bearer capability'})
+    assert response.status_code == 200
+    catalogs.append(response.json())
+    safe = set('''agents_results agents_read_artifact automation_environments automation_webhook_info
+        credentials_list github_rulesets github_ruleset github_repositories github_repository github_checkout
+        github_pull_request github_pull_request_comments github_ci_checks github_workflow_runs github_workflow_jobs github_job_logs
+        linear_my_issues linear_teams linear_search linear_issue
+        slack_search slack_thread slack_me notion_search notion_page media_list sessions_search sessions_read model_list
+        workspace_diagnostics'''.split())
+    # Read hints describe presentation, not replay safety: these mutate context
+    # selection or reconcile remote schedules and must remain one-shot.
+    read_effects = set('''automation_list memory_search skills_search skills_load skills_read_file'''.split())
+    writes = set('''agents_fanout agents_retry agents_cancel automation_webhook_setup automation_create
+        automation_update automation_enable automation_pause automation_claim_item credentials_resolve
+        credentials_request credentials_run credentials_report_failure credentials_http_request
+        github_request_pull_request_write_access github_update_ruleset_reviewers github_create_pull_request
+        github_update_pull_request github_comment_pull_request linear_comment linear_create_issue
+        linear_update_issue slack_send notion_append media_share media_revoke model_switch memory_save
+        memory_forget skills_save'''.split())
+    assert not (safe & read_effects or safe & writes or read_effects & writes)
+    assert {tool['name'] for catalog in catalogs for tool in catalog} == safe | read_effects | writes
+    assert safe <= {tool['name'] for tool in recovery_catalog}
+    for catalog in catalogs:
+        assert len({tool['name'] for tool in catalog}) == len(catalog)
+        for tool in catalog:
+            annotations = tool.get('annotations', {})
+            assert (annotations.get('idempotentHint') is True) == (tool['name'] in safe), tool['name']
+            if tool['name'] in safe:
+                assert annotations.get('readOnlyHint') is True, tool['name']
+
+
 def test_demo_lifecycle_is_persistent_and_honest(workspace):
     app, client = workspace
     response = client.post("/api/runs", json={"prompt": "Review a repository", "mode": "demo", "chat_enabled": False})
@@ -83,6 +149,28 @@ def test_auth_csrf_host_and_repository_boundaries(workspace):
     assert client.get("/api/config").json()["cloud_ready"] is False
     client.cookies.clear()
     assert client.get("/api/runs").status_code == 401
+
+
+@pytest.mark.parametrize('endpoint,key,enabled', [('', '', False),
+    ('https://lens.example/lens-ingest/v1/traces', '', False), ('', 'lens-private-key', False),
+    ('https://lens.example/lens-ingest/v1/traces', 'lens-private-key', True)])
+def test_config_exposes_safe_server_evaluation_capability(workspace, endpoint, key, enabled):
+    app, client = workspace
+    settings = app.state.settings
+    settings.trace_environment = 'lens-eval'
+    settings.moyai_build_sha = 'a1' * 20
+    settings.litellm_trace_endpoint = endpoint
+    settings.litellm_trace_api_key = key
+    # Another configured tracing backend must not claim that Lens is enabled.
+    settings.raindrop_write_key = 'raindrop-private-key'
+    response = client.get('/api/config?agent_version=request-controlled-version&environment=production')
+    assert response.status_code == 200
+    assert response.json()['evaluation'] == {
+        'environment': 'lens-eval', 'agent_version': 'a1' * 20, 'tracing_enabled': enabled}
+    for private in ['lens-private-key', 'raindrop-private-key', 'lens.example', 'request-controlled-version']:
+        assert private not in response.text
+    client.cookies.clear()
+    assert client.get('/api/config').status_code == 401
 
 
 def test_stop_run_revokes_capability(workspace):
@@ -213,11 +301,12 @@ def test_org_policy_blocks_direct_tool_calls_and_survives_reconnection(workspace
     assert client.patch("/api/connections/linear/policy", json={"enabled": True, "read_only": True}).status_code == 200
     app.state.connectors.save("linear", {"access_token": "replacement-token", "kind": "oauth"}, "Team")
     names = {x["name"] for x in client.get(f"/broker/{run_id}/tools", headers=headers).json()}
-    assert names == {"linear_teams", "linear_search", "linear_issue", "linear_my_issues"}
+    builtins = {"media_list", "media_share", "media_revoke", "workspace_diagnostics"}
+    assert names == {"linear_teams", "linear_search", "linear_issue", "linear_my_issues"} | builtins
     assert client.post(f"/broker/{run_id}/tools/call", headers=headers,
                        json={"name": "linear_comment", "arguments": {"issue_id": "LIT-1", "body": "Blocked"}}).status_code == 403
     client.patch("/api/connections/linear/policy", json={"enabled": False, "read_only": True})
-    assert client.get(f"/broker/{run_id}/tools", headers=headers).json() == []
+    assert {tool["name"] for tool in client.get(f"/broker/{run_id}/tools", headers=headers).json()} == builtins
     assert client.post(f"/broker/{run_id}/tools/call", headers=headers,
                        json={"name": "linear_search", "arguments": {"query": "MCP"}}).status_code == 403
     assert not app.state.store.approvals(run_id)

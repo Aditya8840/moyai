@@ -6,9 +6,10 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .automations import Definition, Save, Toggle
+from .automations import Definition, Save, Toggle, SCHEDULE_VERSION
+from .automation_events import WebhookSetup
 from .connector_errors import ConnectorError
 
 
@@ -18,6 +19,11 @@ class Arguments(BaseModel):
 
 class Listing(Arguments):
     automation_id: str = Field(default='', pattern=r'^([0-9a-f]{32})?$')
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=20, ge=1, le=50)
+
+
+class EnvironmentListing(Arguments):
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=20, ge=1, le=50)
 
@@ -40,7 +46,19 @@ class Update(Target):
     definition: Definition
 
 
+class WebhookRead(Arguments):
+    automation_id: str = Field(pattern=r'^[0-9a-f]{32}$')
+
+
+class WebhookConfigure(Target):
+    provider: str = Field(min_length=1, max_length=32)
+    credential_request_id: str = Field(pattern=r'^[0-9a-f]{32}$', description='Authorized persistent generic webhook-signing-secret request containing WEBHOOK_SECRET. Never pass a secret value.')
+
+
 SPECS = {
+    'automation_environments': (EnvironmentListing, 'List reusable organization project environments for automation setup, including their last validated build and setup blockers. Select an id as definition.environment_id to reuse installed tools and services such as PostgreSQL/Prisma. Does not build or enable environments or grant repository access. Ask an administrator to prepare a missing environment; keep setup scripts in its versioned recipe, not automation prompts or metadata.'),
+    'automation_webhook_info': (WebhookRead, 'Inspect the current requester’s automation receiver URLs, provider configuration and recent deliveries. Readiness means a receiver secret exists, not that a provider webhook has been registered. Never returns secrets.'),
+    'automation_webhook_setup': (WebhookConfigure, 'Configure or rotate a webhook RECEIVER owned by the current requester. First obtain a non-expiring persistent generic credential using credentials_request, name=webhook-signing-secret, format=env, input_fields=[{name: WEBHOOK_SECRET, label: Webhook signing secret}]. Pass its request_id only. The user must permit persistent reuse: this copies the secret into durable automation configuration. Configuring pauses the automation and increments its revision. It affects all triggers for that provider. Register the same secret and returned callback URL at the provider separately; this tool does not register GitHub or other remote webhooks. Use the current revision and a stable request_key for identical retries. No secrets are returned.'),
     'automation_list': (Listing, 'List the current requester’s saved automations, or read one by automation_id. Returns the current turn_id, revisions, and scheduler-confirmed next runs when available. List before creating to avoid duplicates, and before changing an existing automation. Results may be shared in the current chat; summarize only what the user requested.'),
     'automation_create': (Create, 'Save a new automation for the current requester using the existing scheduler. Starts paused. Use only when the user asks for recurring or future work. Specify the requested cadence and timezone, repository, instructions and connections. Check github_repositories for repository access. List first to reuse an existing automation. To fulfill a request to schedule work, call automation_enable after saving; no extra confirmation is needed when the user already authorized the schedule. Reuse request_key for identical retries.'),
     'automation_update': (Update, 'Replace an automation definition owned by the current requester, using its current revision. Read it first and preserve fields the user did not ask to change. Editing pauses it; enable the returned revision when the user authorized continued scheduling. Never change someone else’s automation. Reuse request_key for identical retries.'),
@@ -51,14 +69,13 @@ TOOL_NAMES = set(SPECS)
 
 
 class AutomationTools:
-    def __init__(self, automations, same_requester):
+    def __init__(self, automations, same_requester, credentials=None):
+        self.credentials = credentials
         self.service = automations
         self.store = automations.store
         self.same_requester = same_requester
-        self.store.execute('''CREATE TABLE IF NOT EXISTS automation_operations (
-            owner_id TEXT NOT NULL, run_id TEXT NOT NULL, request_key TEXT NOT NULL,
-            fingerprint TEXT NOT NULL, automation_id TEXT NOT NULL, revision INTEGER NOT NULL,
-            PRIMARY KEY(owner_id,run_id,request_key))''')
+        if self.store.schema_updates:
+            initialize_schema(self.store)
 
     def actor(self, run, turn_id=None):
         run = self.store.run(run['id'])
@@ -73,9 +90,9 @@ class AutomationTools:
         security = self.service.security
         if security.local_preview() and actor == 'shared:local:admin':
             return run, actor
-        matches = [u for u in self.store.rows("SELECT id,email FROM users WHERE kind='google'")
+        matches = [u for u in self.store.rows("SELECT id,email FROM users WHERE kind IN ('google','cloudflare')")
                    if self.same_requester(u['id'], actor)]
-        if (not security.settings.google_enabled() or len(matches) != 1
+        if (not security.settings.person_login_enabled() or len(matches) != 1
                 or matches[0]['email'].rpartition('@')[2] not in security.settings.google_domains()):
             raise HTTPException(403, 'Sign in with Google first. Slack scheduling also needs a fresh verified matching profile.')
         return run, matches[0]['id']
@@ -90,8 +107,11 @@ class AutomationTools:
             self.actor(run)
         except HTTPException:
             return []
+        # Reading one automation also synchronizes its remote schedules. Only
+        # these observational catalogs can replay after an unknown outcome.
         return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema(),
-                 'annotations': {'readOnlyHint': name == 'automation_list'}}
+                 'annotations': {'readOnlyHint': name in {'automation_list', 'automation_webhook_info', 'automation_environments'},
+                                 'idempotentHint': name in {'automation_webhook_info', 'automation_environments'}}}
                 for name, (schema, description) in SPECS.items()]
 
     def owned(self, automation_id, actor):
@@ -124,7 +144,8 @@ class AutomationTools:
                         if synchronize:
                             await service.sync(client, automation_id=row['id'])
                         current = service.row(row['id'])
-                        if current['revision'] == row['revision'] and current['synced_revision'] == row['revision']:
+                        if (current['revision'] == row['revision'] and current['synced_revision'] == row['revision']
+                                and current['synced_schedule_version'] == SCHEDULE_VERSION):
                             definition = Definition.model_validate_json(row['definition'])
                             future = []
                             for trigger in definition.triggers:
@@ -152,11 +173,62 @@ class AutomationTools:
             state = {'status': 'paused' if current['paused'] else 'pending_sync', 'next_run_at': None, 'next_runs': []}
         result = {key: current[key] for key in ('id', 'revision', 'paused', 'synced_revision', 'sync_error')}
         return {**result, 'definition': Definition.model_validate_json(current['definition']).model_dump(mode='json'),
-                **state, 'note': 'Next run times are planned scheduler times; overlap, access checks or service outages can delay or skip execution.'}
+                **state, 'note': 'Next run times are planned scheduler times; rate limits, capacity, access checks or service outages can delay or skip execution.'}
+
+    def webhook_info(self, row, actor):
+        data = self.service.events.public(row, actor)
+        return {'automation_id': row['id'], 'revision': row['revision'], 'paused': bool(row['paused']),
+                'receiver': data,
+                'provider_registration': 'not_verified',
+                'instruction': 'Receiver readiness does not verify remote registration. Configure the callback URL and the same signing secret at the provider, then enable the returned revision. Revoking the source credential does not rotate an already configured receiver.'}
+
+    def webhook_secret(self, conn, run, request_id):
+        """Resolve only the dedicated persistent capability; never expose material."""
+        if self.credentials is None:
+            raise HTTPException(503, 'Secure credential access is unavailable.')
+        vault = self.credentials
+        request, secret = vault.authorized_request(conn, run, request_id)
+        if (request['status'] != 'provided' or not secret
+                or not vault.permitted(secret, run, run['active_user_id'])
+                or vault.status(secret) != 'active'):
+            raise HTTPException(403, 'Request active webhook signing credentials for this requester.')
+        if (secret['provider'] != 'generic' or secret['name'] != 'webhook-signing-secret'
+                or secret['format'] != 'env' or secret['lifetime'] != 'persistent' or secret['expires_at']):
+            raise HTTPException(422, 'Use non-expiring persistent generic webhook-signing-secret credentials in env format.')
+        try:
+            values = json.loads(vault.security.decrypt(secret['encrypted']))
+            value = values.get('WEBHOOK_SECRET') if isinstance(values, dict) else None
+            if not isinstance(value, str) or not 16 <= len(value) <= 512:
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise HTTPException(422, 'The credential must contain WEBHOOK_SECRET with 16 to 512 characters.') from None
+        return value
 
     async def call(self, run, name, arguments):
-        args = SPECS[name][0].model_validate(arguments)
+        try:
+            args = SPECS[name][0].model_validate(arguments)
+        except ValidationError as exc:
+            # Only rejected input is a correctable tool outcome. Validation of
+            # saved state or failures after an action must retain their cause.
+            return {'error': 'Invalid automation arguments. Correct the listed fields and try again.',
+                    'status_code': 422, 'validation_errors': [
+                        {'field': '.'.join(str(part) for part in error['loc']) or 'arguments',
+                         'type': error['type'], 'message': error['msg']}
+                        for error in exc.errors(include_input=False, include_context=False, include_url=False)]}
         run, actor = self.actor(run, getattr(args, 'turn_id', None))
+        if name == 'automation_environments':
+            environments = self.service.environments
+            catalog = environments.catalog()
+            selected = catalog[args.offset:args.offset + args.limit]
+            results = [{**item, 'setup_blocker': environments.setup_blocker(item['id'], '')} for item in selected]
+            self.unchanged(run, actor)
+            return {'environments': results,
+                    'next_offset': args.offset + args.limit if args.offset + args.limit < len(catalog) else None,
+                    'instruction': 'Use an environment id in definition.environment_id. Each new run pins the active validated build; later runs can adopt a refreshed build. Auto without a repository uses only the workspace default, if configured. A listed build does not grant repository access or guarantee preparation for another sandbox provider. Keep reusable setup in Environments and task goals in the automation prompt.'}
+        if name == 'automation_webhook_info':
+            result = self.webhook_info(self.owned(args.automation_id, actor), actor)
+            self.unchanged(run, actor)
+            return result
         if name == 'automation_list':
             if args.automation_id:
                 rows = [self.owned(args.automation_id, actor)]
@@ -199,7 +271,7 @@ class AutomationTools:
         digest = hashlib.sha256(json.dumps({'name': name, 'arguments': fingerprint},
                                            sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             fresh, fresh_actor = self.actor(run, args.turn_id)
             if fresh_actor != actor or fresh['active_user_id'] != run['active_user_id']:
                 raise HTTPException(409, 'The requester changed. Use automation_list again.')
@@ -215,11 +287,24 @@ class AutomationTools:
                 if name in {'automation_create', 'automation_update'}:
                     row = self.service.save(Save(definition=args.definition, revision=getattr(args, 'revision', 0)), actor,
                                             getattr(args, 'automation_id', None), connection=conn)
+                elif name == 'automation_webhook_setup':
+                    secret = self.webhook_secret(conn, fresh, args.credential_request_id)
+                    self.service.events.configure(args.automation_id,
+                        WebhookSetup(revision=args.revision, provider=args.provider, secret=secret), actor, connection=conn)
+                    row = dict(conn.execute('SELECT * FROM automations WHERE id=?', (args.automation_id,)).fetchone())
                 else:
                     row = self.service.set_state(args.automation_id, Toggle(revision=args.revision, paused=name == 'automation_pause'),
                                                  actor, connection=conn)
                 conn.execute('INSERT INTO automation_operations VALUES(?,?,?,?,?,?)', (*operation, digest, row['id'], row['revision']))
         await self.service.checkpoints.flush()
-        result = await self.result(row, synchronize=name == 'automation_enable')
+        result = (self.webhook_info(self.owned(row['id'], actor), actor) if name == 'automation_webhook_setup'
+                  else await self.result(row, synchronize=name == 'automation_enable'))
         self.unchanged(run, actor)
         return result
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS automation_operations (
+        owner_id TEXT NOT NULL, run_id TEXT NOT NULL, request_key TEXT NOT NULL,
+        fingerprint TEXT NOT NULL, automation_id TEXT NOT NULL, revision INTEGER NOT NULL,
+        PRIMARY KEY(owner_id,run_id,request_key))''')

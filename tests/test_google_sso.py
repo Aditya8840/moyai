@@ -244,3 +244,13 @@ def test_google_sign_in_limits_are_per_client(sso):
     # Unfinished sign-ins are capped per client, so one client cannot fill the table for others.
     counts = {row['client']: row['n'] for row in app.state.store.rows('SELECT client, COUNT(*) AS n FROM login_states GROUP BY client')}
     assert counts == {'203.0.113.9': 5, '192.0.2.10': 1}
+
+
+@pytest.mark.parametrize('cancelled', [False, True])
+def test_google_login_preserves_markdown_file_target(sso, cancelled):
+    from app.file_links import file_link
+    _, client, _ = sso
+    target = file_link('https://workspace.example', 'a' * 32, '/workspace/' + 'nested/' * 30 + 'report%20one.md').removeprefix('https://workspace.example')
+    callback, _, _ = begin(sso, target)
+    response = client.get(callback + ('&error=access_denied' if cancelled else ''), follow_redirects=False)
+    assert response.headers['location'] == ('/?signin=cancelled' + target[1:] if cancelled else target)

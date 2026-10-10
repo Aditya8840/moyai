@@ -1,8 +1,10 @@
 import asyncio
+import base64
 import io
 import json
 from types import SimpleNamespace
 import zipfile
+import zlib
 
 import pytest
 
@@ -155,14 +157,36 @@ def aio(function):
 
 async def test_snapshot_refresh_includes_runtime_fixes_without_touching_user_files():
     written = {}
+    manifests = []
     async def write(text, path):
         written[path] = text
-    await refresh_sandbox_files(SimpleNamespace(filesystem=SimpleNamespace(write_text=aio(write))))
-    assert '/opt/workspace-runner/hermes_compat.py' in written
-    assert '/opt/workspace-runner/hermes-steering.patch' in written
-    assert '/opt/workspace-runner/hermes-stop-reason.patch' in written
-    assert 'apply_hermes_patches()' in written['/opt/workspace-runner/agent.py']
-    assert all(path.startswith('/opt/workspace-runner/') for path in written)
+    async def execute(*command, **kwargs):
+        from app.runtime_files import SYNC_SCRIPT
+        assert command[:4] == ('/usr/local/bin/python', '-I', '-c', SYNC_SCRIPT)
+        assert command[4] == '/opt/workspace-runner'
+        expected = json.loads(command[5])
+        manifests.append(expected)
+        return ready_runtime([] if command[6] else list(expected))
+    await refresh_sandbox_files(SimpleNamespace(filesystem=SimpleNamespace(write_text=aio(write)), exec=aio(execute)))
+    assert len(written) == 1 and manifests[0] == manifests[1]
+    path, data = next(iter(written.items()))
+    assert path.startswith('/tmp/moyai-runtime-') and path.endswith('.bundle')
+    files = json.loads(zlib.decompress(base64.b64decode(data)))
+    assert {'sandbox/hermes_compat.py', 'sandbox/hermes-steering.patch', 'sandbox/hermes-stop-reason.patch'} <= files.keys()
+    assert 'apply_hermes_patches()' in files['sandbox/agent.py']
+    assert {'agent/__init__.py', 'agent/agent.py', 'agent/prompts/system.md', 'agent/tools/mcp_bridge.py'} <= files.keys()
+    assert any(name.startswith('agent/skills/') for name in files)
+    assert all(name.startswith(('agent/', 'sandbox/')) and name.endswith(('.py', '.md', '.patch')) for name in files)
+
+
+def ready_runtime(changed=()):
+    async def stdout():
+        return json.dumps(list(changed))
+    async def stderr():
+        return ''
+    async def wait():
+        return 0
+    return SimpleNamespace(stdout=SimpleNamespace(read=aio(stdout)), stderr=SimpleNamespace(read=aio(stderr)), wait=aio(wait))
 
 
 class Lines:
@@ -185,6 +209,7 @@ class FakeSandbox:
             archive.writestr("result.md", "Test result")
         self.archive = buffer.getvalue()
         self.completed = completed
+        self.runtime_verified = False
         self.filesystem = SimpleNamespace(write_text=aio(self.write), stat=aio(self.stat), read_bytes=aio(self.read))
         self.terminate = aio(self.terminate_sandbox)
         self.wait = aio(self.wait_sandbox)
@@ -208,7 +233,11 @@ class FakeSandbox:
         assert raise_on_termination is False
         return 0
 
-    async def execute(self, *command, timeout=None, bufsize=-1):
+    async def execute(self, *command, timeout=None, bufsize=-1, env=None):
+        if command[:3] == ('/usr/local/bin/python', '-I', '-c'):
+            self.runtime_verified = True
+            return ready_runtime()  # This lifecycle fixture has the baked runtime.
+        assert self.runtime_verified
         assert command[0] == "/opt/hermes-env/bin/python"
         async def wait():
             return 0 if self.completed else 1
@@ -240,7 +269,14 @@ def runner(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("completed,expected_status", [(True, "completed"), (False, "failed")])
 async def test_cloud_lifecycle_collects_result_and_cleans_up(runner, monkeypatch, completed, expected_status):
+    from unittest.mock import AsyncMock
+
     sandbox = FakeSandbox(completed=completed)
+    restored = []
+    async def restore(machine, scope, *, required):
+        assert machine is sandbox and sandbox.spec is None and required is False
+        restored.append(scope)
+    runner.computer = SimpleNamespace(restore=restore, save_captures=AsyncMock())
     async def create(**kwargs):
         assert kwargs["timeout"] == 86400  # Modal's machine lifetime; no overall turn cap
         assert kwargs["cpu"] == 2 and kwargs["memory"] == 4096
@@ -249,6 +285,7 @@ async def test_cloud_lifecycle_collects_result_and_cleans_up(runner, monkeypatch
     run = runner.store.create_run("Run tests", "", "modal", [])
     await runner.execute(run)
     result = runner.store.run(run["id"])
+    assert restored == [run['id']]
     assert result["status"] == expected_status
     assert result["sandbox_id"] == sandbox.object_id
     assert result["token_hash"] == ""
@@ -278,6 +315,29 @@ async def test_cancel_during_provisioning_cannot_orphan_sandbox(runner, monkeypa
     await job
     assert sandbox.terminated and sandbox.spec is None
     assert runner.store.run(run["id"])["status"] == "cancelled"
+
+
+async def test_active_stop_revokes_capability_and_saves_without_waiting_for_ui_lock(runner):
+    from unittest.mock import AsyncMock
+
+    run = runner.store.create_run('Stop active work', '', 'modal', [])
+    runner.store.update_run(run['id'], status='running', token_hash='active-capability')
+    sandbox = FakeSandbox()
+    async def terminate():
+        row = runner.store.run(run['id'])
+        assert row['status'] == 'stopping' and row['token_hash'] == ''
+        await sandbox.terminate_sandbox()
+    sandbox.terminate = aio(terminate)
+    runner.sandboxes[run['id']] = sandbox
+    capture_busy = asyncio.Lock()
+    await capture_busy.acquire()
+    runner.computer = SimpleNamespace(locks={run['id']: capture_busy}, save_captures=AsyncMock())
+    try:
+        await asyncio.wait_for(runner.cancel(run['id']), 1)
+        assert sandbox.terminated
+        runner.computer.save_captures.assert_awaited_once_with(sandbox, run['id'], releasing=True)
+    finally:
+        capture_busy.release()
 
 
 async def test_shutdown_during_provisioning_cleans_up_after_creation(runner, monkeypatch):

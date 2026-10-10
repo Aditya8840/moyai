@@ -1,13 +1,14 @@
-# Adoption dashboard
+# Usage analytics
 
-Organization administrators can open **Settings → Adoption** (`#adoption`).
+Organization administrators can open **Settings → Administration → Spend & usage → Users**.
+Team activity and spend by user share one tab, date range, refresh, and CSV export. User filters narrow the spend table and sessions; human activity remains team-wide. Existing `#adoption` links open the Users tab on the consolidated `#spend` page.
 The page queries `GET /api/admin/adoption?start=YYYY-MM-DD&end=YYYY-MM-DD`.
-It defaults to the last 30 UTC calendar days, supports up to 93 days, and rejects future dates.
+It uses the selected Spend & usage range, supports up to 93 UTC calendar days, and rejects future dates.
 
 - Daily human chat submissions, with a seven-day moving average.
 - Distinct identified teammates in the selected period and daily breakdown.
 - Last seven complete days versus the preceding seven, ending at the selected end date (or yesterday when today is selected). A zero baseline is labeled rather than divided by zero.
-- Date filters, refresh, an accessible chart, and an exact-value table.
+- Date presets, custom ranges, refresh, CSV export, accessible charts, and an exact-value table.
 
 Counts derive from retained `messages`, joined to sessions, identity links and automation history. No telemetry provider or new event capture is required, and existing chat history works immediately after deployment.
 
@@ -21,7 +22,7 @@ Days without stored submissions are zero-filled. Missing or purged history and o
 
 ```sh
 uv run pytest tests/test_adoption.py tests/test_spend.py tests/test_sessions.py tests/test_message_queue.py -q
-node --test tests/test_adoption.cjs tests/test_settings.cjs
+node --test tests/test_adoption.cjs tests/test_spend.cjs tests/test_settings.cjs
 git diff --check
 ```
 

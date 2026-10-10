@@ -86,14 +86,17 @@ The provider key stays on the gateway. Put the gateway key in Moyai's `.env`; do
 
 Use the **Harness** picker beside **Model** in a new session. You can bring any model that supports your harness's API and tool-calling requirements. Set `AGENT_MODEL` to its exact gateway alias to add a custom default to the model picker; the built-in names do not grant access to those models.
 
+With **Auto** selected, resolved `openai/` models use Codex SDK and `anthropic/` models use Claude Agent SDK, including future versions. Other provider prefixes and unqualified gateway aliases fall back to Claude Agent SDK. An explicit picker choice or `AGENT_HARNESS` setting overrides these defaults.
+
 | Harness | Model selection | Required API |
 | --- | --- | --- |
 | Hermes | Any configured compatible model | Chat Completions |
-| Claude Agent SDK (default) | Any configured compatible model | Messages |
+| Claude Agent SDK | Any configured compatible model | Messages |
 | Codex | Any configured compatible model | Responses |
 | OpenCode | Any configured compatible model | Chat Completions |
 | Deep Agents | Any configured compatible model | Chat Completions |
 | Tool Loop | Any configured compatible model | Chat Completions |
+| Pi | Any configured compatible model | Chat Completions |
 
 For Claude Agent SDK or Codex, use a LiteLLM gateway that exposes the required native API. Moyai forwards Messages and Responses requests without converting them to Chat Completions. Confirm that your key permits the selected model and protocol.
 

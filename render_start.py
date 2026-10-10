@@ -19,6 +19,7 @@ from fastapi.responses import PlainTextResponse
 
 
 maintenance = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+API_GRACEFUL_SHUTDOWN_SECONDS = 270
 
 
 @maintenance.get("/health")
@@ -33,12 +34,12 @@ def preparing(path: str):
 
 
 def configure_environment():
-    external_url = os.environ.get("RENDER_EXTERNAL_URL", "")
+    external_url = os.environ.get("MOYAI_PUBLIC_URL", "") or os.environ.get("RENDER_EXTERNAL_URL", "")
     if not external_url:
-        raise RuntimeError("RENDER_EXTERNAL_URL must identify this service's public HTTPS origin.")
+        raise RuntimeError("Set MOYAI_PUBLIC_URL for a private service, or RENDER_EXTERNAL_URL for a web service.")
     parsed = urlparse(external_url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
-        raise RuntimeError("RENDER_EXTERNAL_URL must be an HTTPS origin.")
+        raise RuntimeError("The configured public URL must be an HTTPS origin.")
     os.environ["PUBLIC_URL"] = external_url.rstrip("/")
     os.environ["TRUST_MODAL_PROXY"] = "false"
     # Render connects from an in-container proxy on 127.0.0.1 and appends
@@ -100,6 +101,8 @@ async def import_checkpoint(directory: Path, volume):
 async def bootstrap():
     from app.config import Settings
     settings = Settings(_env_file=None)
+    if settings.moyai_database_url:
+        return
     if (settings.data_dir / "workspace.db").exists():
         return
     source = os.environ.get("BOOTSTRAP_MODAL_VOLUME", "")
@@ -118,7 +121,8 @@ def main():
     if stage == "false":
         asyncio.run(bootstrap())
     uvicorn.run(maintenance if stage == "true" else "app.main:app", host="0.0.0.0",
-                port=int(os.environ.get("PORT", "10000")), workers=1, timeout_graceful_shutdown=20,
+                port=int(os.environ.get("PORT", "10000")), workers=1,
+                timeout_graceful_shutdown=API_GRACEFUL_SHUTDOWN_SECONDS if os.environ.get('MOYAI_RUNTIME_ROLE') == 'api' else 20,
                 # The app resolves the client from X-Forwarded-For itself (TRUSTED_PROXY_HOPS).
                 proxy_headers=False)
 

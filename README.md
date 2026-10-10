@@ -1,10 +1,20 @@
 # Moyai
 
+Press **Cmd+K** (Windows/Linux: **Ctrl+K**) to search session titles and saved
+messages, jump to settings, or act on the open session: copy its link, rename it,
+pin it, or move it to a folder. The sidebar search button opens the same palette.
+Use ↑/↓ and Enter to select, or Escape to close. **Cmd+Shift+O**
+(**Ctrl+Shift+O**) opens a new session. Search follows the selected My/All sessions scope.
+
 <p align="center">
   <img src="docs/assets/moyai-hero.png" alt="Moyai, an open source cloud agent" width="100%">
 </p>
 
 A self-hosted coding agent for background work. Give it a task from your browser or Slack; it edits code, runs tests, and opens a pull request for review. Send corrections while it works or resume with saved files and conversation history.
+
+Search sessions by title, original request, or words inside saved user and assistant messages. Matching excerpts appear in the sidebar, including agent conversations and side chats. Search covers older sessions beyond the recent list and follows your selected My sessions/All sessions view. Archived sessions remain recoverable by asking Moyai in chat.
+
+Confirm **Delete session** once to stop its agents, close their sandboxes, and remove the session for everyone. Cleanup continues if you close the page or the app restarts, and retries automatically when a sandbox provider is temporarily unavailable. New work is blocked while the session shows **Deleting**. Stored conversation data, files, billing records, and backups remain retained; independent side chats remain available.
 
 Ask **“What is this session’s ID?”** or send **`/session-id`** in web chat or Slack
 thread chat to get the current Moyai session ID directly. These standalone requests
@@ -19,7 +29,11 @@ continue through the agent normally.
   <img src="docs/assets/harnesses.png" alt="Supported harnesses: Claude Agent SDK, Codex, Hermes, OpenCode, Deep Agents, and Tool Loop" width="100%">
 </p>
 
-New sessions default to the native **Claude Agent SDK** with prompt caching enabled. You can pick a different harness for each session: **Hermes, Claude Agent SDK, Codex, OpenCode, Deep Agents, or Tool Loop**. Every harness runs in the same isolated workspace with the same tools and permissions. See [supported combinations and custom harnesses](docs/harnesses.md).
+New sessions automatically use **Codex SDK** for `openai/` models and **Claude Agent SDK** for `anthropic/` models, including new model versions. Other model prefixes fall back to Claude Agent SDK. You can pick a different harness for each session: **Hermes, Claude Agent SDK, Codex, OpenCode, Deep Agents, Tool Loop, or Pi**. Every harness runs in the same isolated workspace with the same tools and permissions. See [supported combinations and custom harnesses](docs/harnesses.md).
+
+**GPT-6 Astra** uses normal processing by default. Choose **GPT-6 Astra Ultrafast** in the model picker to opt into [Ultrafast mode](https://docs.litellm.ai/docs/providers/openai/ultrafast). The choice is saved to your account immediately, survives sign-out and server restarts, and becomes the default for new sessions, just like choosing Opus. Choose regular **GPT-6 Astra** to opt out. Existing sessions and already queued messages retain their own model choices.
+
+Ultrafast automatically selects Codex for new sessions because it requires the Responses API. An explicitly selected incompatible harness is rejected with guidance to choose Codex or regular Astra. The saved ID `openai/gpt-6-astra-ultrafast` is a Moyai preference: requests still use the existing gateway model `openai/gpt-6-astra`, with `service_tier: "ultrafast"` only for opted-in Responses requests and `"default"` for regular Astra Responses requests. No new gateway deployment or database migration is needed. Ultrafast requires upstream access and uses its pricing and rate limits; context summaries and memory review retain normal processing.
 
 ## Models and providers
 
@@ -53,7 +67,7 @@ Read the full story in the launch post: [Moyai is now open source](https://docs.
 
 ## Getting started
 
-Choose **Modal or [Substrate](docs/substrate.md)** for agent sandboxes in **Settings → Runtime**. Modal is the default. If you already run Substrate, follow the linked setup to connect your cluster.
+Choose **Modal, [Substrate](docs/substrate.md), or [AWS Lambda MicroVMs](docs/aws-lambda-microvms.md)** for agent sandboxes in **Settings → Runtime**. Modal is the default. Follow the provider's setup guide to connect your own infrastructure.
 
 This setup runs Moyai on **Modal**, using **GPT-6 Astra + the Claude Agent SDK harness** through LiteLLM. You can [choose another model or harness](docs/getting-started.md#choose-a-harness).
 
@@ -118,4 +132,5 @@ To stop compute charges, stop the web app and remaining sandboxes in the Modal d
 - [Models and harnesses](docs/getting-started.md#choose-a-harness)
 - [Deployment, backups, and security](docs/deployment.md) · [Access boundaries](docs/security-and-scope.md)
 - [Local UI preview](docs/getting-started.md#optional-local-ui-development-only) (simulated responses)
+- [Run Python agent regressions in CI with Lens](docs/lens-evals.md)
 - [All documentation](docs/README.md)

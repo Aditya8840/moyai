@@ -11,7 +11,7 @@ class MessageQueue:
 
     def change(self, run_id, message_id, actor, admin, revision, action, content=None):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             row = conn.execute("SELECT * FROM messages WHERE run_id=? AND id=? AND role='user'", (run_id, message_id)).fetchone()
             if not run or not row:
@@ -54,8 +54,21 @@ class MessageQueue:
 
     def accept_steer(self, run_id, active_message_id):
         """Called between complete tool rounds or while durably checkpointed."""
+        # Most sandbox polls have no input. A read can proceed during another
+        # writer's transaction; do not acquire the backend's writer lock just
+        # to poll (SQLite's writer lock or Postgres's schema advisory lock).
+        # A newly queued input can wait until the next poll. Positive matches
+        # are only a hint: the transaction below rechecks ownership and state.
+        if not self.store.rows("""SELECT 1 FROM runs r JOIN messages m ON m.run_id=r.id
+                WHERE r.id=? AND r.active_message_id=?
+                AND r.status NOT IN ('stopping','cancelled','failed','interrupted')
+                AND m.status='queued' AND m.id!=?
+                AND (m.id=r.steer_message_id OR m.send_immediately=1 OR EXISTS (
+                    SELECT 1 FROM slack_receipts s WHERE s.run_id=m.run_id AND s.message_id=m.id))
+                LIMIT 1""", (run_id, active_message_id, active_message_id)):
+            return None
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             if not run or run['active_message_id'] != active_message_id or run['status'] in {'stopping','cancelled','failed','interrupted'}:
                 return None
@@ -83,8 +96,10 @@ class MessageQueue:
         """Idempotent receipts from the live sandbox, also carried by model/final events."""
         if not isinstance(ids, list) or len(ids) > 100 or any(type(i) is not int for i in ids):
             raise HTTPException(422, 'Invalid steering receipts.')
+        if not ids:
+            return
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             for message_id in ids:
                 changed = conn.execute("UPDATE messages SET status='injected',started_at=? WHERE id=? AND run_id=? AND steering_parent_id=? AND status='queued' AND queue_locked=1",
                                        (now(), message_id, run_id, turn_id)).rowcount
@@ -99,7 +114,7 @@ class MessageQueue:
         if not target:
             return {'steer_message_id': None}
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             message = conn.execute('SELECT * FROM messages WHERE id=?', (target,)).fetchone()
             allowed = {'waiting_children', 'waiting_credential'} if checkpointed else {'running', 'reconnecting', 'awaiting_approval'}

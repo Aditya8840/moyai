@@ -5,7 +5,7 @@ import logging
 import re
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -17,11 +17,14 @@ from temporalio.client import (Schedule, ScheduleActionStartWorkflow, ScheduleAl
 from temporalio.service import RPCError, RPCStatusCode
 
 from .automation_workflow import AutomationWorkflow
+from .automation_templates import templates
 from .automation_events import AutomationEvents, EventTrigger, EVENT_CHOICES
 from .connector_errors import ConnectorError
 from .db import now
+from .runner import response_status
 
 log = logging.getLogger(__name__)
+SCHEDULE_VERSION = 1  # Resync existing schedules when scheduler policy changes.
 
 LINEAR_TEMPLATE = '''Use linear_my_issues to read my open Linear tickets. Pick at most one clear, actionable ticket for the selected repository. Skip tickets already in review, blocked, or requiring product decisions. Read its details and recent comments.
 
@@ -102,9 +105,13 @@ class Definition(BaseModel):
     prompt: str = Field(min_length=3, max_length=14000)
     triggers: list[Trigger] = Field(min_length=1, max_length=20)
     max_runs_per_hour: int | None = Field(default=50, ge=1)
+    queue_events: bool = False
+    metadata: dict[Annotated[str, Field(min_length=1, max_length=80)],
+                   Annotated[str, Field(max_length=16384)]] = Field(default_factory=dict, max_length=20)
     repo_url: str = Field(default='', max_length=500)
     github_repository_id: int | None = Field(default=None, gt=0, strict=True)
-    environment_id: str = Field(default='auto', pattern=r'^(auto|none|[0-9a-f]{32})$')
+    environment_id: str = Field(default='auto', pattern=r'^(auto|none|[0-9a-f]{32})$',
+                                description='Reusable project environment id from automation_environments. Each run pins its active validated build. auto matches the repository, or the workspace default when no repository is set; none uses base tools.')
     plugins: list[Literal['linear', 'github', 'slack', 'notion']] = Field(default_factory=list, max_length=4)
     model: str = Field(default='', max_length=120)
     # Missing on old saved definitions: preserve their original runtime.
@@ -178,27 +185,9 @@ class Automations:
         self.next_sync = 0
         self.task = None
         self.sync_lock = asyncio.Lock()
-        store.execute('''CREATE TABLE IF NOT EXISTS automations (
-            id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), definition TEXT NOT NULL,
-            revision INTEGER NOT NULL DEFAULT 1, synced_revision INTEGER NOT NULL DEFAULT 0,
-            paused INTEGER NOT NULL DEFAULT 1, sync_error TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL, updated_at TEXT NOT NULL)''')
-        store.execute('''CREATE TABLE IF NOT EXISTS automation_runs (
-            occurrence TEXT PRIMARY KEY, automation_id TEXT NOT NULL REFERENCES automations(id),
-            revision INTEGER NOT NULL, run_id TEXT UNIQUE REFERENCES runs(id),
-            outcome TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)''')
-        store.execute('CREATE INDEX IF NOT EXISTS automation_runs_history ON automation_runs(automation_id,created_at)')
-        store.execute('''CREATE TABLE IF NOT EXISTS automation_items (
-            automation_id TEXT NOT NULL REFERENCES automations(id), item_key TEXT NOT NULL,
-            run_id TEXT NOT NULL REFERENCES runs(id), created_at TEXT NOT NULL,
-            PRIMARY KEY(automation_id,item_key))''')
+        if store.schema_updates:
+            initialize_schema(store)
         self.events = AutomationEvents(self)
-        store.execute('''CREATE TABLE IF NOT EXISTS automation_schedules (
-            automation_id TEXT NOT NULL REFERENCES automations(id), schedule_id TEXT PRIMARY KEY)''')
-        # Remember already-synced single-trigger schedules for later removal.
-        for row in store.rows('SELECT * FROM automations WHERE synced_revision>0'):
-            if 'triggers' not in json.loads(row['definition']) and not json.loads(row['definition']).get('event'):
-                store.execute('INSERT OR IGNORE INTO automation_schedules VALUES(?,?)', (row['id'], 'moyai-automation-' + row['id']))
 
     def start(self):
         if self.settings.temporal_enabled:
@@ -235,7 +224,7 @@ class Automations:
     def validate_execution(self, definition, owner_id):
         # Re-evaluate access at every launch; saved workflows confer no new rights.
         owners = self.store.rows('SELECT * FROM users WHERE id=?', (owner_id,))
-        if not owners or (owners[0]['kind'] == 'google' and (not self.settings.google_enabled() or owners[0]['email'].rpartition('@')[2] not in self.settings.google_domains())):
+        if not owners or (owners[0]['kind'] in {'google', 'cloudflare'} and (not self.settings.person_login_enabled() or owners[0]['email'].rpartition('@')[2] not in self.settings.google_domains())):
             raise HTTPException(409, 'The automation owner no longer has workspace access.')
         if owners[0]['kind'] == 'shared' and not (self.security.local_preview() or self.settings.password_login_enabled):
             raise HTTPException(409, 'The automation owner no longer has workspace access.')
@@ -253,14 +242,18 @@ class Automations:
         result = {key: row[key] for key in ('id', 'owner_id', 'revision', 'synced_revision', 'paused', 'sync_error', 'created_at', 'updated_at')}
         definition = Definition.model_validate_json(row['definition'])
         result['definition'] = definition.model_dump(mode='json')
+        result['schedule_sync_pending'] = row['synced_schedule_version'] < SCHEDULE_VERSION or row['synced_revision'] != row['revision']
         result['completed_triggers'] = [t.id for t in definition.triggers if t.schedule and t.schedule.frequency == 'once'
             and self.store.rows('SELECT 1 FROM automation_runs WHERE occurrence=?', (self.once_id(row['id'], t),))]
         result['can_edit'] = row['owner_id'] == actor
         owner = self.store.rows('SELECT name,email FROM users WHERE id=?', (row['owner_id'],))[0]
         result['owner'] = owner['email'] or owner['name']
         result['history'] = self.store.rows('''SELECT a.occurrence,a.run_id,a.outcome,a.detail,a.created_at,
-            r.status FROM automation_runs a LEFT JOIN runs r ON r.id=a.run_id
+            r.status,r.deletion_requested_at,r.deleted_at FROM automation_runs a LEFT JOIN runs r ON r.id=a.run_id
             WHERE a.automation_id=? ORDER BY a.created_at DESC LIMIT 20''', (row['id'],))
+        for history in result['history']:
+            history['status'] = response_status(history) if history['status'] is not None else None
+            del history['deletion_requested_at'], history['deleted_at']
         result['trigger'] = self.events.public(row, actor)
         try:
             result['environment_blocker'] = self.environment_blocker(definition)
@@ -296,7 +289,7 @@ class Automations:
         harness = body.definition.harness
         if 'harness' not in body.definition.model_fields_set:
             harness = (Definition.model_validate_json(self.row(automation_id)['definition']).harness
-                       if automation_id else self.settings.agent_harness)
+                       if automation_id else self.settings.default_harness(body.definition.model or None))
         definition = body.definition.model_copy(update={'harness': harness,
                                                       'model': self.settings.harness_model(harness, body.definition.model or None),
                                                       'plugins': sorted(set(body.definition.plugins))})
@@ -310,7 +303,7 @@ class Automations:
         stamp = now()
         with self.store.connect() if connection is None else nullcontext(connection) as conn:
             if connection is None:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
             if automation_id:
                 row = conn.execute('SELECT * FROM automations WHERE id=?', (automation_id,)).fetchone()
                 if not row or row['owner_id'] != owner_id:
@@ -340,7 +333,7 @@ class Automations:
         """Shared by the web editor and agent tools; permission and revision checks stay here."""
         with self.store.connect() if connection is None else nullcontext(connection) as conn:
             if connection is None:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
             row = conn.execute('SELECT * FROM automations WHERE id=?', (automation_id,)).fetchone()
             if not row:
                 raise HTTPException(404, 'Automation not found.')
@@ -379,7 +372,7 @@ class Automations:
         except (HTTPException, ValueError, ConnectorError) as exc:
             error = exc.detail if isinstance(exc, HTTPException) else str(exc)
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             previous = conn.execute('SELECT * FROM automation_runs WHERE occurrence=?', (occurrence,)).fetchone()
             if previous:
                 result = {'run_id': previous['run_id'] or '', 'outcome': previous['outcome']}
@@ -401,12 +394,10 @@ class Automations:
                     if event:
                         return {'run_id': '', 'outcome': 'waiting', 'detail': environment_blocker}
                     error = reason = environment_blocker
-                elif conn.execute('''SELECT 1 FROM automation_runs a JOIN runs r ON (r.id=a.run_id OR r.parent_run_id=a.run_id)
+                elif event and definition.queue_events and conn.execute('''SELECT 1 FROM automation_runs a JOIN run_ancestry tree ON tree.ancestor_id=a.run_id JOIN runs r ON r.id=tree.run_id
                     WHERE a.automation_id=? AND (r.status NOT IN ('idle','completed','failed','cancelled','interrupted')
                     OR EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id AND m.status IN ('queued','running','injected')))''', (automation_id,)).fetchone():
-                    if event:
-                        return {'run_id': '', 'outcome': 'waiting', 'detail': 'Waiting for the previous run to finish.'}
-                    reason = 'The previous run is still active or waiting for input.'
+                    return {'run_id': '', 'outcome': 'waiting', 'detail': 'Waiting for the previous run to finish.'}
                 elif definition.max_runs_per_hour is not None and conn.execute("SELECT COUNT(*) FROM automation_runs WHERE automation_id=? AND outcome='started' AND created_at>?",
                                            (automation_id, (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat())).fetchone()[0] >= definition.max_runs_per_hour:
                     if event:
@@ -419,6 +410,8 @@ class Automations:
                 else:
                     pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('idle','completed','failed','cancelled','interrupted')").fetchone()[0]
                     if pending >= self.store.max_pending_runs:
+                        if event:
+                            return {'run_id': '', 'outcome': 'waiting', 'detail': 'Waiting for workspace session capacity.'}
                         raise HTTPException(429, 'The session queue is full. Retry later.')
                     run_id, stamp = uuid4().hex, now()
                     prompt = definition.prompt
@@ -451,9 +444,9 @@ class Automations:
         run = self.store.run(run_id)
         if not run:
             raise RuntimeError('Scheduled session is unavailable')
-        return not self.store.rows("""SELECT 1 FROM runs r WHERE (r.id=? OR r.parent_run_id=?) AND
+        return not self.store.rows("""SELECT 1 FROM runs r WHERE r.id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?) AND
             (r.status NOT IN ('idle','completed','failed','cancelled','interrupted') OR EXISTS(
-                SELECT 1 FROM messages WHERE run_id=r.id AND status IN ('queued','running','injected')))""", (run_id, run_id))
+                SELECT 1 FROM messages WHERE run_id=r.id AND status IN ('queued','running','injected')))""", (run_id,))
 
     def tools(self, run):
         if not self.store.rows('SELECT 1 FROM automation_runs WHERE run_id=?', (run['id'],)):
@@ -464,11 +457,11 @@ class Automations:
     def claim(self, run, arguments):
         key = Claim.model_validate(arguments).item_key.lower()
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             source = conn.execute('SELECT automation_id FROM automation_runs WHERE run_id=?', (run['id'],)).fetchone()
             if not source:
                 raise HTTPException(403, 'This tool is available only in automation sessions.')
-            conn.execute('INSERT OR IGNORE INTO automation_items VALUES(?,?,?,?)', (source['automation_id'], key, run['id'], now()))
+            conn.execute('INSERT INTO automation_items VALUES(?,?,?,?) ON CONFLICT DO NOTHING', (source['automation_id'], key, run['id'], now()))
             item = conn.execute('SELECT run_id FROM automation_items WHERE automation_id=? AND item_key=?', (source['automation_id'], key)).fetchone()
         return {'claimed': item['run_id'] == run['id'], 'run_id': item['run_id']}
 
@@ -485,7 +478,7 @@ class Automations:
         return Schedule(
             action=ScheduleActionStartWorkflow(AutomationWorkflow.run, args=[row['id'], row['revision']] if not suffix else [row['id'], row['revision'], '', trigger.id],
                 id='moyai-automation-tick-' + row['id'] + suffix, task_queue=self.settings.temporal_task_queue),
-            spec=trigger.schedule.spec(), policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP,
+            spec=trigger.schedule.spec(), policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.ALLOW_ALL,
                 catchup_window=timedelta(minutes=15)), state=ScheduleState(paused=bool(row['paused']) or used,
                     limited_actions=once and not used, remaining_actions=1 if once and not used else 0))
 
@@ -495,7 +488,7 @@ class Automations:
         async with self.sync_lock:
             if not automation_id:
                 self.next_sync = asyncio.get_running_loop().time() + 15
-            query = 'SELECT * FROM automations WHERE revision>synced_revision'
+            query = f'SELECT * FROM automations WHERE (revision>synced_revision OR synced_schedule_version<{SCHEDULE_VERSION})'
             rows = self.store.rows(query + ' AND id=?', (automation_id,)) if automation_id else self.store.rows(query + ' ORDER BY updated_at LIMIT 20')
             for row in rows:
                 try:
@@ -510,7 +503,7 @@ class Automations:
                             await client.create_schedule(schedule_id, value, rpc_timeout=timedelta(seconds=10))
                         except ScheduleAlreadyRunningError:
                             await client.get_schedule_handle(schedule_id).update(lambda _, value=value: ScheduleUpdate(value), rpc_timeout=timedelta(seconds=10))
-                        self.store.execute('INSERT OR IGNORE INTO automation_schedules VALUES(?,?)', (row['id'], schedule_id))
+                        self.store.execute('INSERT INTO automation_schedules VALUES(?,?) ON CONFLICT DO NOTHING', (row['id'], schedule_id))
                     for binding in self.store.rows('SELECT schedule_id FROM automation_schedules WHERE automation_id=?', (row['id'],)):
                         schedule_id = binding['schedule_id']
                         if schedule_id in desired:
@@ -521,7 +514,8 @@ class Automations:
                             if exc.status != RPCStatusCode.NOT_FOUND:
                                 raise
                         self.store.execute('DELETE FROM automation_schedules WHERE schedule_id=?', (schedule_id,))
-                    self.store.execute("UPDATE automations SET synced_revision=?,sync_error='' WHERE id=? AND revision=?", (row['revision'], row['id'], row['revision']))
+                    self.store.execute("UPDATE automations SET synced_revision=?,synced_schedule_version=?,sync_error='' WHERE id=? AND revision=?",
+                                       (row['revision'], SCHEDULE_VERSION, row['id'], row['revision']))
                 except Exception as exc:
                     log.warning('Automation schedule sync failed (%s)', type(exc).__name__)
                     # SDK diagnostics may include credentials; expose only a safe message.
@@ -539,7 +533,7 @@ class Automations:
             return {'enabled': self.settings.temporal_enabled, 'connected': bool(getattr(self.manager, 'ready', None) and self.manager.ready.is_set()),
                     'automations': [self.public(row, actor) for row in self.store.rows('SELECT * FROM automations ORDER BY updated_at DESC')],
                     'event_choices': EVENT_CHOICES,
-                    'templates': [{'id': 'linear-pr', 'name': 'My Linear tickets → PR', 'prompt': LINEAR_TEMPLATE, 'plugins': ['linear', 'github']}]}
+                    'templates': templates(LINEAR_TEMPLATE)}
 
         @router.post('/api/automations', status_code=201)
         async def create(body: Save, request: Request):
@@ -581,3 +575,30 @@ class Automations:
             return await self.launch(automation_id, body.revision, 'manual:' + automation_id + ':' + body.client_id, manual=True)
 
         return router
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS automations (
+        id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), definition TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1, synced_revision INTEGER NOT NULL DEFAULT 0,
+        paused INTEGER NOT NULL DEFAULT 1, sync_error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)''')
+    store.execute('''CREATE TABLE IF NOT EXISTS automation_runs (
+        occurrence TEXT PRIMARY KEY, automation_id TEXT NOT NULL REFERENCES automations(id),
+        revision INTEGER NOT NULL, run_id TEXT UNIQUE REFERENCES runs(id),
+        outcome TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)''')
+    store.execute('CREATE INDEX IF NOT EXISTS automation_runs_history ON automation_runs(automation_id,created_at)')
+    store.execute('''CREATE TABLE IF NOT EXISTS automation_items (
+        automation_id TEXT NOT NULL REFERENCES automations(id), item_key TEXT NOT NULL,
+        run_id TEXT NOT NULL REFERENCES runs(id), created_at TEXT NOT NULL,
+        PRIMARY KEY(automation_id,item_key))''')
+    store.execute('''CREATE TABLE IF NOT EXISTS automation_schedules (
+        automation_id TEXT NOT NULL REFERENCES automations(id), schedule_id TEXT PRIMARY KEY)''')
+    with store.connect() as conn:
+        conn.begin_write()
+        if 'synced_schedule_version' not in conn.column_names('automations'):
+            conn.execute('ALTER TABLE automations ADD COLUMN synced_schedule_version INTEGER NOT NULL DEFAULT 0')
+    # Remember already-synced single-trigger schedules for later removal.
+    for row in store.rows('SELECT * FROM automations WHERE synced_revision>0'):
+        if 'triggers' not in json.loads(row['definition']) and not json.loads(row['definition']).get('event'):
+            store.execute('INSERT INTO automation_schedules VALUES(?,?) ON CONFLICT DO NOTHING', (row['id'], 'moyai-automation-' + row['id']))

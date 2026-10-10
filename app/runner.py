@@ -9,13 +9,18 @@ from uuid import uuid4
 import modal
 from fastapi import HTTPException
 
+from .db import now
 from .environments import EnvironmentPending
 from .security import digest
 from .message_queue import MessageQueue
 from .modal_clients import ModalClients
+from .runtime_files import sync_runtime
+from .model_selection import gateway_model
 
 TERMINAL = {"completed", "failed", "cancelled", "interrupted", "idle"}
-SANDBOX_FILES = Path(__file__).parent.parent / "sandbox"
+CAPTURE_RELEASE_TIMEOUT = 35
+RETAINED_RELEASES = 128
+RUNTIME_FILES = Path(__file__).parent.parent
 SAVE_WARNING = ("Your answer is saved, but the latest workspace files could not be saved. "
                 "The previous workspace checkpoint is unchanged. Download the recovered files before continuing; "
                 "they may be incomplete. Queued follow-ups were stopped, and no actions were replayed.")
@@ -27,12 +32,19 @@ def completed_response(run: dict[str, object], result: object) -> bool:
     return (type(message_id) is int and isinstance(result, dict)
             and type(result.get('message_id')) is int and result['message_id'] == message_id
             and result.get('completed') is True
-            and not any(result.get(key) for key in ('continuation', 'steer_message_id', 'startup_retry', 'wait_group', 'wait_credential'))
+            and not any(result.get(key) for key in ('continuation', 'steer_message_id', 'startup_retry', 'transport_retry', 'wait_group', 'wait_credential'))
             and isinstance(result.get('message'), str) and bool(result['message'].strip()))
+
+
+def stop_requested(run: dict[str, object]) -> bool:
+    """Deletion intent stays authoritative even after a terminal status write."""
+    return bool(run.get('deletion_requested_at')) or run['status'] == 'stopping'
 
 
 def response_status(run: dict[str, object]) -> str:
     """Present a finished answer as saving without settling durable execution."""
+    if run.get('deletion_requested_at') and not run.get('deleted_at'):
+        return 'deleting'
     status = str(run.get('status') or '')
     raw = run.get('pending_result')
     if status != 'running' or not isinstance(raw, str) or not raw:
@@ -46,8 +58,7 @@ def response_status(run: dict[str, object]) -> str:
 
 async def refresh_sandbox_files(sandbox):
     """Refresh our adapter and runtime patches, preserving workspace/history."""
-    for path in sorted([*SANDBOX_FILES.glob('*.py'), *SANDBOX_FILES.glob('hermes-*.patch')]):
-        await sandbox.filesystem.write_text.aio(path.read_text(), f'/opt/workspace-runner/{path.name}')
+    await sync_runtime(sandbox, RUNTIME_FILES)
 
 
 def safe_error_detail(exc, secrets_to_hide=()):
@@ -69,6 +80,7 @@ class RunManager:
         store.sandbox_provider = lambda: settings.sandbox_provider
         self.jobs = {}
         self.sandboxes = {}
+        self.releases = {}
         self.slots = asyncio.Semaphore(settings.max_concurrent_runs)
         self.closing = False
         self.prepare_context = None
@@ -82,14 +94,23 @@ class RunManager:
         """Replaced by the cloud checkpoint callback when hosted on Modal."""
 
     def receive_result(self, run_id: str, result: dict[str, object]) -> None:
-        """Persist the answer and wake browser readers without settling its turn."""
+        """Publish the durable answer before saving files, without settling its turn."""
         serialized = json.dumps(result)
-        run = self.store.run(run_id)
-        if run['pending_result'] == serialized:
-            return
-        self.store.update_run(run_id, summary=str(result.get('message', '')), pending_result=serialized)
-        self.store.event(run_id, 'chat', 'Response received',
-                         {'message_id': result.get('message_id'), 'response_complete': completed_response(run, result)})
+        with self.store.connect(write_scope=run_id) as conn:
+            conn.begin_write()
+            run = dict(conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone())
+            if run['pending_result'] == serialized:
+                return
+            complete = completed_response(run, result)
+            conn.execute('UPDATE runs SET summary=?,pending_result=?,updated_at=? WHERE id=?',
+                         (str(result.get('message', '')), serialized, now(), run_id))
+            if complete and conn.execute("SELECT 1 FROM messages WHERE run_id=? AND id=? AND role='user' AND status='running'",
+                                         (run_id, result['message_id'])).fetchone():
+                self.store.save_answer_in(conn, run_id, result['message_id'], result['message'], 'saving')
+                if self.store.tracing:
+                    self.store.tracing.identity(run, result['message_id'], connection=conn)
+            conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'chat','Response received',?,?)",
+                         (run_id, json.dumps({'message_id': result.get('message_id'), 'response_complete': complete}), now()))
 
     def preserve_answer(self, run_id, reason=SAVE_WARNING):
         """Called on failure/restart; never turn an unsaved workspace into success."""
@@ -102,20 +123,85 @@ class RunManager:
                               checkpoint_error=reason, pending_result=json.dumps(pending))
         return True
 
-    async def terminate(self, sandbox):
-        async with asyncio.timeout(30):
+    async def terminate(self, sandbox, run_id):
+        identity = (run_id, sandbox.object_id)
+        task = self.releases.get(identity)
+        if not task or (task.done() and (task.cancelled() or task.exception())):
+            task = asyncio.create_task(self.release_sandbox(sandbox, run_id))
+            # A disconnected waiter must not abandon cleanup or leave a failed
+            # background task unobserved. A later caller retries failed releases.
+            task.add_done_callback(self.release_done)
+        self.releases.pop(identity, None)
+        self.releases[identity] = task
+        await asyncio.shield(task)
+
+    def release_done(self, task):
+        if not task.cancelled():
+            task.exception()
+        completed = [key for key, value in self.releases.items() if value.done()]
+        # Keep recent deduplication without retaining every rotated sandbox.
+        # Very late callers can repeat idempotent finish/copy/provider cleanup.
+        for key in completed[:-RETAINED_RELEASES]:
+            self.releases.pop(key, None)
+
+    async def release_sandbox(self, sandbox, run_id):
+        if getattr(self, 'computer', None):
+            try:
+                # The runtime serializes finish, and capture_locks serialize
+                # immutable copies. A busy UI request must not block shutdown.
+                async with asyncio.timeout(CAPTURE_RELEASE_TIMEOUT):
+                    await self.computer.save_captures(sandbox, run_id, releasing=True)
+            except Exception:
+                self.store.event(run_id, 'error', 'Some browser captures could not be saved. Continuing workspace shutdown.')
+        async with asyncio.timeout(150 if sandbox.object_id.startswith('lambda:') else 30):
             await sandbox.terminate.aio()
             # terminate() acknowledges the request before the machine exits.
             await sandbox.wait.aio(raise_on_termination=False)
 
+    async def cleanup(self, state, run_id):
+        if not state.get('sandbox_id'):
+            return
+        try:
+            sandbox = await self.provider(identity=state['sandbox_id']).get(state['sandbox_id'])
+            if await sandbox.poll.aio() is None:
+                await self.terminate(sandbox, run_id)
+        except modal.exception.NotFoundError:
+            pass  # Verified absence is success; transport failure is not.
+
+    async def stop_for_deletion(self, run_id):
+        await self.cancel(run_id)
+        family = self.store.rows('SELECT id FROM runs WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?)', (run_id,))
+        for row in family:
+            await self.wait_for_stop(row['id'])
+            # The runtime has settled its answers and released its workspace.
+            # Retain orphaned inputs without replaying or inventing an answer.
+            self.store.interrupt_messages(row['id'], 'cancelled')
+            if self.store.run(row['id'])['status'] not in TERMINAL:
+                self.store.update_run(row['id'], status='cancelled', token_hash='')
+
+    async def wait_for_stop(self, run_id):
+        if run_id in self.jobs:
+            await asyncio.gather(asyncio.shield(self.jobs[run_id]), return_exceptions=True)
+        await self.cleanup(self.store.run(run_id), run_id)
+
     async def recover(self):
-        if self.store.rows("SELECT 1 FROM sqlite_master WHERE type='table' AND name='durable_sessions'"):
+        if 'durable_sessions' in self.store.table_names():
             if any(json.loads(row['state']).get('phase', 'idle') != 'idle'
                    for row in self.store.rows('SELECT state FROM durable_sessions')):
                 raise RuntimeError('Drain Temporal sessions before disabling Temporal; unfinished work was preserved')
-        rows = self.store.rows("SELECT * FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle') OR EXISTS(SELECT 1 FROM messages WHERE messages.run_id=runs.id AND messages.status IN ('running','queued'))")
+        rows = self.store.rows("SELECT * FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle') OR EXISTS(SELECT 1 FROM messages WHERE messages.run_id=runs.id AND messages.status IN ('running','queued','saving'))")
         for row in rows:
+            if row['status'] in TERMINAL and not self.store.rows(
+                    "SELECT 1 FROM messages WHERE run_id=? AND status IN ('running','queued','injected')", (row['id'],)):
+                self.store.interrupt_messages(row['id'])
+                continue
             pending = json.loads(row.get("pending_result") or "null")
+            # Finished turns retain their receipt until the next claim. A new
+            # unclaimed input cannot recover that old answer as its outcome.
+            if pending and row['chat_enabled'] and not self.store.rows(
+                    "SELECT 1 FROM messages WHERE run_id=? AND id=? AND id=? AND role='user' AND status='running'",
+                    (row['id'], pending.get('message_id'), row['active_message_id'])):
+                pending = None
             if pending and pending.get("message"):
                 saved = pending.get("checkpoint_saved") is True
                 if not saved:
@@ -130,12 +216,12 @@ class RunManager:
                 self.store.update_run(row["id"], status="interrupted", token_hash="", error="The workspace restarted. This task was not replayed.")
             self.store.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (row["id"],))
             self.store.execute("UPDATE approvals SET status='uncertain' WHERE run_id=? AND status='executing'", (row["id"],))
-            self.store.execute("UPDATE messages SET status='interrupted' WHERE run_id=? AND status IN ('running','queued','injected')", (row["id"],))
+            self.store.interrupt_messages(row["id"])
             self.store.event(row["id"], "error", "Workspace restarted. Received answers were preserved; unfinished messages were interrupted and not replayed.")
             if row["sandbox_id"] and not self.settings.missing_sandbox(row.get("sandbox_provider")):
                 try:
                     sandbox = await self.provider(row).get(row["sandbox_id"])
-                    await self.terminate(sandbox)
+                    await self.terminate(sandbox, row['id'])
                 except Exception:
                     self.store.event(row["id"], "error", "Could not confirm sandbox cleanup. Check the sandbox provider; its configured timeout still applies.")
 
@@ -151,7 +237,7 @@ class RunManager:
         return await self.modal_clients.get(self.settings)
 
     def submit(self, run):
-        if self.closing or run.get('deleted_at') or run["id"] in self.jobs:
+        if self.closing or run.get('deleted_at') or run.get('deletion_requested_at') or run["id"] in self.jobs:
             return
         task = asyncio.create_task(self.chat(run) if run.get("chat_enabled") else self.execute(run))
         self.jobs[run["id"]] = task
@@ -160,7 +246,18 @@ class RunManager:
                 self.jobs.pop(run["id"], None)
             if not completed.cancelled() and completed.exception():
                 self.store.update_run(run["id"], status="failed", token_hash="", error="Session processing stopped unexpectedly. No unfinished messages were replayed.")
-                self.store.execute("UPDATE messages SET status='interrupted' WHERE run_id=? AND status IN ('running','queued','injected')", (run["id"],))
+                # A driver/finalizer failure can bypass chat's normal settlement.
+                # Finish the published receipt before interrupting its input,
+                # while preserving finish_message's trace and steering ownership.
+                pending = json.loads(self.store.run(run['id']).get('pending_result') or '{}')
+                for answer in self.store.rows("""SELECT a.response_to_id,a.content FROM messages a
+                        JOIN messages m ON m.id=a.response_to_id AND m.run_id=a.run_id
+                        WHERE a.run_id=? AND a.status='saving' AND m.status='running'""", (run['id'],)):
+                    preserved = pending.get('message_id') == answer['response_to_id'] and self.preserve_answer(run['id'])
+                    content = self.store.run(run['id'])['summary'] if preserved else answer['content']
+                    self.store.finish_message(run['id'], answer['response_to_id'], content,
+                                              'save_failed' if preserved else 'interrupted')
+                self.store.interrupt_messages(run["id"])
             # A message may arrive while the last checkpoint is being saved.
             if not self.closing and run.get("chat_enabled") and self.store.has_queued_messages(run["id"]):
                 self.submit(self.store.run(run["id"]))
@@ -210,27 +307,35 @@ class RunManager:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     def stopped(self, run_id):
-        return self.store.run(run_id)["status"] in TERMINAL | {"stopping"}
+        run = self.store.run(run_id)
+        return stop_requested(run) or run["status"] in TERMINAL
 
     async def cancel(self, run_id):
-        if self.coordinator:
-            await self.coordinator.cancel_children(run_id)
         run = self.store.run(run_id)
         if run["status"] in TERMINAL and run_id not in self.jobs:
+            self.store.interrupt_messages(run_id, 'cancelled')
+            if self.coordinator:
+                await self.coordinator.cancel_children(run_id)
             return
         # Revoke capabilities immediately, even while provisioning is still in flight.
         self.store.update_run(run_id, status="stopping", token_hash="")
         self.store.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status='queued'", (run_id,))
         self.store.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (run_id,))
-        self.store.event(run_id, "status", "Stop requested. Finishing sandbox cleanup.")
+        self.store.event(run_id, "status", "Stop requested. Saving recordings before shutting down the workspace.")
         sandbox = self.sandboxes.get(run_id)
-        if sandbox:
-            await sandbox.terminate.aio()
-        elif run["status"] == "queued" or (run.get("chat_enabled") and not self.store.rows(
-                "SELECT 1 FROM messages WHERE run_id=? AND status='running'", (run_id,))):
+        if not sandbox and (run["status"] == "queued" or (run.get("chat_enabled") and not self.store.rows(
+                "SELECT 1 FROM messages WHERE run_id=? AND status='running'", (run_id,)))):
             # Slack may already have atomically reserved the stop while the
             # background job is still fetching context, before claiming a turn.
             self.store.update_run(run_id, status="cancelled")
+            if run_id not in self.jobs:
+                self.store.interrupt_messages(run_id, 'cancelled')
+        pending = ([self.terminate(sandbox, run_id)] if sandbox else [])
+        if self.coordinator:
+            pending.append(self.coordinator.cancel_children(run_id))
+        for result in await asyncio.gather(*pending, return_exceptions=True):
+            if isinstance(result, BaseException):
+                raise result
 
     async def execute(self, run):
         run_id = run["id"]
@@ -252,7 +357,7 @@ class RunManager:
                             # move the same user turn to another machine.
                             sandbox = self.sandboxes.get(run_id)
                             if sandbox:
-                                await self.terminate(sandbox)
+                                await self.terminate(sandbox, run_id)
                                 self.sandboxes.pop(run_id, None)
                             self.store.event(run_id, "status", "Workspace saved. Continuing on a fresh cloud machine.")
                             turn = {**self.store.run(run_id), "prompt": run["prompt"],
@@ -273,12 +378,12 @@ class RunManager:
         finally:
             row = self.store.run(run_id)
             pending = json.loads(row.get("pending_result") or "{}")
-            if row.get("chat_enabled") and pending and not pending.get("checkpoint_saved") and row["status"] in {"stopping", "cancelled", "interrupted", "failed"}:
+            if row.get("chat_enabled") and pending and not pending.get("checkpoint_saved") and (stop_requested(row) or row["status"] in {"cancelled", "interrupted", "failed"}):
                 self.preserve_answer(run_id)
             sandbox = self.sandboxes.pop(run_id, None)
             if sandbox:
                 try:
-                    await self.terminate(sandbox)
+                    await self.terminate(sandbox, run_id)
                     self.store.event(run_id, "status", "Sandbox terminated")
                 except Exception:
                     self.store.event(run_id, "error", "Sandbox cleanup was not confirmed. Check the sandbox provider; the sandbox timeout still applies.")
@@ -321,7 +426,7 @@ class RunManager:
 
     def spec(self, run):
         from .attachments import attachment_context
-        from sandbox.harness_registry import resolve
+        from agent.harnesses.harness_registry import resolve
         run_id = run["id"]
         fresh_child = bool(run.get('parent_run_id')) and not run.get('continuation') and not self.store.rows(
             "SELECT 1 FROM messages WHERE run_id=? AND role='assistant' LIMIT 1", (run_id,))
@@ -340,12 +445,15 @@ class RunManager:
                 "github_repository_id": run.get("github_repository_id"),
                 "github_enabled": "github" in run["plugins"],
                 "broker_url": f"{self.settings.public_url.rstrip('/')}/broker/{run_id}",
-                "model": self.settings.resolve_model(fallback=run.get('active_model') or run.get('model') or ''), "max_iterations": self.settings.max_agent_iterations,
+                "model": gateway_model(self.settings.resolve_model(fallback=run.get('active_model') or run.get('model') or '')), "max_iterations": self.settings.max_agent_iterations,
                 "timeout": self.settings.run_timeout_seconds - 90 if self.settings.run_timeout_seconds else None,
+                "transport_recovery_seconds": self.settings.transport_recovery_seconds,
                 "rotation_seconds": self.settings.sandbox_rotation_seconds if not self.settings.run_timeout_seconds and run.get("chat_enabled") else 0,
                 "continuation": bool(run.get("continuation")),
                 "activity_input_id": activity_input_id,
                 "tracing_enabled": bool(self.store.tracing and self.store.tracing.enabled),
+                "omit_private_tool_payloads": bool(self.store.tracing and
+                    self.store.tracing.preferences.for_run(run)['omit_private_tool_payloads']),
                 "is_child_agent": bool(run.get('parent_run_id')),
                 "fresh_child": fresh_child,
                 "context_checkpoint": context_checkpoint,
@@ -355,7 +463,7 @@ class RunManager:
                 "slack_source": self.store.slack_source(run_id),
                 "slack_thread_chat": bool(self.store.rows("SELECT 1 FROM slack_threads WHERE run_id=?", (run_id,))) if self.settings.slack_thread_chat_enabled else False,
                 "history_fallback": [] if context_checkpoint else [{"role": m["role"], "content": (f"[Prior {m['status']} message; context only, do not replay] " if m["role"] == "user" and m["status"] != "completed" else "") + m["content"] + attachment_context(by_message.get(m['id'], []))} for m in self.store.messages(run_id)
-                                     if m["id"] != run.get("message_id", 0) and m["status"] not in {"queued", "running", "deleted"}]}
+                                     if m["id"] != run.get("message_id", 0) and m["status"] not in {"queued", "running", "saving", "deleted"}]}
         if self.environments:
             spec["project_environment"] = self.environments.context(run)
             if spec['project_environment']:
@@ -389,7 +497,7 @@ class RunManager:
         snapshot_id = run.get("snapshot_id") or project.get("snapshot_id")
         provision = asyncio.create_task(backend.create(
             name='moyai-' + run_id + '-' + uuid4().hex[:8], snapshot_id=snapshot_id or '', token=token,
-            timeout=self.settings.sandbox_lifetime_seconds()))
+            timeout=self.settings.sandbox_lifetime_seconds(run.get('sandbox_provider'))))
         try:
             sandbox = await asyncio.shield(provision)
         except asyncio.CancelledError:
@@ -403,20 +511,25 @@ class RunManager:
         if self.stopped(run_id):
             return
         spec = self.spec(run)
-        # Restored snapshots can contain an older adapter; refresh only our own
-        # runner files, preserving all user workspace files and agent history.
-        if snapshot_id:
-            await refresh_sandbox_files(sandbox)
+        if backend.name == 'lambda':
+            spec["rotation_at"] = sandbox.started_at + self.settings.sandbox_rotation_for('lambda')
+        # Both restored checkpoints and pinned provider images may predate the
+        # controller. Refresh only our own runtime before launching the agent.
+        await refresh_sandbox_files(sandbox)
+        if getattr(self, 'computer', None):
+            await self.computer.restore(sandbox, run_id, required=False)
         await sandbox.filesystem.write_text.aio(json.dumps(spec), "/tmp/task.json")
         self.store.update_run(run_id, status="running")
         from .harnesses import resolve
         self.store.event(run_id, "status", f"Sandbox ready. Starting {resolve(run['harness']).name}.")
         # Modal streams arbitrary chunks by default. Protocol events are JSON
         # lines and must be framed before decoding, including parallel tools.
-        process = await sandbox.exec.aio("/opt/hermes-env/bin/python", "/opt/workspace-runner/agent.py", "/tmp/task.json",
-                                         timeout=self.settings.run_timeout_seconds or None, bufsize=1)
+        process = await sandbox.exec.aio("/opt/hermes-env/bin/python", "/opt/workspace-runner/sandbox/agent.py", "/tmp/task.json",
+                                         timeout=self.settings.run_timeout_seconds or None, bufsize=1,
+                                         env=self.settings.broker_environment(token))
         result = None
-        secrets_to_hide = [token, self.settings.litellm_api_key, self.settings.modal_token_secret]
+        secrets_to_hide = [token, self.settings.litellm_api_key, self.settings.modal_token_secret,
+                           self.settings.cloudflare_access_client_id, self.settings.cloudflare_access_client_secret]
 
         def scrub(value):
             for secret_value in secrets_to_hide:
@@ -461,7 +574,7 @@ class RunManager:
             await self.save_artifact(sandbox, run_id)
             if self.stopped(run_id):
                 return
-            if run.get("chat_enabled"):
+            if run.get("chat_enabled") or backend.name == 'lambda':
                 self.store.update_run(run_id, status="saving", token_hash="")
                 self.store.event(run_id, "status", "Saving conversation and workspace for your next message")
                 started = time.monotonic()
@@ -501,7 +614,7 @@ class RunManager:
 
     async def save_artifact(self, sandbox, run_id):
         if getattr(self, 'computer', None):
-            await self.computer.save_before_release(sandbox, run_id)
+            await self.computer.save_captures(sandbox, run_id, releasing=False)
         try:
             info = await sandbox.filesystem.stat.aio("/artifacts/result.zip")
             if info.size > 20 * 1024 * 1024:
@@ -510,13 +623,7 @@ class RunManager:
             data = await sandbox.filesystem.read_bytes.aio("/artifacts/result.zip")
             if len(data) > 20 * 1024 * 1024:
                 return
-            directory = self.settings.data_dir / "artifacts"
-            directory.mkdir(exist_ok=True, mode=0o700)
-            path = directory / f"{run_id}.zip"
-            staged = path.with_suffix('.next')
-            staged.write_bytes(data)
-            staged.chmod(0o600)
-            staged.replace(path)
+            await asyncio.to_thread(self.store.artifacts.save, f"{run_id}.zip", data)
             self.store.event(run_id, "artifact", "Result archive saved", {"download": f"/api/runs/{run_id}/artifact"})
         except Exception:
             self.store.event(run_id, "error", "No result archive was recovered from this run.")

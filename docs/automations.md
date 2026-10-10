@@ -7,6 +7,25 @@
 
 ## Automations
 
+The **Create automation** menu offers four starting points:
+
+- **Create** opens a side-panel editor for triggers, agent instructions, model and harness, connections and their tools, repository/environment, metadata, and invocation limits.
+- **Template** offers Linear tickets to PRs, a weekly engineering digest, failed-build investigation, and daily issue triage. Templates remain editable; choose a repository where needed.
+- **Generate with Moyai** opens a real agent session with your description, timezone, model, and selected connected apps. The agent uses the existing automation tools to save a paused workflow for review.
+- **Suggest for me** asks Moyai for up to three ideas. You can include the titles of up to ten recent personal sessions or describe recurring work yourself. Raw conversation content is not added to the generation request. Suggestions do not create or enable automations until you choose one.
+
+AI generation requires the configured cloud runtime. In a local simulation it is visibly unavailable; manual creation and templates still work. Creation requests reuse their session idempotency key after a transport failure. Generation uses normal session permissions and billing.
+
+Use **Mine / All**, the status filter, and search to find saved workflows. Search includes names, instructions, owners, repositories, and metadata. These filters preserve the existing shared-workspace visibility and owner-only editing permissions.
+
+**Queue overlapping event runs** defaults off, preserving independent parallel sessions. Turn it on to wait while a previous automation run is still active at dispatch. Scheduled runs remain independent. Hourly limits and capacity checks may still hold events. Metadata is descriptive only, with up to 20 key-value pairs, 80 characters per key, and 16,384 characters per value; it does not change access or execution. Keep reusable setup scripts in an environment or versioned skill and reference them from the instructions.
+
+The editor exposes Moyai's actual runtime capabilities. Runs start new sessions as the owner. Security and network access remain governed by the workspace and environment; this does not add Devin-style per-automation security profiles, domain allowlists, arbitrary run-as identities, or per-session dollar budgets.
+
+For a local UI demo with a real temporary database and no credentials, run
+`uv run python scripts/automation_builder_demo.py` and open
+`http://127.0.0.1:8850/#automations`. Save, edit, search, and manual launch use real APIs; agent responses are simulated and the scheduler is disabled. The temporary database is removed when the demo exits.
+
 You can also manage schedules from a direct web or Slack chat. Ask, for example,
 “Every Monday at 9 AM Los Angeles time, audit the skills repository and open a PR
 only when updates are needed.” The agent uses `automation_list`,
@@ -29,6 +48,53 @@ existing ability to pause other owners’ work in Settings. Connection selection
 GitHub repository grants, runtime readiness and webhook requirements still apply;
 these tools cannot grant new access. Mutations check the active turn and revision
 and journal a stable `request_key`, so retries do not duplicate or replay changes.
+
+### Reusing database setup
+
+Keep PostgreSQL, Prisma and other reusable setup in a [project environment](environments.md).
+The **LiteLLM development** starter already installs the pinned project dependencies,
+initializes a local development database, generates Prisma for the checked-out
+source, and verifies real proxy key creation, lookup and deletion before publishing
+a stopped filesystem snapshot. Each worker restarts the saved service startup
+recipe. Automation prompts describe the work to do; metadata remains descriptive.
+
+An administrator creates a **LiteLLM development** environment in **Environments**,
+selects the repository and source ref, saves it, runs **Build environment**, and
+enables it after verification succeeds. Use a full commit SHA for an exact source
+version, or a branch with optional refresh for rolling updates. Existing saved
+recipes keep their saved commands until the administrator edits and rebuilds them.
+
+From a direct chat, call `automation_environments` to find the environment's `id`,
+`prepared_build` (build ID, recipe revision, source SHA and sandbox provider), and
+any setup blocker. Follow `next_offset` for another page. This reads the shared
+environment catalog without building, changing it, or returning installation
+scripts. A recipe's current `revision` can be newer than `prepared_build.revision`;
+the latter describes the validated snapshot available to runs. Repository access
+and sandbox-provider compatibility are still checked when preparing a session.
+
+Set the returned ID on the automation definition; no bootstrap script is needed:
+
+```json
+{
+  "name": "Nightly database checks",
+  "prompt": "Run the repository database checks using the prepared environment and report failures.",
+  "environment_id": "<id returned by automation_environments>",
+  "triggers": [{"id": "nightly", "schedule": {"frequency": "daily", "time": "23:30", "timezone": "America/Los_Angeles"}}]
+}
+```
+
+Supply the current `turn_id` and stable `request_key` to `automation_create`, then
+enable its returned revision when scheduling is authorized. An explicit environment
+can supply the repository even when `repo_url` is empty. `auto` with no repository
+uses the workspace default if one exists; it does not implicitly choose LiteLLM.
+If no suitable environment is listed, an administrator must prepare it first.
+
+Each occurrence selects and pins the active validated build when its new session
+is prepared. Descendants and restored workers retain that pinned build and their
+copied files. A later occurrence can adopt a refreshed build; the automation ID
+does not permanently pin one source SHA. The bundled database is local sandbox
+development data. Tests that require isolated base/head datasets should create
+their own disposable databases within that environment and clean them up.
 
 Local verification: `uv run pytest tests/test_automation_tools.py -q` includes a
 real Temporal schedule check. For a visible broker demo, run
@@ -79,7 +145,7 @@ does not produce another event. Legacy tasks without chat messages are out of sc
 
 The native source needs no webhook or Slack credentials. Automatic runs still
 require Temporal and retain the existing owner identity, connections, hourly cap,
-overlap rules and bounded inbox. Under load, capture waits without blocking users.
+workspace capacity and bounded inbox. Under load, capture waits without blocking users.
 A durable indexed message cursor and receipt commit together; restarts cannot
 relaunch the same delivery. Source context includes a session link, at most ten
 prior messages (1000 characters each), the triggering text (4000 characters), and
@@ -165,11 +231,19 @@ and cannot be rearmed by routine sync. Dates are stored in UTC and displayed in
 local time. Custom schedules use numeric cron, not raw RRULE.
 
 A schedule workflow launches the existing durable session runner and waits for
-it to finish, including input waits. Scheduled occurrences skip overlap
-and have a 15-minute catch-up window. Event deliveries persist before acknowledgement
-and queue while a previous run (including children) is active, the automation's
-hourly limit is full, or session capacity is unavailable. Queued events expire
-after 24 hours. A stopped/replaced worker resumes dispatch from SQLite.
+it to finish, including input waits, without blocking other occurrences. By default, every distinct
+matching event or scheduled occurrence creates an independent session: 20 feedback
+events can start 20 sessions, and one later event creates one more. Duplicate
+deliveries still return the original receipt. Scheduled occurrences allow overlap
+and retain their 15-minute catch-up window. Existing schedules automatically resync
+the overlap policy without changing their definition revision or invalidating queued events.
+
+Event deliveries persist before acknowledgement. The dispatcher admits bounded
+batches in rounds across automations, without waiting for earlier sessions or their
+children unless event queueing is explicitly enabled for that automation. Events queue when the automation's hourly limit is full, workspace session
+capacity is unavailable, or project setup is not ready. Active sandbox concurrency
+is controlled separately by the workspace runner. Queued events expire after 24 hours.
+A stopped/replaced worker resumes dispatch from SQLite.
 
 Launch receipts, the session, its initial message, and its Temporal wake commit
 atomically. A retry returns the same session. Pending edits retry after outages;
@@ -191,3 +265,28 @@ as they do to interactive sessions. Automations do not gain extra connection
 permissions or the ability to approve or merge PRs. Shared-password users need a Google-linked identity for
 “my tickets.” Local previews can manually run simulations without Temporal or LLM
 use. Provider setup is manual; the code and local tests do not install live triggers.
+
+### Configuring receivers from chat
+
+`automation_webhook_info` reads an owned automation's callback URLs, receiver
+readiness, and recent deliveries. `automation_webhook_setup` configures or
+rotates a receiver through the same transaction used by the web editor.
+
+Supply a `credential_request_id`, never a plaintext signing secret. Obtain the
+handle with `credentials_request`, using `provider=generic`,
+`name=webhook-signing-secret`, `format=env`, and a masked `WEBHOOK_SECRET` input.
+The credential must be non-expiring and allow persistent reuse because setup copies it into durable
+automation configuration. Revoking the source credential does not rotate the
+receiver; configure a replacement to invalidate the old signature.
+
+Setup requires the current revision and a stable request key. It pauses the
+automation and returns the new revision. Identical retries recover the existing
+result without rotating again, including after a checkpoint response fails.
+The tools never return the secret or encrypted value.
+
+These tools configure **Moyai's receiver only**. Register the callback URL and
+same signing secret with GitHub or the other provider separately. Receiver
+readiness does not prove remote registration or delivery; the result labels
+provider registration as unverified. Enable the returned revision after provider
+setup, then check deliveries. A GitHub connection alone does not grant or perform
+repository webhook registration.

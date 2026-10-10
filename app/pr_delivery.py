@@ -2,15 +2,16 @@
 import hashlib
 import html
 import re
-import sqlite3
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
+from .database import Connection
 from . import captures
 from .config import Settings
 
 TOKENS = re.compile(r'[^\s<>()`"\[\]]+')
+CAPTURE_PATH = re.compile(r'(?:/workspace/)?moyai-captures/([A-Za-z0-9_-]{1,100}\.(?:png|webm))')
 
 
 class PullRequest(BaseModel):
@@ -31,13 +32,13 @@ class Capture(BaseModel):
     sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
 
 
-def select_prs(conn: sqlite3.Connection, run_id: str, answer: str) -> list[PullRequest]:
+def select_prs(conn: Connection, run_id: str, answer: str) -> list[PullRequest]:
     # A URL selects an existing receipt; it cannot establish a publication.
     urls = {url.rstrip('.,;!?') for url in re.findall(r'https://[^\s<>`"\)\]\|]+', answer)}
     result = []
     seen = set()
     rows = conn.execute('''SELECT p.result FROM github_publications p JOIN runs r ON r.id=p.run_id
-        WHERE (r.id=? OR r.parent_run_id=?) AND p.result IS NOT NULL ORDER BY p.created_at''', (run_id, run_id))
+        WHERE r.id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?) AND p.result IS NOT NULL ORDER BY p.created_at''', (run_id,))
     for row in rows:
         try:
             pr = PullRequest.model_validate_json(row['result'])
@@ -49,10 +50,10 @@ def select_prs(conn: sqlite3.Connection, run_id: str, answer: str) -> list[PullR
     return result[:10]
 
 
-def select_captures(settings: Settings, run_id: str, answer: str) -> list[Capture]:
+def select_captures(settings: Settings, run_id: str, answer: str, *, store,
+                    conn: Connection | None = None) -> list[Capture]:
     tokens = TOKENS.findall(answer)
-    names = [match[1] for token in tokens if (match := re.fullmatch(
-        r'(?:/workspace/)?moyai-captures/([A-Za-z0-9_-]{1,100}\.(?:png|webm))', token))]
+    names = [match[1] for token in tokens if (match := CAPTURE_PATH.fullmatch(token))]
     result = []
     kinds = set()
     for name in names:
@@ -60,10 +61,21 @@ def select_captures(settings: Settings, run_id: str, answer: str) -> list[Captur
         if kind in kinds:
             continue
         try:
-            raw, _ = captures.read(captures.directory(settings, run_id) / name)
+            path = captures.directory(settings, run_id) / name
+            info = store.artifacts.info(run_id + '-captures/' + name, conn=conn)
+            if info and info['reference']:
+                # Capture saves validate media before publishing their immutable
+                # hash. Answer collection holds a transaction, so fetch no bytes
+                # here; delivery still validates the entire batch before upload.
+                if not 0 < info['size'] <= captures.MAX_FILE:
+                    continue
+                checksum = info['sha256']
+            else:
+                raw, _ = captures.read(path, store=store)
+                checksum = hashlib.sha256(raw).hexdigest()
         except (OSError, HTTPException):
             continue
-        result.append(Capture(name=name, sha256=hashlib.sha256(raw).hexdigest()))
+        result.append(Capture(name=name, sha256=checksum))
         kinds.add(kind)
     return result
 
@@ -74,7 +86,14 @@ def link_captures(settings: Settings, run_id: str, answer: str, selected: list[C
         url = f'{settings.public_url.rstrip("/")}/api/runs/{run_id}/computer/captures/{capture.name}'
         links['moyai-captures/' + capture.name] = url
         links['/workspace/moyai-captures/' + capture.name] = url
-    return TOKENS.sub(lambda match: links.get(match[0], match[0]), answer)
+    session_url = f'{settings.public_url.rstrip("/")}/#run={run_id}'
+
+    def replace(match: re.Match[str]) -> str:
+        # Capture bytes may arrive with the workspace save after this answer.
+        # Keep those references usable without claiming the file exists yet.
+        return links.get(match[0], session_url) if CAPTURE_PATH.fullmatch(match[0]) else match[0]
+
+    return TOKENS.sub(replace, answer)
 
 
 def attachment(pr: PullRequest, public_url: str, run_id: str) -> dict:

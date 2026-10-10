@@ -1,7 +1,7 @@
 const assert=require('node:assert/strict');
 const {readFileSync}=require('node:fs');
 const {test}=require('node:test');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 
 function fixture({kind='skill',admin=true,saved=[],skill=null,rootId='root-one',submitError=null,runs=[],userId='google:owner'}={}){
@@ -42,7 +42,7 @@ function fixture({kind='skill',admin=true,saved=[],skill=null,rootId='root-one',
   const ctx={state:{role:admin?'admin':'member',selected:'run-one',pageVersion:1,userId},
     $:selector=>elements.get(selector.slice(1))||null,
     document:{addEventListener(){},querySelector:selector=>elements.get(selector.slice(1))||null,querySelectorAll:()=>[]},
-    crypto:{randomUUID:()=> 'request-unique-id'},URL,Date,
+    crypto:{randomUUID:()=> 'request-unique-id'},URL,Date,MoyaiIcon:()=>'<svg aria-hidden="true"></svg>',
     esc:value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;'),relative:()=> 'just now',
     api:async(path,options)=>{
       if(options){posts.push({path,method:options.method,body:options.body?JSON.parse(options.body):null});if(submitError)throw new Error(submitError);return {};}
@@ -53,7 +53,8 @@ function fixture({kind='skill',admin=true,saved=[],skill=null,rootId='root-one',
     },toast(){},refreshChat:async()=>{},showError(){},
   };
   const app=readFileSync('app/static/app.js','utf8');
-  vm.createContext(ctx);vm.runInContext(app.slice(app.indexOf('function sessionTitle('),app.indexOf('function modelName('))+readFileSync('app/static/'+(kind==='skill'?'skills.js':'credentials.js'),'utf8'),ctx);
+  vm.createContext(ctx);vm.runInContext(readFileSync('app/static/skill-icons.js','utf8'),ctx);
+  vm.runInContext(app.slice(app.indexOf('function sessionTitle('),app.indexOf('function modelName('))+readFileSync('app/static/'+(kind==='skill'?'skills.js':'credentials.js'),'utf8'),ctx);
   return {ctx,element,posts,gets,submit,elements};
 }
 
@@ -546,9 +547,10 @@ test('async session opening retains a target across metadata retry and ignores a
 
 function routeFixture(authenticated){
   const f=linkedFixture(),app=readFileSync('app/static/app.js','utf8'),opened=[],handlers={},redirects=[];
+  f.ctx.state.runs=[];
   for(const id of ['google-signin','signin-error','logout'])f.element(id);
   Object.assign(f.ctx,{location:{hash:accessLink(),search:'',assign:url=>redirects.push(url)},URLSearchParams,
-    applyUserSession:session=>f.ctx.state.csrf=session.authenticated?'csrf':'',restoreSessionFolderView(){},refreshRuns:async()=>{},
+    renderSidebar(){},showError:error=>{throw error;},applyUserSession:session=>f.ctx.state.csrf=session.authenticated?'csrf':'',restoreSessionFolderView(){},refreshRuns:async()=>{},
     registerWebMCP(){},navigate:async view=>opened.push({view}),openRun:async(id,hash)=>opened.push({id,hash}),
     settingsViews:new Set(['secrets','users']),window:{addEventListener:(event,handler)=>handlers[event]=handler},
     api:async(path,options)=>{

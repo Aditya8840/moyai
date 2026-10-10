@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from .security import Throttle, digest
+from .file_links import valid_file_return_path
 
 AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -23,7 +24,7 @@ COOKIE = "google_login"
 
 
 class SignInStart(BaseModel):
-    return_to: str = Field(default="/#tasks", max_length=200)
+    return_to: str = Field(default="/#tasks", max_length=1600)
 
 
 class GoogleSignIn:
@@ -97,6 +98,9 @@ class GoogleSignIn:
         @router.post("/api/auth/google/start")
         async def start(body: SignInStart, request: Request):
             self.security.check_origin(request)
+            if self.settings.cloudflare_access_login:
+                self.security.require(request)
+                return JSONResponse({'url': '/#tasks'})
             if not self.settings.google_enabled():
                 raise HTTPException(409, "Google sign-in is not configured yet.")
             client = self.security.client_key(request)
@@ -104,7 +108,8 @@ class GoogleSignIn:
                 raise HTTPException(429, "Too many sign-in attempts. Wait a minute.")
             self.attempts.record(client)
             state, browser, nonce, verifier = (secrets.token_urlsafe(32) for _ in range(4))
-            return_to = body.return_to if re.fullmatch(r"/#(?:tasks|connections|runtime|spend|users|run=[a-f0-9]{32}(?:&credential=[a-f0-9]{32}&generation=(?:0|[1-9][0-9]{0,14}))?)", body.return_to) else "/#tasks"
+            allowed = re.fullmatch(r"/#(?:tasks|connections|runtime|spend|users|run=[a-f0-9]{32}(?:&credential=[a-f0-9]{32}&generation=(?:0|[1-9][0-9]{0,14}))?)", body.return_to)
+            return_to = body.return_to if allowed or valid_file_return_path(body.return_to) else "/#tasks"
             self.store.execute("DELETE FROM login_states WHERE expires<?", (time.time(),))
             # Keep each client's newest few unfinished sign-ins, so no client can fill the table for others.
             self.store.execute("DELETE FROM login_states WHERE client=? AND state_hash NOT IN "
@@ -124,6 +129,11 @@ class GoogleSignIn:
 
         @router.get("/auth/google/callback")
         async def callback(request: Request, state: str = "", code: str = "", error: str = ""):
+            if self.settings.cloudflare_access_login:
+                self.security.require(request)
+                response = RedirectResponse('/#tasks', status_code=303)
+                response.delete_cookie(COOKIE, path='/auth/google')
+                return response
             if not self.settings.google_enabled():
                 raise HTTPException(409, "Google sign-in is not configured yet.")
             if len(state) > 200 or len(code) > 4096:

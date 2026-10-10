@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import json
 
@@ -9,11 +8,12 @@ from app.attachments import MAX_FILE, attachment_context, inspect_file
 from app.db import Store
 from app.message_queue import MessageQueue
 from app.security import digest
-from sandbox.agent import conversation_prompt
+from agent.agent import conversation_prompt
 from test_attachments import png
 from test_audio import gateway, grant_files, slack_download
 from test_slack import event, signed, slack_app
 from test_spend import sign_in
+from storage_fixture import MemoryObjects
 
 FILE = {'id': 'F12345678', 'name': 'image.png', 'mimetype': 'image/png'}
 ROOT = '1790719000.123456'
@@ -74,8 +74,8 @@ def test_signed_slack_image_reaches_web_preview_and_model_via_web_attachment_pip
     store = app.state.store
     assert len(store.messages(run_id)) == 1
     message = store.claim_message(run_id)
-    asyncio.run(app.state.slack.prepare(run_id))
-    asyncio.run(app.state.slack.prepare(run_id))
+    client.portal.call(app.state.slack.prepare, run_id)
+    client.portal.call(app.state.slack.prepare, run_id)
     assert calls == [FILE['id']]
     attachment = store.messages(run_id)[0]['attachments'][0]
     assert attachment['name'] == 'image.png' and attachment['media_type'] == 'image/png'
@@ -105,7 +105,7 @@ def test_image_only_slack_dm_is_accepted(slack_app, monkeypatch):
         channel='D12345678', channel_type='im', text='', files=[FILE])))
     run_id = runs[0]['id']
     app.state.store.claim_message(run_id)
-    asyncio.run(app.state.slack.prepare(run_id))
+    client.portal.call(app.state.slack.prepare, run_id)
     assert calls == [FILE['id']]
     assert app.state.store.messages(run_id)[0]['attachments'][0]['preview_url']
 
@@ -119,14 +119,14 @@ def test_slack_image_followup_waits_for_its_own_turn(slack_app, monkeypatch):
     first = store.claim_message(run_id)
     store.update_run(run_id, status='running')
     client.post('/hooks/slack/events', **signed(event('ImageFollowup', type='message', subtype='file_share',
-        ts='1790719001.123456', thread_ts=ROOT, text='', files=[FILE])))
+        ts='1790719001.123456', thread_ts=ROOT, text='<@U99999999>', files=[FILE])))
     second = store.messages(run_id)[1]
     assert MessageQueue(store).live_control(run_id, first['id'], []) == {'steer_message_id': second['id'], 'handoff': True}
-    asyncio.run(app.state.slack.files.prepare(run_id))
+    client.portal.call(app.state.slack.files.prepare, run_id)
     assert not calls and not store.attachments.for_run(run_id, first['id'])
     store.finish_message(run_id, first['id'], '', 'steered')
     store.claim_message(run_id)
-    asyncio.run(app.state.slack.files.prepare(run_id))
+    client.portal.call(app.state.slack.files.prepare, run_id)
     uploads = store.attachments.for_run(run_id, second['id'])
     assert len(uploads) == 1 and uploads[0]['message_id'] == second['id']
     assert uploads[0]['id'] in attachment_context(uploads)
@@ -146,7 +146,7 @@ def test_context_recovers_mention_files_and_only_imports_prior_files_from_invoke
     client.post('/hooks/slack/events', **signed(event(**({'thread_ts': earlier} if threaded else {}))))
     run_id = runs[0]['id']
     app.state.store.claim_message(run_id)
-    asyncio.run(app.state.slack.prepare(run_id))
+    client.portal.call(app.state.slack.prepare, run_id)
     assert calls == [FILE['id'], other_file['id']] if threaded else calls == [FILE['id']]
     source = app.state.store.slack_source(run_id)
     assert 'url_private' not in json.dumps(source)
@@ -167,7 +167,7 @@ def test_failed_slack_images_are_explicit_and_never_become_model_images(slack_ap
     client.post('/hooks/slack/events', **signed(event(files=[FILE])))
     run_id = runs[0]['id']
     app.state.store.claim_message(run_id)
-    asyncio.run(app.state.slack.files.prepare(run_id))
+    client.portal.call(app.state.slack.files.prepare, run_id)
     message = app.state.store.messages(run_id)[0]
     assert not message['attachments']
     assert error in message['content'] and 'Do not guess the missing content' in message['content']
@@ -175,13 +175,13 @@ def test_failed_slack_images_are_explicit_and_never_become_model_images(slack_ap
 
 
 def test_slack_image_actual_download_limit_and_connection_changes(slack_app, monkeypatch):
-    app, *_ = slack_app
+    app, client, *_ = slack_app
     provider(app, monkeypatch, raw=b'x' * 32, metadata={'size': 1})
     monkeypatch.setattr('app.slack_files.MAX_FILE', 16)
     with pytest.raises(ValueError, match='download limit'):
-        asyncio.run(app.state.slack.files.read(FILE['id'], 'T12345678'))
+        client.portal.call(app.state.slack.files.read, FILE['id'], 'T12345678')
     with pytest.raises(ValueError, match='access changed'):
-        asyncio.run(app.state.slack.files.read(FILE['id'], 'T87654321'))
+        client.portal.call(app.state.slack.files.read, FILE['id'], 'T87654321')
 
 
 @pytest.mark.parametrize('scopes', ['', 'reactions:write'])
@@ -196,7 +196,7 @@ def test_slack_images_check_live_access_when_saved_scopes_are_stale(slack_app, m
     client.post('/hooks/slack/events', **signed(event(files=[FILE])))
     run_id = runs[0]['id']
     app.state.store.claim_message(run_id)
-    asyncio.run(app.state.slack.files.prepare(run_id))
+    client.portal.call(app.state.slack.files.prepare, run_id)
     message = app.state.store.messages(run_id)[0]
     assert calls == [FILE['id']]
     assert message['attachments'][0]['preview_url']
@@ -230,7 +230,7 @@ def test_slack_file_access_errors_come_from_live_api(slack_app, monkeypatch, sav
     monkeypatch.setattr(app.state.connectors, 'request',
                         Connectors.request.__get__(app.state.connectors))
     gateway(monkeypatch, transport)
-    asyncio.run(app.state.slack.files.prepare(run_id))
+    client.portal.call(app.state.slack.files.prepare, run_id)
     message = app.state.store.messages(run_id)[0]
     assert calls == [FILE['id']]
     assert not message['attachments'] and expected in message['content']
@@ -243,7 +243,7 @@ def test_slack_file_access_errors_come_from_live_api(slack_app, monkeypatch, sav
 @pytest.mark.parametrize('change', ['paused', 'team_changed'])
 @pytest.mark.parametrize('during_read', [False, True])
 def test_live_file_scope_check_preserves_connection_guards(slack_app, monkeypatch, change, during_read):
-    app, *_ = slack_app
+    app, client, *_ = slack_app
     calls, _ = provider(app, monkeypatch)
     original = app.state.connectors.request
 
@@ -266,5 +266,68 @@ def test_live_file_scope_check_preserves_connection_guards(slack_app, monkeypatc
     else:
         revoke()
     with pytest.raises(ValueError, match='Slack access changed'):
-        asyncio.run(app.state.slack.files.read(FILE['id'], 'T12345678'))
+        client.portal.call(app.state.slack.files.read, FILE['id'], 'T12345678')
     assert calls == ([FILE['id']] if during_read else [])
+
+
+
+@pytest.mark.parametrize('from_context', [False, True])
+@pytest.mark.parametrize('remote', [False, True])
+def test_slack_eight_file_budget_keeps_mention_priority_and_deduplicates(slack_app, monkeypatch, from_context, remote):
+    app, client, runs, _ = slack_app
+    if remote:
+        app.state.store.objects = MemoryObjects()
+    files = [{**FILE, 'id': f'F{i:08d}'} for i in range(1, 10)]
+    earlier = '1790718000.123456'
+    history = [
+        {'ts': earlier, 'text': 'Earlier files', 'user': 'U12345678', 'files': files},
+        {'ts': ROOT, 'thread_ts': earlier, 'text': 'Inspect this', 'user': 'U12345678', 'files': [files[-1]]},
+    ]
+    calls, _ = provider(app, monkeypatch, history=history)
+    payload = event(thread_ts=earlier, files=[] if from_context else [files[-1], *files])
+    assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
+    run_id = runs[0]['id']
+    app.state.store.claim_message(run_id)
+    # Connector locks are shared with live Slack pollers on the app loop.
+    client.portal.call(app.state.slack.prepare, run_id)
+    assert app.state.store.slack_source(run_id)['context_status'] == 'ready'
+    assert calls == [files[-1]['id'], *[file['id'] for file in files[:7]]]
+    assert len(app.state.store.messages(run_id)[0]['attachments']) == 8
+
+@pytest.mark.parametrize('change', ['paused', 'team_changed'])
+@pytest.mark.parametrize('recovered', [False, True])
+def test_slack_scope_is_rechecked_when_publishing_remote_uploads(slack_app, monkeypatch, change, recovered):
+    app, client, runs, _ = slack_app
+    provider(app, monkeypatch)
+    store = app.state.store
+    store.objects = backend = MemoryObjects()
+    client.post('/hooks/slack/events', **signed(event(files=[FILE])))
+    run_id = runs[0]['id']
+    store.claim_message(run_id)
+    def revoke():
+        if change == 'paused':
+            store.execute("INSERT INTO connection_policies(provider,enabled) VALUES('slack',0) "
+                          "ON CONFLICT(provider) DO UPDATE SET enabled=0")
+        else:
+            app.state.connectors.save('slack', {'kind': 'oauth', 'bot': {
+                'access_token': 'replacement-token', 'team': {'id': 'T87654321'},
+                'bot_user_id': 'U99999999', 'scope': 'files:read'}}, 'Other team')
+    original_put = backend.put
+    def revoke_after_upload(raw):
+        reference = original_put(raw)
+        revoke()
+        return reference
+    if recovered:
+        client.portal.call(app.state.slack.files.prepare, run_id)
+        # Model the saved draft left by cancellation before batch publication.
+        store.execute('UPDATE attachments SET message_id=NULL')
+        store.execute("UPDATE slack_audio_inputs SET status='pending'")
+        revoke()
+    else:
+        monkeypatch.setattr(backend, 'put', revoke_after_upload)
+    client.portal.call(app.state.slack.files.prepare, run_id)
+    message = store.messages(run_id)[0]
+    assert not message['attachments']
+    assert 'Slack access changed' in message['content']
+    assert all(row['message_id'] is None for row in store.rows('SELECT message_id FROM attachments'))
+

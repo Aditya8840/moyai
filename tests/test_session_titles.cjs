@@ -1,7 +1,7 @@
 const assert=require('node:assert/strict');
 const {readFileSync}=require('node:fs');
 const {test}=require('node:test');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 const script=readFileSync('app/static/app.js','utf8');
 const slice=(start,end)=>script.slice(script.indexOf(start),script.indexOf(end));
 function harness(){
@@ -66,12 +66,13 @@ test('sidebar escapes titles and exposes real status, timestamps, repository, se
 
 test('active states use an icon by the title with no visible status text next to the timestamp',()=>{
   const {context:h}=harness();
-  for(const status of ['running','queued','provisioning','reconnecting','saving','waiting_children','stopping'])for(const child of [false,true]){
+  for(const status of ['running','queued','provisioning','reconnecting','saving','waiting_children','stopping','deleting'])for(const child of [false,true]){
     const row=h.sidebarRow({id:'parent',prompt:'Task',status,updated_at:'2026-10-06T12:00:00Z'},child);
     assert.match(row,/session-title-row.*session-spinner.*session-link-meta/);
     assert.match(row,/2m ago/);
     assert.doesNotMatch(row,/session-state|session-dot|session-completion/);
-    assert.doesNotMatch(row.replace(/<[^>]*>/g,''),/Working|Queued|Starting|Saving|Stopping|Reconnecting/);
+    assert.doesNotMatch(row.replace(/<[^>]*>/g,''),/Working|Queued|Starting|Saving|Stopping|Reconnecting|Deleting/);
+    if(status==='deleting')assert.match(row,/title="Deleting"/);
   }
   for(const status of ['idle','completed','failed','cancelled','interrupted','waiting_credential','awaiting_approval','unknown']){
     const row=h.sidebarRow({id:'parent',status});
@@ -181,7 +182,7 @@ test('side-chat titles and menu search refresh without replacing tabs or drafts'
   const nodes=new Map(),q=selector=>{if(!nodes.has(selector))nodes.set(selector,{value:'',hidden:false,querySelectorAll:()=>[]});return nodes.get(selector);};
   let draws=0,saves=0;
   Object.assign(h,{tabs:new Map([['side',tab]]),sideChats:[{id:'side',prompt:'original typo serch',display_title:'Old'}],disposed:false,titleFor:h.sessionTitle,matchesSession:h.sessionMatches,run:{},q,draw:()=>draws++,save:()=>saves++});
-  vm.runInContext(panel.slice(panel.indexOf('function renderMenuItems(items)'),panel.indexOf('initial.tabs.forEach'))+panel.slice(panel.indexOf('drawMenu=function()'),panel.indexOf("q('.panel-menu input').oninput=drawMenu;",panel.indexOf('drawMenu=function()'))),h);
+  vm.runInContext(panel.slice(panel.indexOf('function renderMenuItems(items)'),panel.indexOf('initial.tabs.forEach'))+panel.slice(panel.indexOf('function drawMenu()'),panel.indexOf("q('.panel-menu input').oninput=drawMenu;")),h);
   h.syncTitles([{id:'side',display_title:'Readable side title'}]);
   assert.equal(tab.title,'Readable side title');assert.equal(tab.draft,'Keep this draft');assert.equal(h.tabs.get('side'),tab);assert.equal(draws,1);assert.equal(saves,1);
   for(const term of ['serch','Readable']){q('.panel-menu input').value=term;h.drawMenu();assert.match(q('[data-menu-items]').innerHTML,/Readable side title/);}

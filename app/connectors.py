@@ -23,6 +23,19 @@ class Search(Args):
     query: str = Field(min_length=1, max_length=500)
 
 
+def slack_search_query(query: str) -> str:
+    """Use Slack's channel mention syntax for bare channel-ID filters.
+
+    Preserve quoted search text, including an unfinished quote, and leave all
+    other filters intact. No channel lookup or broader retry is needed.
+    """
+    return re.sub(
+        r'"(?:\\.|[^"\\])*(?:"|$)|(?<!\S)(-?in:)#?([CG][A-Z0-9]{7,30})(?=\s|$)',
+        lambda match: f'{match[1]}<#{match[2]}>' if match[1] else match[0],
+        query,
+    )
+
+
 LinearIssueId = Annotated[str, Field(pattern=r"^(?:[A-Za-z][A-Za-z0-9]*-\d+|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$")]
 
 
@@ -52,7 +65,7 @@ class SlackThread(Args):
 
 
 class SlackSend(Args):
-    channel: str = Field(pattern=r"^[CDGUW][A-Z0-9]{7,30}$", description="Channel/conversation ID, or a recipient's Slack user ID (U…/W…) to open a DM from the Moyai bot. Do not reuse another person's DM ID.")
+    channel: str = Field(pattern=r"^(?:me|[CDGUW][A-Z0-9]{7,30})$", description="Use 'me' to DM the authenticated requester (the owner in an automation run), resolved through their verified Slack/Google account. Otherwise use a channel/conversation or Slack user ID. Do not reuse another person's DM ID.")
     text: str = Field(min_length=1, max_length=10000, description="Message body only. The server adds the requesting person's name as 'Name: message'; do not add a sender prefix yourself.")
 
 
@@ -73,13 +86,25 @@ TOOLS = {
     "linear_comment": ("linear", True, LinearComment, "Add a comment to a Linear issue directly. No administrator approval step is required."),
     "linear_create_issue": ("linear", True, LinearCreateIssue, "Create a Linear ticket with title and Markdown description directly when the user requests it. Optionally set parent_id to create a sub-issue. To reparent an existing ticket, use linear_update_issue instead; do not create a replacement or substitute cross-links. Include relevant source links. No administrator approval step is required; do not retry an uncertain creation automatically. The connected Linear credential needs Create issues permission."),
     "linear_update_issue": ("linear", True, LinearUpdateIssue, "Update an existing Linear ticket's parent using parent_id; explicit null removes its parent. Accepts issue identifiers or UUIDs. Use for sub-issue reparenting without creating new tickets or substituting cross-links. No administrator approval step is required. The connected credential needs issue-update permission. Verify with linear_issue before retrying an uncertain update."),
-    "slack_search": ("slack", False, Search, "Search Slack messages visible to the connected account. Returns at most 20 matches."),
+    "slack_search": ("slack", False, Search, "Search Slack messages visible to the connected account. Use in:channel-name or in:<#CHANNEL_ID> to scope a search; bare in:CHANNEL_ID is normalized automatically. Returns at most 20 matches."),
     "slack_thread": ("slack", False, SlackThread, "Read up to 50 messages in a Slack thread; has_more indicates truncation. To verify a bot DM sent with slack_send, use as_bot=true and the returned channel and ts as thread_ts."),
-    "slack_send": ("slack", True, SlackSend, "Send a Slack message as the Moyai app, never as the shared connection owner. The server prefixes the body with the current requester's profile name: 'Name: message'. For a DM, pass the recipient's Slack user ID as channel; the server opens the bot's own DM. Requires the installed bot; never falls back to a user token. No administrator approval step is required."),
+    "slack_me": ("slack", False, Args, "Resolve the authenticated requester's verified Slack user ID, workspace, work email and name. Use when asked who the current user is or for their Slack recipient ID, including the owner of an automation run. No email or user ID argument is needed. Never infer the requester from the shared connection owner or a triggering message."),
+    "slack_send": ("slack", True, SlackSend, "Send a Slack message as the Moyai app, prefixed with the current requester's name. For 'DM me' use channel='me'; the server resolves the requester's verified account and opens the bot's DM. Save channel='me' in automations that notify their owner. For an explicitly named other recipient, pass their Slack user ID. Requires the installed bot; never falls back to a user token. No administrator approval step is required."),
     "notion_search": ("notion", False, Search, "Search Notion page titles visible to the connected integration (not full-text content)."),
     "notion_page": ("notion", False, NotionPage, "Read a Notion page's first 100 top-level blocks. Nested blocks are indicated, not expanded."),
     "notion_append": ("notion", True, NotionAppend, "Append a paragraph to a Notion page directly. No administrator approval step is required."),
 }
+
+# Explicit broker-request replay contract, separate from connection write policy.
+# Metadata/identity caches may refresh; no action or context selection is replayed.
+# github_checkout here only resolves metadata, before the sandbox changes files.
+RETRY_SAFE_READS = frozenset({
+    'github_rulesets', 'github_ruleset', 'github_repositories', 'github_repository',
+    'github_checkout', 'github_pull_request', 'github_pull_request_comments',
+    'github_ci_checks', 'github_workflow_runs', 'github_workflow_jobs', 'github_job_logs',
+    'linear_my_issues', 'linear_teams', 'linear_search', 'linear_issue',
+    'slack_search', 'slack_thread', 'slack_me', 'notion_search', 'notion_page',
+})
 
 
 class Connectors:
@@ -87,6 +112,7 @@ class Connectors:
         self.store, self.security, self.settings = store, security, settings
         self.locks = {provider: asyncio.Lock() for provider in ("linear", "slack", "notion", "github")}
         self.github = GitHub(store, security, settings, self)
+        self.slack_identities = None
 
     def configured_oauth(self, provider):
         if provider == 'github':
@@ -225,7 +251,7 @@ class Connectors:
         rows = self.store.rows("""SELECT COALESCE(linked.email,u.email) AS email,
             COALESCE(linked.kind,u.kind) AS kind FROM users u
             LEFT JOIN users linked ON linked.id=u.linked_user_id WHERE u.id=?""", (user_id,))
-        if not rows or rows[0]['kind'] != 'google' or not rows[0]['email']:
+        if not rows or rows[0]['kind'] not in {'google', 'cloudflare'} or not rows[0]['email']:
             raise ConnectorError('Sign in with Google or link your Slack identity before using My Linear tickets.')
         if rows[0]['email'].rpartition('@')[2] not in self.settings.google_domains():
             raise ConnectorError('Your work email is no longer allowed in this workspace.')
@@ -257,6 +283,8 @@ class Connectors:
             raise ConnectorError("This operation is disabled by your organization's connection policy.")
         if name == 'slack_send':
             return await self.slack_send(args, run)
+        if name == 'slack_me':
+            return await self.slack_identities.requester(run)
         if name == 'slack_thread' and args['as_bot']:
             headers = {'Authorization': f'Bearer {await self.slack_bot_token()}'}
             if args['channel'].startswith('D') and 'im:history' not in self.slack_installation().get('scopes', []):
@@ -315,7 +343,7 @@ class Connectors:
             return data
         if provider == "slack":
             endpoint, method, payload = {
-                "slack_search": ("search.messages", "GET", {"query": args.get("query"), "count": 20, "highlight": False}),
+                "slack_search": ("search.messages", "GET", {"query": slack_search_query(args.get("query", "")), "count": 20, "highlight": False}),
                 "slack_thread": ("conversations.replies", "GET", {"channel": args.get("channel"), "ts": args.get("thread_ts"), "limit": 50}),
             }[name]
             return await self.request(method, f"https://slack.com/api/{endpoint}", headers=headers, **({"params": payload} if method == "GET" else {"json": payload}))
@@ -333,7 +361,7 @@ class Connectors:
         if not actor and run and not run.get('chat_enabled'):
             actor = run.get('owner_id')
         rows = self.store.rows('SELECT name,email,kind FROM users WHERE id=?', (actor,)) if actor else []
-        if not rows or rows[0]['kind'] not in {'google', 'slack'}:
+        if not rows or rows[0]['kind'] not in {'google', 'cloudflare', 'slack'}:
             raise ConnectorError('Slack sends require an identified requester. Sign in with Google or send from your Slack account.')
         label = ' '.join((rows[0]['name'] or rows[0]['email']).split())[:160]
         if not label:
@@ -342,11 +370,15 @@ class Connectors:
 
     async def slack_send(self, args, run):
         text = f"{self.slack_sender_name(run)}: {args['text']}"
+        installation = self.slack_installation()
+        identity = await self.slack_identities.requester(run) if args['channel'] == 'me' else None
         # Sending must not load or refresh the shared search user's credential.
         # Slack DMs belong to their participants: resolve the recipient as the bot.
         headers = {'Authorization': f'Bearer {await self.slack_bot_token()}'}
         scopes = set(self.slack_installation().get('scopes', []))
-        channel = args['channel']
+        channel = identity['user_id'] if identity else args['channel']
+        if identity:
+            self.slack_identities.check_requester(run, installation)
         if 'chat:write' not in scopes:
             raise ConnectorError('Reconnect Slack with the Moyai bot chat:write permission to send messages.')
         if not self.allowed('slack_send'):
@@ -359,6 +391,11 @@ class Connectors:
             channel = (result.get('channel') or {}).get('id')
             if not isinstance(channel, str) or not re.fullmatch(r'D[A-Z0-9]{7,30}', channel):
                 raise ConnectorError('Slack did not return a bot DM conversation. No message was sent.')
+        if identity:
+            self.slack_identities.check_requester(run, installation)
+            if await self.slack_identities.requester(run) != identity:
+                raise ConnectorError('Your Slack recipient changed. Resolve your identity again before sending.')
+            self.slack_identities.check_requester(run, installation)
         if not self.allowed('slack_send'):
             raise ConnectorError("This operation is disabled by your organization's connection policy.")
         return await self.request('POST', 'https://slack.com/api/chat.postMessage', headers=headers,

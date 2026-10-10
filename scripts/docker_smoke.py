@@ -132,6 +132,11 @@ def main():
               "-e", "PORT=12345", "-e", "RENDER_MIGRATION_STAGE=false", "-e", "BOOTSTRAP_MODAL_VOLUME=")
         healthy(name)
         log("PASS: /health returns HTTP 200 on PORT=12345 using the Render origin.")
+        for operation in ("from app.db import Store; Store", "from app.storage_maintenance import plan; plan"):
+            root_access = docker("exec", "--user", "0", name, python, "-c",
+                                 "from pathlib import Path; " + operation + "(Path('/var/data/moyai'))", check=False)
+            assert root_access.returncode != 0 and "Database access requires UID 10001" in root_access.stderr
+        log("PASS: root maintenance is rejected before opening the live private database.")
         log(docker("exec", "--user", "10001:10001", name, python, "-c", VERIFY).stdout.strip())
         docker("stop", "--time", "30", name)
         assert docker("inspect", "-f", "{{.State.ExitCode}}", name).stdout.strip() == "0"
@@ -142,6 +147,20 @@ def main():
                "assert db.execute('SELECT summary FROM runs').fetchone()[0] == 'write-after-migration'")
         log(docker("exec", "--user", "10001:10001", name, python, "-c", VERIFY).stdout.strip())
         log("PASS: graceful stop and restart preserve the same database and credentials.")
+        docker("stop", "--time", "30", name)
+
+        name = prefix + "-private"
+        start(name, volume, "-e", "RENDER_SERVICE_ID=srv-private-demo",
+              "-e", "MOYAI_PUBLIC_URL=https://private.example", "-e", "RENDER_MIGRATION_STAGE=false",
+              "-e", "CLOUDFLARE_ACCESS_TEAM_DOMAIN=demo.cloudflareaccess.com",
+              "-e", "CLOUDFLARE_ACCESS_AUDIENCE=employee", "-e", "CLOUDFLARE_ACCESS_BROKER_AUDIENCE=broker")
+        healthy(name)
+        docker("exec", "--user", "10001:10001", name, python, "-c",
+               "import httpx; r=httpx.get('http://127.0.0.1:10000/api/credentials', headers={'Host':'private.example'}); "
+               "assert r.status_code == 401 and 'Cloudflare Access' in r.text")
+        log(docker("exec", "--user", "10001:10001", name, python, "-c", VERIFY).stdout.strip())
+        log("PASS: private Render startup uses its custom origin, preserves data, and blocks anonymous access.")
+        docker("stop", "--time", "30", name)
 
         empty = prefix + "-empty"
         volumes.append(empty)

@@ -1,13 +1,16 @@
 /* One private desktop and control lease, shared with the sandbox's agent. */
 window.MoyaiComputer = {
-  create({api, escape:esc, onCapture}) {
+  create({api, escape:esc, onCaptures}) {
     let dialog, runId, timer, leaseTimer, inputTimer, compositionTimer, current;
-    let busy=false, changingControl=false, active=false, composing=false, version=0, revision=0;
-    let queue=[], pointer=null, inputError='', releasing=Promise.resolve(), pending=Promise.resolve();
+    let busy=false, inputInFlight=false, polling=null, changingControl=false, active=false, composing=false, closing=false, browserTab='', version=0, revision=0;
+    let queue=[], pointer=null, inputError='', wakeError='', releasing=Promise.resolve(), pending=Promise.resolve();
     const q=selector=>dialog.querySelector(selector);
-    const own=()=>!!(current?.controller && current.controller===current.actor);
-    const legacy=()=>current?.available && current.surface!=='desktop';
-    const canInput=()=>active && own() && current?.available && current.surface==='desktop' && !inputError && !changingControl;
+    const own=()=>!!(current?.controller && current.controller===current.actor && (current.controller_tab||'')===browserTab);
+    const surface=()=>browserTab?'browser':'desktop';
+    const legacy=()=>current?.available && current.surface!==surface();
+    const canInput=()=>active && own() && current?.available && !current.shutting_down && current.surface===surface() && !inputError && !changingControl && !closing;
+    const canClaimOnClick=()=>active && current?.has_sandbox && current.available && current.frame && !current.controller &&
+      current.surface===surface() && !current.waking && !current.shutting_down && !inputError && !busy && !changingControl && !closing;
     // The proxy also bounds JSON after Python's ASCII escaping and whitespace.
     const inputSize=events=>JSON.stringify({events}).replace(/[^\x00-\x7f]/g,'xxxxxx').length+events.length*16;
 
@@ -17,53 +20,71 @@ window.MoyaiComputer = {
       if(dialog)q('[data-keyboard]').value='';
     }
     function close(){
-      const wasActive=active, id=runId;
+      const wasActive=active, id=runId, tab=browserTab;
       active=false;version++;revision++;discardInput();clearTimeout(timer);clearInterval(leaseTimer);
       if(wasActive)releasing=Promise.all([releasing,pending]).then(()=>api(`/api/runs/${id}/computer`,{
-        method:'POST',body:JSON.stringify({action:'release'})
+        method:'POST',body:JSON.stringify({action:'release',tab})
       })).catch(()=>{});
       dialog?.querySelectorAll('video').forEach(video=>video.pause());
-      dialog?.remove();dialog=null;current=null;busy=false;changingControl=false;inputError='';
+      dialog?.remove();dialog=null;current=null;busy=false;inputInFlight=false;polling=null;changingControl=false;closing=false;inputError='';wakeError='';
     }
     function render(data){
-      const controlled=own();current=data;
-      if(controlled&&(!own()||!data.available||data.surface!=='desktop'))discardInput();
-      q('[data-status]').textContent=data.recording?'● Recording':data.available?'Live desktop':'Workspace computer';
+      const controlled=own()&&current?.available&&!current.shutting_down&&current.surface===surface();
+      if(browserTab&&(data.tab!==browserTab||(data.available&&data.surface!=='browser'))){
+        data={available:false,has_sandbox:false,notice:'This workspace needs an updated browser. Open the PR in GitHub until the workspace browser restarts.'};
+      }
+      // Input acknowledgements carry control state; only frame reads carry pixels.
+      // An older guest may still attach a frame to its delayed acknowledgement.
+      if(data.available&&current?.available&&data.surface===current.surface&&(data.tab||'')===(current.tab||'')&&
+          (!('frame' in data)||(data.frame&&data.frame_at&&current.frame_at&&data.frame_at<current.frame_at))){
+        data={...data,frame:current.frame,frame_at:current.frame_at};
+      }
+      current=data;
+      if(controlled&&(!own()||!data.available||data.shutting_down||data.surface!==surface())){
+        revision++;discardInput();
+        if(!changingControl&&!closing)inputError='Control changed. Check the desktop, then take or resume control.';
+      }
+      if(browserTab)q('[data-address]').textContent=data.url||browserTab;
+      const starting=data.starting&&!data.has_sandbox;
+      q('[data-status]').textContent=data.shutting_down?'Shutting down…':data.waking?'Waking up…':starting?'Starting workspace…':data.recording?'● Recording':data.available?(browserTab?'Live browser':'Live desktop'):(browserTab?'Workspace browser':'Workspace computer');
       q('[data-status]').classList.toggle('recording',!!data.recording);
       q('[data-screen]').hidden=!data.frame;
       q('[data-empty]').hidden=!!data.frame;
-      if(data.frame)q('[data-screen]').src='data:image/jpeg;base64,'+data.frame;
+      if(data.frame&&q('[data-screen]').src!=='data:image/jpeg;base64,'+data.frame)q('[data-screen]').src='data:image/jpeg;base64,'+data.frame;
       q('[data-screen]').classList.toggle('controlled',canInput());
+      q('[data-screen]').alt=`Live ${surface()}. ${canClaimOnClick()?'Click to take control and interact.':'Take control to click and type.'}`;
       q('[data-keyboard]').readOnly=!canInput();
       q('[data-keyboard]').tabIndex=canInput()?0:-1;
-      q('[data-empty-text]').textContent=data.has_sandbox?'Take control to open your desktop and browser.':'This workspace is asleep. Send Moyai a message to start it again.';
-      q('[data-open]').hidden=!data.has_sandbox||!!data.frame;
-      q('[data-open]').disabled=busy||changingControl||!!(data.controller&&!own());
+      q('[data-empty-text]').textContent=data.waking?'Waking your workspace. Your live computer will appear here.':data.has_sandbox?(browserTab?'Take control to open this pull request in the browser.':'Take control to open your desktop and browser.'):data.notice||data.wake_notice||(data.wake_supported===false?'This workspace is asleep. Enable durable sessions to wake its computer here.':'This workspace is asleep. Wake it up to see it live, then take control to use it.');
+      q('[data-wake]').hidden=!!data.frame||!!data.has_sandbox||(!data.can_wake&&!data.waking);
+      q('[data-wake]').textContent=data.waking?'Waking up…':'Wake up to see live';
+      q('[data-wake]').disabled=busy||changingControl||closing||!!data.waking;
+      q('[data-open]').hidden=!data.has_sandbox||!!data.frame||!!data.waking||!!data.shutting_down;
+      q('[data-open]').disabled=busy||changingControl||closing||!!(data.controller&&!own());
       q('[data-control]').textContent=own()?(inputError?'Resume control':'Release control'):data.controller?'Someone has control':'Take control';
-      q('[data-control]').disabled=changingControl||!data.has_sandbox||!!(data.controller&&!own())||!!legacy();
+      q('[data-control]').disabled=changingControl||closing||!!data.waking||!!data.shutting_down||!data.has_sandbox||!!(data.controller&&!own())||!!legacy();
       q('[data-record]').textContent=data.recording?'■ Stop recording':'● Record flow';
       dialog.querySelectorAll('[data-action]').forEach(button=>button.disabled=busy||changingControl||!canInput()||!data.available);
-      q('[data-notice]').textContent=legacy()?'Restart this workspace to enable desktop control. This browser is running an older version.':inputError||data.notice||(own()?
-        'You have control. Click and type in the desktop. Ctrl+Alt+Esc returns to these controls.':
-        'Watch Moyai work here. Take control to use the desktop.');
-      const captures=data.captures||[],signature=JSON.stringify(captures);
-      if(q('[data-captures]').dataset.signature!==signature){
-        q('[data-captures]').dataset.signature=signature;
-        q('[data-captures]').innerHTML=captures.length?captures.map(file=>`<article class="computer-capture">${file.kind==='image'?`<a href="${esc(file.inline_url)}" target="_blank" rel="noopener"><img src="${esc(file.inline_url)}" alt="${esc(file.name)}" loading="lazy"></a>`:`<video src="${esc(file.inline_url)}" controls preload="metadata"></video>`}<div><span title="${esc(file.name)}">${esc(file.name)}</span><a href="${esc(file.url)}" download="${esc(file.name)}" aria-label="Download ${esc(file.name)}">↓ Download</a></div></article>`).join(''):'<p class="computer-no-captures">Screenshots and recordings will appear here.</p>';
-      }
+      q('[data-notice]').textContent=legacy()?'Restart this workspace to enable desktop control. This browser is running an older version.':wakeError||data.wake_error||inputError||data.notice||((data.shutting_down||!data.has_sandbox)&&data.wake_notice)||(own()?
+        `You have control. Click and type in the ${surface()}. Ctrl+Alt+Esc returns to these controls.`:
+        data.controller?'Someone else has control. You can watch here.':canClaimOnClick()?`Click inside the ${surface()} to take control and interact.`:
+        browserTab?'Take control to use this pull request’s browser.':'Watch Moyai work here. Take control to use the desktop.');
     }
     async function poll(){
-      clearTimeout(timer);if(!active||document.hidden||busy||changingControl)return;
-      const v=version, r=revision;
-      try{const data=await api(`/api/runs/${runId}/computer`);if(v===version&&r===revision&&active)render(data);}
+      clearTimeout(timer);if(!active||document.hidden||(busy&&!inputInFlight)||changingControl||closing||polling===version)return;
+      const v=version, r=revision, started=performance.now();polling=v;
+      try{const data=await api(`/api/runs/${runId}/computer${browserTab?'?tab='+encodeURIComponent(browserTab):''}`);if(v===version&&r===revision&&active)render(data);}
       catch(error){if(v===version&&r===revision)q('[data-notice]').textContent=error.message;}
-      finally{if(v===version&&active)timer=setTimeout(poll,own()?100:1000);}
+      finally{
+        if(polling===v)polling=null;
+        if(v===version&&active)timer=setTimeout(poll,own()?Math.max(0,50-(performance.now()-started)):1000);
+      }
     }
     function scheduleInput(){
       if(!inputTimer&&queue.length&&canInput()&&!busy)inputTimer=setTimeout(flushInput,20);
     }
     function pauseInput(message){
-      discardInput();inputError=message+' Input stopped. Check the desktop, then resume control.';
+      discardInput();inputError=message+` Input stopped. Check the ${surface()}, then resume control.`;
       if(current)render(current);
     }
     function enqueue(event){
@@ -96,58 +117,65 @@ window.MoyaiComputer = {
       inputTimer=null;
       if(busy||!canInput()||!queue.length)return;
       const events=takeInput();
-      if(events.length)send('input',{events});
+      if(events.length)send('input',{events,...(!browserTab?{frame:false}:{})});
     }
     function send(action,args={}){
-      const v=version, id=runId;
-      busy=true;revision++;clearTimeout(timer);
+      const v=version, id=runId, tab=browserTab, liveInput=action==='input'&&!tab;
+      busy=true;inputInFlight=liveInput;
+      if(!liveInput){revision++;clearTimeout(timer);}
+      const r=revision;
       if(current)render(current);
       const operation=(async()=>{
         try{
-          const data=await api(`/api/runs/${id}/computer`,{method:'POST',body:JSON.stringify({action,args})});
-          if(v!==version||!active)return false;
+          const data=await api(`/api/runs/${id}/computer`,{method:'POST',body:JSON.stringify({action,args,tab})});
+          if(v!==version||(liveInput&&r!==revision)||!active)return false;
           if('available' in data)render(data);
           else if(current)render({...current,captures:data.captures||current.captures});
           return true;
         }catch(error){
-          if(v===version&&active)pauseInput(error.message);
+          if(v===version&&active){if(action==='wake')wakeError=error.message;else pauseInput(error.message);}
           return false;
         }finally{
-          if(v===version&&active){busy=false;if(current)render(current);scheduleInput();timer=setTimeout(poll,own()?100:1000);}
+          if(v===version&&active){
+            busy=false;inputInFlight=false;if(current)render(current);
+            flushInput();
+            if(!liveInput)timer=setTimeout(poll,own()?50:1000);
+          }
         }
       })();
       pending=operation;
       return operation;
     }
     async function command(action,args={}){
-      if(!active||changingControl||(busy&&action!=='release'))return false;
+      if(!active||changingControl||closing||current?.shutting_down||(busy&&action!=='release'))return false;
       const v=version;
+      if(action==='wake'){wakeError='';return send('wake');}
       if(action==='claim'||action==='release'){
         changingControl=true;clearTimeout(inputTimer);inputTimer=null;
         if(action==='claim')discardInput();
         if(current)render(current);
         await pending;
-        if(v!==version||!active)return false;
+        if(v!==version||!active||closing)return false;
         if(action==='release'){
           while(queue.length&&own()&&current.available&&!inputError){
             const events=takeInput();
             if(!events.length)break;
-            await send('input',{events});
-            if(v!==version||!active)return false;
+            await send('input',{events,...(!browserTab?{frame:false}:{})});
+            if(v!==version||!active||closing)return false;
           }
           discardInput();
         }
         if(action==='claim'&&inputError&&own()&&!await send('release')){
           changingControl=false;if(current)render(current);return false;
         }
-        if(v!==version||!active)return false;
+        if(v!==version||!active||closing)return false;
         if(action==='claim')inputError='';
       }
-      if(action==='claim')q('[data-notice]').textContent='Opening your desktop…';
+      if(action==='claim')q('[data-notice]').textContent=browserTab?'Opening the pull request browser…':'Opening your desktop…';
       let succeeded=await send(action,args);
-      if(v!==version||!active)return false;
-      if(succeeded&&action==='claim'&&own()&&!current.available)succeeded=await send('open');
-      if(v!==version||!active)return false;
+      if(v!==version||!active||closing)return false;
+      if(succeeded&&action==='claim'&&own()&&(!current.available||browserTab))succeeded=await send('open');
+      if(v!==version||!active||closing)return false;
       changingControl=false;if(current)render(current);
       if(succeeded&&['claim','open'].includes(action)&&canInput())q('[data-keyboard]').focus({preventScroll:true});
       scheduleInput();
@@ -156,17 +184,22 @@ window.MoyaiComputer = {
     document.addEventListener('visibilitychange',()=>{
       if(!document.hidden&&active)poll();else clearTimeout(timer);
     });
-    async function open(id,host){
+    async function open(id,host,options={}){
       close();runId=id;const opening=++version;await releasing;if(opening!==version)return;
-      busy=false;current=null;active=true;
+      busy=false;current=null;browserTab=options.tab||'';active=true;
       dialog=document.createElement('section');dialog.className='computer-view';dialog.setAttribute('aria-label','Sandbox computer');host.append(dialog);
-      dialog.innerHTML=`<header class="computer-heading"><div><h2>Computer</h2><span data-status>Connecting…</span></div><button type="button" data-control disabled>Take control</button></header>
-        <div class="computer-stage"><img data-screen alt="Live desktop. Take control to click and type." draggable="false" hidden><textarea data-keyboard class="computer-keyboard" aria-label="Desktop keyboard" aria-describedby="computer-input-hint" autocomplete="off" autocapitalize="off" spellcheck="false" tabindex="-1" readonly></textarea><div data-empty class="computer-empty"><span aria-hidden="true">▧</span><h3>Your computer in the cloud</h3><p data-empty-text>Connecting to the workspace…</p><button type="button" data-open hidden>Open desktop</button></div></div>
-        <div class="computer-toolbar"><div><button type="button" data-action="open" disabled>Open browser</button><button type="button" data-action="screenshot" disabled>Screenshot</button><button type="button" data-action="record" data-record disabled>● Record flow</button></div><p id="computer-input-hint" data-notice role="status">Connecting…</p></div>
-        <section class="computer-captures"><div class="computer-captures-heading"><h3>Saved captures</h3><p>Available after the workspace closes · Shared with session viewers</p></div><div data-captures></div><p class="computer-limits">Desktop captures · No audio · Up to 10 minutes or 25 MB per recording · 64 MB of captures per session</p></section>`;
+      const control='<button type="button" data-control disabled>Take control</button>';
+      const controls=browserTab?`<div><a class="computer-github-link" href="${esc(browserTab)}" target="_blank" rel="noopener noreferrer">Open in GitHub ↗</a>${control}</div>`:control;
+      MoyaiUI.render(dialog, `<header class="computer-heading"><div><h2>${browserTab?'Pull request':'Computer'}</h2><span data-status>Connecting…</span></div>${controls}</header>
+        ${browserTab?'<div class="computer-address"><span data-address>Sandbox browser</span></div>':''}
+        <div class="computer-stage"><img data-screen alt="Live ${surface()}. Take control to click and type." draggable="false" hidden><textarea data-keyboard class="computer-keyboard" aria-label="${browserTab?'Browser':'Desktop'} keyboard" aria-describedby="computer-input-hint" autocomplete="off" autocapitalize="off" spellcheck="false" tabindex="-1" readonly></textarea><div data-empty class="computer-empty"><span aria-hidden="true">▧</span><h3>Your ${browserTab?'browser':'computer'} in the cloud</h3><p data-empty-text>Connecting to the workspace…</p><button type="button" data-wake hidden>Wake up to see live</button><button type="button" data-open hidden>Open ${surface()}</button></div></div>
+        <div class="computer-toolbar"><div>${browserTab?'<button type="button" data-action="back" disabled>← Back</button>':'<button type="button" data-action="open" disabled>Open browser</button>'}<button type="button" data-action="screenshot" disabled>Screenshot</button><button type="button" data-action="record" data-record disabled>● Record flow</button></div><button type="button" data-saved-captures>Saved captures</button><p id="computer-input-hint" data-notice role="status">Connecting…</p></div>`);
+      q('[data-saved-captures]').onclick=()=>onCaptures?.();
       q('[data-control]').onclick=()=>{commitText();return command(own()&&!inputError?'release':'claim');};
       q('[data-open]').onclick=()=>command('claim');
-      q('[data-action="open"]').onclick=()=>command('open');
+      q('[data-wake]').onclick=()=>command('wake');
+      if(browserTab)q('[data-action="back"]').onclick=()=>command('back');
+      else q('[data-action="open"]').onclick=()=>command('open');
       q('[data-action="screenshot"]').onclick=()=>command('screenshot',{name:'screenshot'});
       q('[data-record]').onclick=()=>command(current?.recording?'record_stop':'record_start',{name:'flow'});
       const keyboard=q('[data-keyboard]'),screen=q('[data-screen]');
@@ -206,6 +239,17 @@ window.MoyaiComputer = {
         if(!Number.isFinite(x)||!Number.isFinite(y)||(!clamp&&(x<0||y<0||x>=current.width||y>=current.height)))return null;
         return {x:Math.round(Math.max(0,Math.min(current.width-1,x))),y:Math.round(Math.max(0,Math.min(current.height-1,y)))};
       }
+      screen.onclick=async event=>{
+        if(event.button!==0||!canClaimOnClick())return;
+        const point=position(event);if(!point)return;
+        event.preventDefault();
+        const v=version,{width,height}=current;
+        // Wait for the server's lease before forwarding the completed click.
+        // Never replay it after a failed claim, view change or resized desktop.
+        if(!await command('claim')||v!==version||!canInput()||current.width!==width||current.height!==height)return;
+        enqueue({type:'pointer',phase:'down',...point,button:0});
+        enqueue({type:'pointer',phase:'up',...point,button:0});
+      };
       screen.onpointerdown=event=>{
         if(!canInput()||pointer||![0,1,2].includes(event.button))return;
         const point=position(event);if(!point)return;
@@ -233,16 +277,22 @@ window.MoyaiComputer = {
         const scale=event.deltaMode===1?16:event.deltaMode===2?current.height:1;
         enqueue({type:'scroll',dx:Math.round(event.deltaX*scale),dy:Math.round(event.deltaY*scale)});
       },{passive:false});
-      dialog.addEventListener('click',event=>{
-        const link=event.target.closest('.computer-capture a');
-        if(!link||link.hasAttribute('download')||event.metaKey||event.ctrlKey)return;
-        const file=current?.captures?.find(item=>item.inline_url===link.getAttribute('href'));
-        if(file&&onCapture){event.preventDefault();onCapture(file);}
-      });
       await poll();
       if(!active||opening!==version)return;
-      leaseTimer=setInterval(()=>{if(active&&!document.hidden&&own()&&!busy&&!changingControl&&!queue.length&&!inputError)send('claim');},25000);
+      if(options.autoload&&current?.has_sandbox&&!legacy())await command('claim');
+      if(!active||opening!==version)return;
+      leaseTimer=setInterval(()=>{if(!document.hidden&&canInput()&&!busy&&!queue.length)send('claim');},25000);
     }
-    return {open,close};
+    function closeTab(id,tab){
+      const v=version, selected=active&&id===runId&&tab===browserTab;
+      if(selected){closing=true;revision++;discardInput();clearTimeout(timer);if(current)render(current);}
+      const cleanup=Promise.all([releasing,pending]).then(()=>api(`/api/runs/${id}/computer`,{
+        method:'POST',body:JSON.stringify({action:'close_tab',tab})
+      })).finally(()=>{
+        if(selected&&v===version&&active){closing=false;changingControl=false;if(current)render(current);timer=setTimeout(poll,own()?100:1000);}
+      });
+      releasing=cleanup.catch(()=>{});return cleanup;
+    }
+    return {open,close,closeTab};
   }
 };

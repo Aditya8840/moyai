@@ -12,15 +12,38 @@ from fastapi import HTTPException
 from .connectors import ConnectorError
 from .agentchat_slack import connect_agentchat
 from .db import now
-from .slack_chat import SlackChat
+from .slack_chat import SlackChat, USER_MENTION
 from .slack_files import SlackFiles, file_ids as slack_file_ids
 from .slack_credentials import SlackCredentials
+from .slack_feedback import SlackFeedback
+from .slack_references import attachment_reference
+
+
+# Literal examples are context, not recipients. Preserve them in the prompt.
+# re.M anchors quote prefixes; \Z keeps fences open across line endings.
+QUOTED_TEXT = re.compile(r'```[\s\S]*?(?:```|\Z)|`[^`\n]*(?:`|$)|^[ \t]*>>>[\s\S]*|^[ \t]*>[^\n]*', re.M)
+
+
+def routing_text(text: str, mention: str) -> tuple[str, str]:
+    parts, visible = [], []
+    end = 0
+    for match in QUOTED_TEXT.finditer(text):
+        plain = text[end:match.start()]
+        visible.append(plain)
+        parts.extend((plain.replace(mention, ''), match[0]))
+        visible.append('\n')
+        end = match.end()
+    plain = text[end:]
+    visible.append(plain)
+    parts.append(plain.replace(mention, ''))
+    return ''.join(visible), ''.join(parts).strip()
 
 
 class SlackSessions:
-    def __init__(self, store, connectors, manager, checkpoints, settings):
+    def __init__(self, store, connectors, manager, checkpoints, settings, lens_feedback=None):
         self.store, self.connectors, self.manager = store, connectors, manager
         self.checkpoints, self.settings = checkpoints, settings
+        self.lens_feedback = lens_feedback
         self.jobs = set()
         self.identities = None
         self.automation_events = None
@@ -28,6 +51,7 @@ class SlackSessions:
         self.files = SlackFiles(self)
         self.chat = SlackChat(self)
         self.access = SlackCredentials(self)
+        self.feedback = SlackFeedback(self, lens_feedback)
         self.agentchat, self.channel = connect_agentchat(self)
 
     def status(self):
@@ -104,13 +128,26 @@ class SlackSessions:
                 and Decimal(thread_ts) <= Decimal(mention_ts)):
             raise HTTPException(400, "Invalid Slack event fields.")
         mention = f"<@{bot.get('user_id')}>"
-        # A mention can be the subject of a question to somebody else:
-        # "@OtherAgent what is @Moyai?" must not wake both agents.
-        addressed = re.match(r'^\s*((?:<@[UW][A-Z0-9]{7,30}>[,:]?\s*)+)', text)
-        if addressed and mention not in addressed[1]:
-            return {'ok': True}
-        prompt = text.replace(mention, "").strip()
+        visible, prompt = routing_text(text, mention)
+        bound_thread = (not channel.startswith('D') and self.settings.slack_thread_chat_enabled
+                        and self.store.rows('SELECT 1 FROM slack_threads WHERE team_id=? AND channel=? AND thread_ts=?',
+                                            (bot['team_id'], channel, thread_ts)))
+        if bound_thread:
+            # Existing conversations accept ordinary replies. Tagging another
+            # person opts out unless Moyai is also mentioned in authored text.
+            if mention not in visible and USER_MENTION.search(visible):
+                return {'ok': True}
+        else:
+            # New conversations still need an invitation, not a mention used
+            # as the subject of a question addressed to somebody else.
+            addressed = re.match(r'^\s*(?:(?i:hey|hi|hello)[,:]?\s+)?((?:<@[UW][A-Z0-9]{7,30}>[,:]?\s*)+)',
+                                 visible.translate(str.maketrans('', '', '*_~')))
+            if addressed and mention not in addressed[1]:
+                return {'ok': True}
         file_ids = slack_file_ids(event.get('files'))
+        reference, _ = attachment_reference(event)
+        if not prompt and reference:
+            prompt = 'Please respond to the quoted Slack attachment.'
         if not prompt and not file_ids:
             return {"ok": True}
         if file_ids and not prompt:
@@ -121,17 +158,17 @@ class SlackSessions:
         if channel.startswith('D') and (not direct_message or not self.settings.slack_dm_enabled or not self.settings.slack_thread_chat_enabled):
             return {'ok': True}
         await self.channel.handle_validated_event(team=bot['team_id'], event_id=event_id, channel=channel,
-            ts=mention_ts, root=thread_ts, user=user, prompt=prompt, mentioned=mention in text,
-            direct_message=direct_message, missing_cloud=missing_cloud, file_ids=file_ids)
+            ts=mention_ts, root=thread_ts, user=user, prompt=prompt, mentioned=mention in visible,
+            direct_message=direct_message, missing_cloud=missing_cloud, file_ids=file_ids, reference=reference)
         return {'ok': True}
 
     async def accept_message(self, *, team, event_id, channel, ts, root, user, prompt,
-                             mentioned, direct_message, missing_cloud, file_ids=()):
+                             mentioned, direct_message, missing_cloud, file_ids=(), reference=''):
         if self.settings.slack_thread_chat_enabled:
             try:
                 run = self.chat.accept(team=team, event_id=event_id, channel=channel, ts=ts,
                                        root=root, user=user, prompt=prompt, mentioned=mentioned,
-                                       direct_message=direct_message, missing_cloud=missing_cloud, file_ids=file_ids)
+                                       direct_message=direct_message, missing_cloud=missing_cloud, file_ids=file_ids, reference=reference)
             except ValueError as exc:
                 raise HTTPException(503, str(exc))
             await self.checkpoints.flush()
@@ -140,7 +177,7 @@ class SlackSessions:
             if run:
                 self.manager.submit(run)
                 if self.session_titles:
-                    self.session_titles.schedule(run['id'])
+                    await self.session_titles.request(run['id'])
             return
         if not mentioned or len(prompt) < 3:
             return
@@ -148,8 +185,8 @@ class SlackSessions:
             raise HTTPException(503, 'Cloud sessions are not configured.')
         plugins = [x['id'] for x in self.connectors.list() if x['connected'] and x['enabled']]
         try:
-            run = self.store.create_slack_run(event_id, prompt, plugins, channel, root, user, ts, team, file_ids=file_ids,
-                                            harness=self.settings.agent_harness, model=self.settings.harness_model(self.settings.agent_harness))
+            run = self.store.create_slack_run(event_id, prompt + reference, plugins, channel, root, user, ts, team, file_ids=file_ids,
+                                            harness=self.settings.default_harness(), model=self.settings.resolve_model())
         except ValueError:
             raise HTTPException(503, 'The session queue is full.')
         if run:
@@ -159,7 +196,7 @@ class SlackSessions:
             self.manager.submit(run)
             self.submit_reply(run['id'])
             if self.session_titles:
-                self.session_titles.schedule(run['id'])
+                await self.session_titles.request(run['id'])
 
     async def prepare(self, run_id):
         await self.prepare_source(run_id)
@@ -248,8 +285,11 @@ class SlackSessions:
                     continue
                 if ts != source["thread_ts"] and item.get("thread_ts") != source["thread_ts"]:
                     continue
-                text = item.get("text") or "[Message has no text]"
-                clipped = len(text) > 3000
+                text = item.get("text")
+                text = text if isinstance(text, str) else ""
+                reference, clipped = attachment_reference(item)
+                text = text + reference or "[Message has no text]"
+                clipped = clipped or len(text) > 3000
                 messages[ts] = {"ts": ts, "user": item.get("user") or item.get("bot_id") or "unknown",
                                 "text": text[:3000], "text_truncated": clipped,
                                 "has_attachments": bool(item.get("files") or item.get("attachments")),
@@ -280,7 +320,7 @@ class SlackSessions:
         if not root:
             warnings.append("The thread's root message was not returned.")
         if any(m["has_attachments"] for m in selected):
-            warnings.append("Attached files are available only when listed under USER ATTACHMENTS; other files and rich attachments were not read.")
+            warnings.append("Attached files are available only when listed under USER ATTACHMENTS; embedded attachment text is quoted when available; attachment media and linked source messages were not fetched.")
         return {"messages": selected, "truncated": truncated, "warning": " ".join(warnings)}
 
     def submit_reply(self, run_id):

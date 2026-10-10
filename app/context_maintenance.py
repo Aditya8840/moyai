@@ -63,22 +63,28 @@ class ContextMaintenance:
         # One row bounds retained work per session. BEGIN IMMEDIATE is the
         # storage admission owner, including simultaneous/retried submissions.
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             current = conn.execute('SELECT operation_id,status FROM context_jobs WHERE run_id=?', (run_id,)).fetchone()
             if current and (current['operation_id'] != ack or current['status'] == 'running'):
                 return self.read(run_id)
             conn.execute('''INSERT INTO context_jobs(run_id,operation_id,snapshot,result,status) VALUES(?,?,?,'null','running')
                 ON CONFLICT(run_id) DO UPDATE SET operation_id=excluded.operation_id,
                 snapshot=excluded.snapshot,result='null',status='running' ''', (run_id, operation_id, serialized))
-        await self.gateway.checkpoints.flush()
-        task = self.gateway.model_slots.run_maintenance(self.generate(run_id, operation_id, snapshot, request, run))
-        self.tasks[operation_id] = task
-
         def settled(done):
             self.tasks.pop(operation_id, None)
-            # Also handles cancellation before generate() entered its try block.
+            # Covers failed admission and cancellation before generate() starts.
             self.store.execute("UPDATE context_jobs SET status='interrupted' WHERE run_id=? AND operation_id=? AND status='running'",
                                (run_id, operation_id))
+
+        try:
+            await self.gateway.checkpoints.flush()
+            task = self.gateway.model_slots.run_maintenance(self.generate(run_id, operation_id, snapshot, request, run))
+        except BaseException:
+            # A failed flush/cancel must not strand a durable running row. The
+            # next exchange can acknowledge and retry without restarting us.
+            settled(None)
+            raise
+        self.tasks[operation_id] = task
         task.add_done_callback(settled)
         return self.read(run_id)
 

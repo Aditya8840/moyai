@@ -3,7 +3,6 @@ import asyncio
 import hmac
 import json
 import re
-import sqlite3
 from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
@@ -12,6 +11,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, model_validator
 
+from .database import Connection, DatabaseRow
 from .db import now
 from .identities import PROFILE_MAX_AGE_SECONDS
 
@@ -98,12 +98,20 @@ class CredentialInput(Arguments):
         return self
 
 
+class CredentialSourceCheck(Arguments):
+    secret_id: str = Field(pattern=r'^[0-9a-f]{32}$')
+    revision: int = Field(ge=1)
+    outcome: Literal['not_found', 'invalid', 'expired', 'permission', 'unavailable']
+
+
 class CredentialRequest(Capability):
     reason: str = Field(min_length=3, max_length=1000)
     request_key: str = Field(pattern=r'^[A-Za-z0-9_-]{1,80}$')
     setup_url: str = Field(default='', max_length=2048, description='Verified service documentation or console URL for obtaining this access. HTTPS only; no secrets. Inference provider setup links remain fixed.')
     setup_instructions: str = Field(default='', max_length=3000, description='Concise task-specific steps to obtain the requested access, including the relevant account/role or administrator action. No secret values.')
     input_fields: list[CredentialInput] = Field(default_factory=list, max_length=32, description='For generic env access, declare the exact required inputs so users never need to write JSON. Single token: [{name: SERVICE_TOKEN, label: Access token}]. AWS: separate AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, and region fields. Mark optional fields required=false. Do not include values.')
+    secret_id: str = Field(default='', pattern=r'^([0-9a-f]{32})?$', description='Optional authorized saved credential ID from credentials_list. Select only a matching connection appropriate for the task.')
+    source_checks: list[CredentialSourceCheck] = Field(default_factory=list, max_length=32, description='Observed unsuccessful lookup or verification outcomes for available credential_sources, using their secret IDs and revisions. First use each source through credentials_run in this turn. Never invent a check or include secret values. Omit when a source supplies working access; continue using that access instead.')
 
     @model_validator(mode='after')
     def setup_guidance(self):
@@ -125,6 +133,12 @@ class CredentialRequest(Capability):
 class ListCredentials(Arguments):
     provider: Provider | None = None
     name: str = Field(default='', max_length=80)
+
+
+class ResolveExternal(Arguments):
+    request_id: str = Field(pattern=r'^[0-9a-f]{32}$')
+    generation: int = Field(ge=0)
+    source: Literal['browser_session', 'existing_credentials']
 
 
 class Materialize(Arguments):
@@ -222,11 +236,35 @@ class UpdateSecret(Arguments):
         return self
 
 
+# Loaded with credentials_run instead of occupying every task's system prompt.
+ONEPASSWORD_GUIDANCE = (
+    'Before asking for a provider key, inspect credential_sources from credentials_list for saved generic '
+    '1password-shared access, even when the provider-specific credentials list is empty. If authorized Shared access '
+    'exists, request it with provider=generic, name=1password-shared, format=env and input_fields=[{name: '
+    'OP_SERVICE_ACCOUNT_TOKEN, label: Service account token}]. Use credentials_run for all op commands; the token is '
+    'injected into that subprocess only and authenticates the CLI automatically, without interactive sign-in. If Shared '
+    'access has not been connected, offer the secure Settings > Secrets > Connect 1Password flow; never claim to have '
+    'checked the vault. Verify op whoami and op vault list first, then op item list --vault Shared. Scope all item '
+    'operations and secret references to Shared. Account permissions are enforced by 1Password, not by the vault name in '
+    'these instructions. Prefer a dedicated service account with Shared read_items/write_items only and no '
+    'vault-creation permission. Keep vault values out of all tool output and chat. To use a provider key, set only a '
+    'nonsecret op://Shared/<item>/credential reference in the command environment and use op run -- <process>, keeping '
+    'its output masking enabled. Never use --no-masking. For other reads, capture op read directly in memory inside the '
+    'same credentials_run command and pass it straight to the intended process; never print it. The generic executor '
+    'redacts the service-account token but cannot automatically redact newly read vault values. Before adding a key, '
+    'search Shared for an existing matching item and edit it; if matches are ambiguous, clarify the intended item. Only '
+    'create or edit vault items when the task authorizes it. Feed secret JSON templates to op item create/edit through '
+    'standard input, never arguments or on-disk templates. Capture their output in memory and report only nonsecret item '
+    'metadata. Do not copy a token from another agent or broaden vault permissions. An administrator supplies or rotates '
+    'the token through the secure credential form. '
+)
+
 TOOLS = {
-    'credentials_list': (ListCredentials, 'Check existing personal and organization access before asking for access. Returns authorized metadata only, including reuse scope, expiry and connection status; never secret values.'),
-    'credentials_request': (CredentialRequest, 'Obtain access needed to complete the task. Check credentials_list first. Use provider=generic and a stable capability name for any service; format=env accepts a secure environment-variable map. Always declare input_fields with exact environment names and human-readable labels so the form renders a masked Access token box or separate AWS fields instead of asking users to write JSON; format=file accepts a secure file and requires its environment variable name. Explain the needed capability. Include setup_instructions explaining how to obtain access and a verified official service setup_url when known. Use the actual account access method; do not assume a new long-lived key is needed or invent URLs. Never include secrets in setup guidance or ask for credentials in chat. Existing authorized access may be reused; otherwise the session checkpoints and pauses for a secure form. The user chooses personal or organization sharing and this session or future sessions independently. Use this tool alone in its round. Organization sharing is admin-managed.'),
-    'credentials_run': (RunCredential, 'Run a foreground sandbox command with approved generic access. Use request_ids from credentials_request; environment values and credential files exist only for this command. Output is bounded and redacted. Never print credentials or copy them to ordinary files. A failed command is not replayed automatically. If authentication fails, report the returned credential revision through credentials_report_failure; distinguish missing permissions from invalid or expired authentication.'),
-    'credentials_report_failure': (ReportFailure, 'Report an observed access failure with the request ID and revision returned by credentials_run. Expired or invalid authentication opens a secure replacement request and pauses the session. Missing permissions reopen only this request so the user can grant access; they do not invalidate the shared credential. Never guess expiry from a generic command error and never repeat potentially completed writes automatically.'),
+    'credentials_list': (ListCredentials, 'Check existing personal and organization access before asking for access. Returns authorized credential metadata, pending request IDs/generations, and available credential_sources including Shared vault access even with a provider filter; never secret values. Inspect an available Shared vault before asking for another provider key.'),
+    'credentials_resolve': (ResolveExternal, 'Close one pending request after verifying access through the current browser session or existing authorized credentials, including 1Password. First verify the actual access; a user saying signed in is not verification. Use the exact request_id and generation from credentials_list. This records that the secret form is no longer needed; it does not store, grant, or transfer credentials. Continue using the verified access path. Never resolve unrelated requests or include secret values.'),
+    'credentials_request': (CredentialRequest, 'Obtain access needed to complete the task. Check credentials_list first and reuse authorized personal or organization access; secret_id can select a matching saved connection. A lookup_required result means check the returned 1Password credential_sources through credentials_run before asking the user. If lookup or verification fails, retry with source_checks reporting the observed outcomes; working vault access needs no new key or form. Use provider=generic and a stable capability name for any service; format=env accepts a secure environment-variable map. Always declare input_fields with exact environment names and human-readable labels so the form renders a masked Access token box or separate AWS fields instead of asking users to write JSON; format=file accepts a secure file and requires its environment variable name. Explain the needed capability. Include setup_instructions explaining how to obtain access and a verified official service setup_url when known. Use the actual account access method; do not assume a new long-lived key is needed or invent URLs. Never include secrets in setup guidance or ask for credentials in chat. Only a pending result checkpoints and pauses for a secure form. The user chooses personal or organization sharing and this session or future sessions independently. Use this tool alone in its round. Organization sharing is admin-managed.'),
+    'credentials_run': (RunCredential, 'Run a foreground sandbox command with approved generic access. Use request_ids from credentials_request; environment values and credential files exist only for this command. Output is bounded and redacted. Never print credentials or copy them to ordinary files. A failed command is not replayed automatically. If authentication fails, report the returned credential revision through credentials_report_failure; distinguish missing permissions from invalid or expired authentication. ' + ONEPASSWORD_GUIDANCE),
+    'credentials_report_failure': (ReportFailure, 'Report an observed access failure with the request ID and revision returned by credentials_run. Expired or invalid authentication tries alternative saved access, then requires checking available credential_sources before opening a replacement form. No failed operation is replayed. Missing permissions reopen only this request so the user can grant access; they do not invalidate the shared credential. Never guess expiry from a generic command error and never repeat potentially completed writes automatically.'),
     'credentials_http_request': (Invoke, 'Use an authorized inference-key request for a non-streaming inference or model-list API call. The server supplies authentication to fixed provider origins and paths. Responses contain no key. Provider usage is billed to that separate key, outside Moyai gateway spend.'),
 }
 
@@ -236,49 +274,11 @@ class Credentials:
         self.store, self.security, self.settings = store, security, settings
         self.manager, self.checkpoints = manager, checkpoints
         self.slots = asyncio.Semaphore(settings.max_concurrent_model_requests)
-        with store.connect() as conn:
-            conn.executescript('''
-                CREATE TABLE IF NOT EXISTS provider_secrets (
-                    id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL,
-                    scope TEXT NOT NULL, owner_id TEXT NOT NULL, root_id TEXT NOT NULL DEFAULT '',
-                    encrypted TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT NOT NULL DEFAULT '',
-                    client_id TEXT NOT NULL, UNIQUE(owner_id,client_id)
-                );
-                CREATE TABLE IF NOT EXISTS credential_requests (
-                    id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
-                    message_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
-                    provider TEXT NOT NULL, reason TEXT NOT NULL, request_key TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending', secret_id TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL, resolved_at TEXT NOT NULL DEFAULT '',
-                    UNIQUE(run_id,message_id,request_key)
-                );
-                CREATE TABLE IF NOT EXISTS credential_audit (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id TEXT NOT NULL,
-                    secret_id TEXT NOT NULL, action TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL
-                );
-            ''')
-            for table, fields in {
-                'provider_secrets': {'name': "TEXT NOT NULL DEFAULT ''", 'format': "TEXT NOT NULL DEFAULT 'env'",
-                    'env_var': "TEXT NOT NULL DEFAULT ''", 'lifetime': "TEXT NOT NULL DEFAULT 'persistent'",
-                    'expires_at': "TEXT NOT NULL DEFAULT ''", 'invalid_reason': "TEXT NOT NULL DEFAULT ''",
-                    'revision': 'INTEGER NOT NULL DEFAULT 1'},
-                'credential_requests': {'name': "TEXT NOT NULL DEFAULT ''", 'format': "TEXT NOT NULL DEFAULT 'env'",
-                    'env_var': "TEXT NOT NULL DEFAULT ''", 'generation': 'INTEGER NOT NULL DEFAULT 0',
-                    'failure': "TEXT NOT NULL DEFAULT ''", 'revision': 'INTEGER NOT NULL DEFAULT 1',
-                    'secret_revision': 'INTEGER NOT NULL DEFAULT 1', 'setup_url': "TEXT NOT NULL DEFAULT ''",
-                    'setup_instructions': "TEXT NOT NULL DEFAULT ''", 'input_fields': "TEXT NOT NULL DEFAULT '[]'",
-                    'preferred_scope': "TEXT NOT NULL DEFAULT ''", 'scope_revision': 'INTEGER NOT NULL DEFAULT 0',
-                    'resolution_pending': 'INTEGER NOT NULL DEFAULT 0', 'resolution_error': "TEXT NOT NULL DEFAULT ''"},
-            }.items():
-                columns = {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
-                for field, declaration in fields.items():
-                    if field not in columns:
-                        conn.execute(f'ALTER TABLE {table} ADD COLUMN {field} {declaration}')
-            conn.execute("UPDATE provider_secrets SET scope='personal',lifetime='session' WHERE scope='session'")
+        if store.schema_updates:
+            initialize_schema(store)
 
     def root(self, run):
-        return run['parent_run_id'] or run['id']
+        return self.store.root_id(run['id'])
 
     def row(self, request_id):
         rows = self.store.rows('SELECT * FROM credential_requests WHERE id=?', (request_id,))
@@ -292,7 +292,7 @@ class Credentials:
         # Accounting links are not authentication. Require a fresh, eligible
         # Slack profile matching an independently verified Google identity.
         rows = self.store.rows('SELECT * FROM users WHERE id IN (?,?)', (owner_id, actor_id))
-        owner = next((u for u in rows if u['id'] == owner_id and u['kind'] == 'google'), None)
+        owner = next((u for u in rows if u['id'] == owner_id and u['kind'] in {'google', 'cloudflare'}), None)
         actor = next((u for u in rows if u['id'] == actor_id and u['kind'] == 'slack'), None)
         if not owner or not actor or not actor['profile_eligible'] or actor['profile_conflict'] or not actor['email']:
             return False
@@ -337,8 +337,18 @@ class Credentials:
 
     def inventory(self, run, args):
         rows = self.store.rows("SELECT * FROM provider_secrets WHERE revoked_at='' ORDER BY created_at DESC")
-        return {'credentials': [self.metadata(row, run['active_user_id'], False) for row in rows
-                if self.permitted(row, run, run['active_user_id'])
+        authorized = [row for row in rows if self.permitted(row, run, run['active_user_id'])]
+        with self.store.connect() as conn:
+            pending = self.pending_rows(conn, run['id'])
+        return {'credentials': [self.metadata(row, run['active_user_id'], False) for row in authorized
+                if (not args.provider or row['provider'] == args.provider)
+                and (not args.name or row['name'] == args.name.strip().lower())],
+                'credential_sources': [self.metadata(row, run['active_user_id'], False) for row in authorized
+                    if row['provider'] == 'generic' and row['name'] == '1password-shared' and self.status(row) == 'active'],
+                'pending_requests': [{'request_id': row['id'], **{key: row[key] for key in ('generation', 'provider', 'name', 'reason')}}
+                    for row in pending
+                    if (self.same_requester(row['actor_id'], run['active_user_id'])
+                        or self.same_requester(run['active_user_id'], row['actor_id']))
                 and (not args.provider or row['provider'] == args.provider)
                 and (not args.name or row['name'] == args.name.strip().lower())]}
 
@@ -371,7 +381,7 @@ class Credentials:
     def insert_secret(self, conn, body, user_id, admin, root_id=''):
         if body.scope == 'organization' and not admin:
             raise HTTPException(403, 'Only an administrator can save organization credentials.')
-        if body.scope != 'organization' and not user_id.startswith('google:') and not self.security.local_preview():
+        if body.scope != 'organization' and not user_id.startswith(('google:', 'cloudflare:')) and not self.security.local_preview():
             raise HTTPException(403, 'Use Google sign-in to save personal credentials.')
         root_id = root_id or body.root_id if body.lifetime == 'session' else ''
         if body.lifetime == 'session' and not root_id:
@@ -390,14 +400,15 @@ class Credentials:
         secret_id = uuid4().hex
         fields.update(id=secret_id, owner_id=user_id, encrypted=self.security.encrypt(value), created_at=now(), client_id=body.client_id)
         columns = ','.join(fields)
-        conn.execute(f'INSERT INTO provider_secrets({columns}) VALUES({",".join(":" + key for key in fields)})', fields)
+        conn.execute(f'INSERT INTO provider_secrets({columns}) VALUES({",".join("?" for key in fields)})', tuple(fields.values()))
         self.audit_in(conn, user_id, secret_id, 'saved ' + body.scope + ' ' + body.lifetime, root_id)
         return secret_id
 
     def tools(self, run):
         if not self.settings.temporal_enabled or not run['chat_enabled']:
             return []
-        return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema()}
+        return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema(),
+                 'annotations': {'readOnlyHint': name == 'credentials_list', 'idempotentHint': name == 'credentials_list'}}
                 for name, (schema, description) in TOOLS.items()]
 
     def setup(self, row):
@@ -413,6 +424,10 @@ class Credentials:
     def ready(self, request):
         if request['status'] == 'pending':
             return self.pending_result(request)
+        if request['status'] == 'satisfied':
+            return {'status': 'satisfied', 'request_id': request['id'], 'generation': request['generation'],
+                    'provider': request['provider'],
+                    'instructions': 'This request was closed after access was verified through another path. No credential was stored or granted. Continue using that access, rechecking it when needed. If it is no longer usable, create a new request with a new request_key.'}
         if request['status'] == 'declined':
             return {'status': 'declined', 'request_id': request['id'], 'provider': request['provider'],
                     'instructions': 'The user declined this access request. Continue without it, explain any limitation, and do not request it again unless the user asks.'}
@@ -423,10 +438,10 @@ class Credentials:
         suffix = '' if request['provider'] == 'anthropic' else '/v1'
         return {**result, 'instructions': 'Use credentials_http_request with this request_id. For Python SDKs, base_url=os.environ["MOYAI_CREDENTIAL_PROXY_URL"] + "/' + request['id'] + suffix + '", api_key=os.environ["WORKSPACE_RUN_TOKEN"]. Set max_retries=0 and stream=False. The endpoint is rebuilt each turn; do not hard-code it. No raw provider key is available. Provider charges are separate from Moyai gateway spend.'}
 
-    def pending_rows(self, conn: sqlite3.Connection, run_id: str, *, include_children: bool = False) -> list[sqlite3.Row]:
+    def pending_rows(self, conn: Connection, run_id: str, *, include_children: bool = False) -> list[DatabaseRow]:
         # Pending access belongs to the session and requester, not its latest turn.
         return conn.execute(f"""SELECT q.* FROM credential_requests q JOIN runs r ON r.id=q.run_id
-            WHERE (r.id=? OR (? AND r.parent_run_id=?)) AND r.deleted_at=''
+            WHERE (r.id=? OR (?=1 AND r.id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?))) AND r.deleted_at=''
             AND r.status IN ({','.join('?' for _ in ACCESSIBLE)}) AND q.status='pending'
             ORDER BY q.created_at,q.id""", (run_id, include_children, run_id, *ACCESSIBLE)).fetchall()
 
@@ -496,9 +511,61 @@ class Credentials:
     def matching(self, secret, capability):
         return all(secret[key] == capability[key] for key in ('provider', 'name', 'format', 'env_var'))
 
+    def saved_choice(self, conn, run, capability, secret_id=''):
+        candidates = [dict(secret) for secret in conn.execute(
+            "SELECT * FROM provider_secrets WHERE provider=? AND revoked_at=''", (capability['provider'],))
+            if self.matching(secret, capability) and self.permitted(secret, run, run['active_user_id'])
+            and self.status(secret) == 'active']
+        if secret_id:
+            selected = next((secret for secret in candidates if secret['id'] == secret_id), None)
+            if not selected:
+                raise ValueError('Select an active, authorized saved credential matching this capability.')
+            return selected
+        private = [secret for secret in candidates if secret['scope'] != 'organization']
+        choices = private or candidates
+        return choices[0] if len(choices) == 1 else None
+
+    def source_lookup(self, conn, run, args):
+        if args.provider == 'generic' and args.name == '1password-shared':
+            return None  # Obtaining the source must not recursively require itself.
+        sources = [self.metadata(secret, run['active_user_id'], False) for secret in conn.execute(
+            "SELECT * FROM provider_secrets WHERE provider='generic' AND name='1password-shared' AND format='env' AND revoked_at=''")
+            if self.permitted(secret, run, run['active_user_id']) and self.status(secret) == 'active']
+        checked = set()
+        for check in args.source_checks:
+            used = conn.execute('''SELECT 1 FROM credential_source_uses
+                WHERE run_id=? AND message_id=? AND secret_id=? AND revision=?''',
+                (run['id'], run['active_message_id'], check.secret_id, check.revision)).fetchone()
+            if not used:
+                raise ValueError('Use the credential source through credentials_run in this turn before reporting its outcome.')
+            checked.add((check.secret_id, check.revision))
+        remaining = [source for source in sources if (source['id'], source['revision']) not in checked]
+        if not remaining:
+            return None
+        return {'status': 'lookup_required', 'credential_sources': remaining,
+                'request_arguments': args.model_dump(exclude={'secret_id'}),
+                'instructions': 'No new credential form was opened. Check these authorized 1Password sources first. '
+                    'Request provider=generic, name=1password-shared, format=env with the source secret_id, '
+                    'then use credentials_run to inspect Shared and verify task-relevant access. '
+                    'Keep vault values out of output; use op run with masking for provider calls. '
+                    'If access works, continue with it and close any earlier pending request with credentials_resolve. '
+                    'Only if lookup or verification fails, retry request_arguments, preserving earlier source_checks and adding '
+                    'each source secret_id, revision and observed outcome (not_found, invalid, expired, permission, unavailable). '
+                    'Do not treat network, quota or unrelated command failures as an invalid key. Never replay an uncertain write.'}
+
+    def reuse_in(self, conn, row, secret):
+        conn.execute("""UPDATE credential_requests SET status='provided',secret_id=?,secret_revision=?,
+            revision=revision+1,resolved_at=?,failure='',resolution_pending=0,resolution_error='' WHERE id=?""",
+            (secret['id'], secret['revision'], now(), row['id']))
+        self.audit_in(conn, row['actor_id'], secret['id'], 'reused', row['run_id'])
+        return dict(conn.execute('SELECT * FROM credential_requests WHERE id=?', (row['id'],)).fetchone())
+
     def request(self, run, args):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
+            actor = run['active_user_id']
+            if not actor or not run['active_message_id']:
+                raise ValueError('Start an authenticated chat session before requesting access.')
             prior = conn.execute('SELECT * FROM credential_requests WHERE run_id=? AND message_id=? AND request_key=?',
                                  (run['id'], run['active_message_id'], args.request_key)).fetchone()
             if prior and any(prior[key] != getattr(args, key) for key in ('provider', 'reason', 'name', 'format', 'env_var')):
@@ -506,9 +573,6 @@ class Credentials:
             input_fields = json.dumps([field.model_dump() for field in args.input_fields])
             if prior and json.loads(prior['input_fields']) != json.loads(input_fields):
                 raise ValueError('Use the original credential inputs when retrying this request.')
-            if not prior:
-                prior = conn.execute("SELECT * FROM credential_requests WHERE run_id=? AND message_id=? AND status='pending'",
-                                     (run['id'], run['active_message_id'])).fetchone()
             if not prior:
                 for candidate in self.pending_rows(conn, run['id']):
                     same_actor = (self.same_requester(candidate['actor_id'], run['active_user_id'])
@@ -518,12 +582,33 @@ class Credentials:
                             and json.loads(candidate['input_fields']) == json.loads(input_fields)):
                         prior = self.reopen_in(conn, candidate, candidate['failure'], run)
                         break
+            # Resolve saved access and require source discovery before a new
+            # pending request can checkpoint the agent. A source request can
+            # therefore proceed even with an older unrelated pending form.
+            secret = None
+            valid_prior = False
+            if prior and prior['status'] == 'provided':
+                bound = conn.execute('SELECT * FROM provider_secrets WHERE id=?', (prior['secret_id'],)).fetchone()
+                valid_prior = bool(bound and self.permitted(bound, run, actor) and self.status(bound) == 'active')
+                if valid_prior and args.secret_id and args.secret_id != prior['secret_id']:
+                    raise ValueError('Use a new request_key to select a different saved connection.')
+            terminal_prior = prior and prior['status'] in {'declined', 'satisfied'}
+            permission_retry = prior and prior['status'] == 'pending' and prior['failure'] == 'permission'
+            if not valid_prior and not terminal_prior and not permission_retry:
+                secret = self.saved_choice(conn, run, args.model_dump(), args.secret_id)
+                if not secret:
+                    lookup = self.source_lookup(conn, run, args)
+                    if lookup:
+                        return lookup
+            if not prior and not secret:
+                prior = conn.execute("SELECT * FROM credential_requests WHERE run_id=? AND message_id=? AND status='pending'",
+                                     (run['id'], run['active_message_id'])).fetchone()
             if prior:
                 row = dict(prior)
-                if row['status'] == 'provided':
-                    secret = conn.execute('SELECT * FROM provider_secrets WHERE id=?', (row['secret_id'],)).fetchone()
-                    if not secret or not self.permitted(secret, run, run['active_user_id']) or self.status(secret) != 'active':
-                        row = self.reopen_in(conn, row, self.status(secret) if secret else 'unavailable')
+                if secret:
+                    row = self.reuse_in(conn, row, secret)
+                elif row['status'] == 'provided' and not valid_prior:
+                    row = self.reopen_in(conn, row, self.status(bound) if bound else 'unavailable')
                 # An exact retry may add guidance to an older pending request.
                 # Another pending capability must never inherit these details.
                 if row['status'] == 'pending' and row['request_key'] == args.request_key:
@@ -535,29 +620,22 @@ class Credentials:
                             conn.execute(f'UPDATE credential_requests SET {field}=? WHERE id=?', (value, row['id']))
                             row[field] = value
             else:
-                actor = run['active_user_id']
-                if not actor or not run['active_message_id']:
-                    raise ValueError('Start an authenticated chat session before requesting access.')
-                candidates = [dict(secret) for secret in conn.execute("SELECT * FROM provider_secrets WHERE provider=? AND revoked_at=''", (args.provider,))
-                              if self.matching(secret, args.model_dump()) and self.permitted(secret, run, actor) and self.status(secret) == 'active']
-                private = [secret for secret in candidates if secret['scope'] != 'organization']
-                choices = private or candidates
-                secret = choices[0] if len(choices) == 1 else None
                 row = {'id': uuid4().hex, 'run_id': run['id'], 'message_id': run['active_message_id'], 'actor_id': actor,
-                       **args.model_dump(), 'input_fields': input_fields, 'status': 'provided' if secret else 'pending', 'secret_id': secret['id'] if secret else '',
+                       **args.model_dump(exclude={'secret_id', 'source_checks'}), 'input_fields': input_fields, 'status': 'provided' if secret else 'pending', 'secret_id': secret['id'] if secret else '',
                        'created_at': now(), 'resolved_at': now() if secret else '', 'generation': 0, 'failure': '',
                        'revision': 1, 'secret_revision': secret['revision'] if secret else 1}
-                conn.execute(f'INSERT INTO credential_requests({",".join(row)}) VALUES({",".join(":" + key for key in row)})', row)
+                conn.execute(f'INSERT INTO credential_requests({",".join(row)}) VALUES({",".join("?" for key in row)})', tuple(row.values()))
                 self.audit_in(conn, actor, row['secret_id'], 'reused' if secret else 'requested', run['id'])
-            if row['status'] in {'provided', 'declined'}:
+            if row['status'] in {'provided', 'declined', 'satisfied'}:
                 self.acknowledge_in(conn, run['id'], run['active_message_id'], row['id'], row['generation'])
-        self.store.event(run['id'], 'credential', 'Access ready' if row['status'] == 'provided' else 'Access requested', {'request_id': row['id']})
+        message = {'pending': 'Access requested', 'provided': 'Access ready'}.get(row['status'], 'Access request ' + row['status'])
+        self.store.event(run['id'], 'credential', message, {'request_id': row['id']})
         return self.ready(row)
 
     def acknowledge_in(self, conn, run_id, message_id, request_id, generation):
         """A receipt belongs to the exact generation delivered to its original turn."""
         conn.execute("""UPDATE credential_requests SET resolution_pending=0,resolution_error=''
-            WHERE id=? AND run_id=? AND message_id=? AND generation=? AND resolution_pending=1 AND status IN ('provided','declined')
+            WHERE id=? AND run_id=? AND message_id=? AND generation=? AND resolution_pending=1 AND status IN ('provided','declined','satisfied')
             AND EXISTS(SELECT 1 FROM messages m JOIN runs r ON r.id=m.run_id
                 WHERE m.id=? AND m.run_id=? AND m.status='running' AND r.active_message_id=m.id)""",
             (request_id, run_id, message_id, generation, message_id, run_id))
@@ -580,7 +658,7 @@ class Credentials:
         if not self.store.rows('SELECT 1 FROM credential_requests WHERE run_id=? AND resolution_pending=1 LIMIT 1', (run_id,)):
             return
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             if not run:
                 return
@@ -628,9 +706,34 @@ class Credentials:
                  **self.setup(row), 'provider_name': row['name'] or PROVIDERS[row['provider']]['name']}
                 for row in rows]
 
+    def resolve_external(self, run: dict[str, object], args: ResolveExternal) -> dict[str, object]:
+        with self.store.connect() as conn:
+            conn.begin_write()
+            current = conn.execute('SELECT * FROM runs WHERE id=?', (run['id'],)).fetchone()
+            if (not current or current['deleted_at'] or current['status'] != 'running'
+                    or not current['active_user_id'] or not current['token_hash']
+                    or any(current[key] != run[key] for key in ('active_message_id', 'active_user_id', 'token_hash'))
+                    or not conn.execute("SELECT 1 FROM messages WHERE id=? AND run_id=? AND status='running'",
+                                        (current['active_message_id'], current['id'])).fetchone()):
+                raise HTTPException(409, 'This agent turn is no longer active.')
+            row, _ = self.authorized_request(conn, current, args.request_id)
+            if row['generation'] != args.generation:
+                raise HTTPException(409, 'This access request changed. Check credentials_list again.')
+            if row['status'] == 'pending':
+                # The active caller consumes this result; never replay the historical requesting turn.
+                conn.execute("""UPDATE credential_requests SET status='satisfied',resolved_at=?,
+                    resolution_pending=0,resolution_error='' WHERE id=?""", (now(), row['id']))
+                self.audit_in(conn, current['active_user_id'], '', 'satisfied via ' + args.source, current['id'])
+                conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'credential',?,?,?)",
+                             (current['id'], 'Access request satisfied through verified existing access',
+                              json.dumps({'request_id': row['id'], 'source': args.source,
+                                          'turn_id': current['active_message_id']}), now()))
+                row = {**row, 'status': 'satisfied'}
+            return {**self.ready(row), 'generation': row['generation']}
+
     def resolve(self, request_id, body, user_id, admin):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             row = conn.execute('SELECT * FROM credential_requests WHERE id=?', (request_id,)).fetchone()
             if not row:
                 raise HTTPException(404, 'Credential request not found.')
@@ -706,7 +809,7 @@ class Credentials:
 
     def materialize(self, run, args):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             accepted = []
             for request_id in args.request_ids:
                 row, secret = self.authorized_request(conn, run, request_id)
@@ -725,13 +828,17 @@ class Credentials:
             # No plaintext is produced until every selected handle is authorized.
             for row, _ in accepted:
                 self.acknowledge_in(conn, run['id'], run['active_message_id'], row['id'], row['generation'])
+            for _, secret in accepted:
+                if secret['name'] == '1password-shared' and secret['format'] == 'env':
+                    conn.execute('INSERT INTO credential_source_uses VALUES(?,?,?,?) ON CONFLICT DO NOTHING',
+                                 (run['id'], run['active_message_id'], secret['id'], secret['revision']))
             return {'status': 'ready', 'bindings': [{'request_id': row['id'], 'revision': row['revision'],
-                    'format': secret['format'], 'env_var': secret['env_var'],
+                    'name': secret['name'], 'format': secret['format'], 'env_var': secret['env_var'],
                     'value': self.security.decrypt(secret['encrypted'])} for row, secret in accepted]}
 
     def report_failure(self, run, args):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             row, secret = self.authorized_request(conn, run, args.request_id)
             if (row['status'] != 'provided' or not secret or row['revision'] != args.revision
                     or row['secret_revision'] != secret['revision']):
@@ -744,9 +851,21 @@ class Credentials:
             if args.failure != 'permission':
                 conn.execute('UPDATE provider_secrets SET invalid_reason=? WHERE id=? AND revision=?',
                              (args.failure, secret['id'], secret['revision']))
-            result = self.ready(self.reopen_in(conn, row, args.failure, run))
+            replacement = self.saved_choice(conn, run, row) if args.failure != 'permission' else None
+            if replacement:
+                row = self.reuse_in(conn, row, replacement)
+                result = {**self.ready(row), 'retry_required': True,
+                          'message': 'Alternative saved access is ready. Verify it with a harmless request; the failed command was not replayed.'}
+            else:
+                lookup_args = CredentialRequest(**{key: row[key] for key in
+                    ('provider', 'name', 'format', 'env_var', 'reason', 'request_key', 'setup_url', 'setup_instructions')},
+                    input_fields=json.loads(row['input_fields']))
+                lookup = self.source_lookup(conn, run, lookup_args) if args.failure != 'permission' else None
+                result = lookup or self.ready(self.reopen_in(conn, row, args.failure, run))
             self.audit_in(conn, run['active_user_id'], secret['id'], 'authentication ' + args.failure, run['id'])
-        self.store.event(run['id'], 'credential', 'Additional permission needed' if args.failure == 'permission' else 'Saved access needs replacement', {'request_id': args.request_id})
+        message = ('Checking alternative access' if result['status'] != 'pending' else
+                   'Additional permission needed' if args.failure == 'permission' else 'Saved access needs replacement')
+        self.store.event(run['id'], 'credential', message, {'request_id': args.request_id})
         return result
 
     async def call(self, run, name, arguments):
@@ -755,6 +874,8 @@ class Credentials:
             return self.inventory(run, args)
         if name == 'credentials_request':
             return self.request(run, args)
+        if name == 'credentials_resolve':
+            return self.resolve_external(run, args)
         if name == 'credentials_report_failure':
             return self.report_failure(run, args)
         if name == 'credentials_run':
@@ -765,7 +886,7 @@ class Credentials:
 
     async def invoke(self, run, args):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             request, secret = self.authorized_request(conn, run, args.request_id)
             if secret:
                 request = self.binding_in(conn, request, secret)
@@ -776,7 +897,7 @@ class Credentials:
             raise HTTPException(422, 'Use credentials_run for this connection.')
         if self.status(secret) != 'active':
             result = self.report_failure(run, ReportFailure(request_id=args.request_id, revision=request['revision'], failure='expired' if self.status(secret) == 'expired' else 'invalid'))
-            return 401, {'error': {'message': 'Saved authentication is unavailable. Use the secure replacement form.', 'type': 'credential_expired'}, **result}
+            return 401, {'error': {'message': 'Saved authentication is unavailable. Follow the returned access recovery instructions.', 'type': 'credential_expired'}, **result}
         provider = PROVIDERS[secret['provider']]
         paths = {'GET': {'/models'}, 'POST': {'/messages'} if secret['provider'] == 'anthropic' else {'/chat/completions', '/completions', '/embeddings'}}
         if args.path not in paths[args.method] or (args.method == 'GET' and args.body):
@@ -805,7 +926,7 @@ class Credentials:
                 recovery = {}
                 if status in (401, 403):
                     recovery = self.report_failure(run, ReportFailure(request_id=args.request_id, revision=request['revision'], failure='invalid' if status == 401 else 'permission'))
-                return status if 400 <= status < 600 else 502, {'error': {'message': f'{provider["name"]} rejected the request ({status}). ' + ('Update authentication through the secure form.' if status == 401 else 'Check permissions, quota, model and request.'), 'type': 'invalid_credentials' if status == 401 else 'permission' if status == 403 else 'provider_error'}, **recovery}
+                return status if 400 <= status < 600 else 502, {'error': {'message': f'{provider["name"]} rejected the request ({status}). ' + ('Follow the returned access recovery instructions.' if status == 401 else 'Check permissions, quota, model and request.'), 'type': 'invalid_credentials' if status == 401 else 'permission' if status == 403 else 'provider_error'}, **recovery}
             try:
                 decoded = json.loads(bytes(raw))
                 result = json.loads(json.dumps(decoded).replace(value, '[credential redacted]'))
@@ -815,7 +936,7 @@ class Credentials:
 
     def update_secret(self, secret_id, body, user_id, admin):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             row = conn.execute('SELECT * FROM provider_secrets WHERE id=? AND revoked_at=\'\'', (secret_id,)).fetchone()
             if not row or (row['scope'] == 'organization' and not admin) or (row['scope'] != 'organization' and row['owner_id'] != user_id):
                 raise HTTPException(404, 'Credentials not found.')
@@ -830,7 +951,7 @@ class Credentials:
                 # An administrator can make a shared credential personal only to themselves.
                 values['owner_id'] = user_id
                 values['client_id'] = 'ownership-' + secret_id
-                if not user_id.startswith('google:') and not self.security.local_preview():
+                if not user_id.startswith(('google:', 'cloudflare:')) and not self.security.local_preview():
                     raise HTTPException(403, 'Use Google sign-in to save personal credentials.')
             if values['lifetime'] == 'session':
                 root = self.store.run(values['root_id']) if values['root_id'] else None
@@ -846,7 +967,7 @@ class Credentials:
                 values['invalid_reason'] = ''
             values['label'] = values['label'].strip()
             fields = ('label', 'scope', 'lifetime', 'root_id', 'expires_at', 'owner_id', 'client_id', 'encrypted', 'invalid_reason')
-            conn.execute('UPDATE provider_secrets SET ' + ','.join(key + '=:' + key for key in fields) + ',revision=revision+1 WHERE id=:id', values)
+            conn.execute('UPDATE provider_secrets SET ' + ','.join(key + '=?' for key in fields) + ',revision=revision+1 WHERE id=?', (*(values[key] for key in fields), secret_id))
             self.audit_in(conn, user_id, secret_id, 'updated', values['root_id'])
             saved = dict(conn.execute('SELECT * FROM provider_secrets WHERE id=?', (secret_id,)).fetchone())
         return self.metadata(saved, user_id, admin)
@@ -878,7 +999,7 @@ class Credentials:
                 if body.scope == 'personal' and not self.same_requester(user, root['active_user_id']):
                     raise HTTPException(403, 'Choose your own session for personal credentials.')
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 identity = self.insert_secret(conn, body, user, admin)
             return {'id': identity, 'saved': True}
 
@@ -891,7 +1012,7 @@ class Credentials:
         async def revoke_key(secret_id: str, request: Request):
             user, admin = actor(request, True)
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 row = conn.execute('SELECT * FROM provider_secrets WHERE id=?', (secret_id,)).fetchone()
                 if not row or not (row['owner_id'] == user or (row['scope'] == 'organization' and admin)):
                     raise HTTPException(404, 'Credentials not found.')
@@ -910,3 +1031,51 @@ class Credentials:
             return {'saved': True}
 
         return router
+
+
+def initialize_schema(store):
+    with store.connect() as conn:
+        conn.executescript('''
+            CREATE TABLE IF NOT EXISTS provider_secrets (
+                id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL,
+                scope TEXT NOT NULL, owner_id TEXT NOT NULL, root_id TEXT NOT NULL DEFAULT '',
+                encrypted TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT NOT NULL DEFAULT '',
+                client_id TEXT NOT NULL, UNIQUE(owner_id,client_id)
+            );
+            CREATE TABLE IF NOT EXISTS credential_requests (
+                id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
+                message_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
+                provider TEXT NOT NULL, reason TEXT NOT NULL, request_key TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending', secret_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL, resolved_at TEXT NOT NULL DEFAULT '',
+                UNIQUE(run_id,message_id,request_key)
+            );
+            CREATE TABLE IF NOT EXISTS credential_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id TEXT NOT NULL,
+                secret_id TEXT NOT NULL, action TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS credential_source_uses (
+                run_id TEXT NOT NULL REFERENCES runs(id), message_id INTEGER NOT NULL,
+                secret_id TEXT NOT NULL, revision INTEGER NOT NULL,
+                PRIMARY KEY(run_id,message_id,secret_id,revision)
+            );
+        ''')
+        for table, fields in {
+            'provider_secrets': {'name': "TEXT NOT NULL DEFAULT ''", 'format': "TEXT NOT NULL DEFAULT 'env'",
+                'env_var': "TEXT NOT NULL DEFAULT ''", 'lifetime': "TEXT NOT NULL DEFAULT 'persistent'",
+                'expires_at': "TEXT NOT NULL DEFAULT ''", 'invalid_reason': "TEXT NOT NULL DEFAULT ''",
+                'revision': 'INTEGER NOT NULL DEFAULT 1'},
+            'credential_requests': {'name': "TEXT NOT NULL DEFAULT ''", 'format': "TEXT NOT NULL DEFAULT 'env'",
+                'env_var': "TEXT NOT NULL DEFAULT ''", 'generation': 'INTEGER NOT NULL DEFAULT 0',
+                'failure': "TEXT NOT NULL DEFAULT ''", 'revision': 'INTEGER NOT NULL DEFAULT 1',
+                'secret_revision': 'INTEGER NOT NULL DEFAULT 1', 'setup_url': "TEXT NOT NULL DEFAULT ''",
+                'setup_instructions': "TEXT NOT NULL DEFAULT ''", 'input_fields': "TEXT NOT NULL DEFAULT '[]'",
+                'preferred_scope': "TEXT NOT NULL DEFAULT ''", 'scope_revision': 'INTEGER NOT NULL DEFAULT 0',
+                'resolution_pending': 'INTEGER NOT NULL DEFAULT 0', 'resolution_error': "TEXT NOT NULL DEFAULT ''"},
+        }.items():
+            columns = conn.column_names(table)
+            for field, declaration in fields.items():
+                if field not in columns:
+                    conn.execute(f'ALTER TABLE {table} ADD COLUMN {field} {declaration}')
+        conn.execute("UPDATE provider_secrets SET scope='personal',lifetime='session' WHERE scope='session'")

@@ -1,6 +1,8 @@
-const spendState={start:'',end:'',user:'',timer:null,version:0};
+const spendState={start:'',end:'',user:'',timer:null,version:0,displayed:'',scope:'',pending:false};
 function dollars(value){return new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',minimumFractionDigits:2,maximumFractionDigits:6}).format(Number(value));}
 function spendCount(value){return Number(value||0).toLocaleString();}
+function spendCostSource(row){return {response_header:'Response header',response_usage:'Response usage',gateway_recovery:'Recovered receipt'}[row.cost_source]||(row.cost!==null?'Earlier record':'Not returned');}
+function spendCostValue(row){return row.cost!==null?'$'+esc(row.cost):row.cost_status==='pending'||row.status==='pending'?'Cost pending':row.cost_recovery_error==='receipt_access_denied'?'Receipt access required':'Unknown';}
 function slackIdentityStatus(user){
   return {linked:'Linked automatically',manual:'Linked by administrator',awaiting_google:'Profile created · awaiting first Google sign-in',pending_profile:'Profile lookup pending',unavailable:'Profile unavailable · retrying',ineligible:'Not eligible for automatic matching',email_changed:'Email changed · administrator review needed',review:'Administrator review needed'}[user.link_status]||'Profile lookup pending';
 }
@@ -19,56 +21,112 @@ function renderSpendFilters(start,end){
   return `<form class="spend-filters" id="spend-filter-form"><label>From<input type="date" id="spend-start" required value="${esc(start)}"></label><label>Through<input type="date" id="spend-end" required value="${esc(end)}"></label><button type="submit">Apply dates</button><button type="button" id="sync-spend">Refresh</button><span class="subtext">Dates in UTC · up to 93 days</span></form>`;
 }
 function bindSpendFilters(){
-  $('#spend-filter-form').onsubmit=e=>{e.preventDefault();spendState.start=$('#spend-start').value;spendState.end=$('#spend-end').value;renderSpend().catch(showError);};
+  $('#spend-filter-form').onsubmit=e=>{e.preventDefault();if($('#spend-range'))$('#spend-range').open=false;$('#spend-range-toggle')?.focus?.();spendState.start=$('#spend-start').value;spendState.end=$('#spend-end').value;renderSpend().catch(showError);};
+  if(typeof bindAnalyticsPreset==='function')bindAnalyticsPreset('spend',range=>{Object.assign(spendState,range);renderSpend().catch(showError);});
   $('#sync-spend').onclick=async()=>{const button=$('#sync-spend');button.disabled=true;button.textContent='Refreshing…';try{await renderSpend();}catch(e){showError(e);button.disabled=false;button.textContent='Refresh';}};
 }
-async function renderSpend(background = false){
+function spendContext(start=spendState.start,end=spendState.end){return [state.pageVersion,state.role,start,end].join('/');}
+function spendSupportsSelection(el){
+  return el?.tagName==='TEXTAREA'||el?.tagName==='INPUT'&&['text','search','url','tel','password'].includes(el.type);
+}
+function preserveSpendView(preserveValues=true){
+  const root=$('#content'),active=document.activeElement;
+  if(typeof document.querySelectorAll!=='function')return ()=>{};
+  const nodes=[...document.querySelectorAll('#content [id]')].map(el=>({id:el.id,open:el.open,value:preserveValues&&el.matches?.('input,select,textarea')?el.value:undefined,top:el.scrollTop,left:el.scrollLeft}));
+  const details=[...document.querySelectorAll('#content details')].map(el=>({label:el.querySelector('summary')?.textContent,open:el.open}));
+  const links=preserveValues?[...document.querySelectorAll('.spend-link-form')].flatMap(form=>{
+    const select=form.elements.google,saved=[...select.options].find(option=>option.defaultSelected)?.value||'';
+    return select.value===saved?[]:[{slack:form.dataset.slack,value:select.value}];
+  }):[];
+  const scrollers=[...document.querySelectorAll('#content .spend-table-wrap')].map(el=>({label:el.getAttribute('aria-label'),left:el.scrollLeft,top:el.scrollTop}));
+  const focus=active?.id,top=root.scrollTop;
+  let selection;
+  // Selection APIs are only defined for text controls; some browsers throw.
+  if(spendSupportsSelection(active))try{selection=[active.selectionStart,active.selectionEnd,active.selectionDirection];}catch{}
+  return ()=>{
+    for(const saved of nodes){const el=document.getElementById?.(saved.id);if(!el)continue;if(saved.open!==undefined)el.open=saved.open;if(saved.value!==undefined)el.value=saved.value;el.scrollTop=saved.top;el.scrollLeft=saved.left;}
+    for(const el of document.querySelectorAll('#content details')){const saved=details.find(s=>s.label===el.querySelector('summary')?.textContent);if(saved)el.open=saved.open;}
+    for(const form of document.querySelectorAll('.spend-link-form')){
+      const saved=links.find(link=>link.slack===form.dataset.slack),select=form.elements.google;
+      if(saved&&[...select.options].some(option=>option.value===saved.value))select.value=saved.value;
+    }
+    for(const el of document.querySelectorAll('#content .spend-table-wrap')){const saved=scrollers.find(s=>s.label===el.getAttribute('aria-label'));if(saved){el.scrollTop=saved.top;el.scrollLeft=saved.left;}}
+    const el=focus?document.getElementById?.(focus):null;el?.focus?.({preventScroll:true});if(selection?.[0]!=null&&spendSupportsSelection(el))try{el.setSelectionRange(...selection);}catch{}
+    root.scrollTop=top;
+  };
+}
+function spendRefreshNotice(message='',error=false){
+  const notice=$('#spend-refresh-status');
+  if(notice){notice.className=error?'error-banner':'subtext';notice.textContent=message==='Updating…'?'':message;}
+  const button=$('#sync-spend');if(button){button.disabled=false;button.textContent=message==='Updating…'?'Refreshing…':'Refresh';}
+}
+async function renderSpend(background = false,recent=false){
   clearTimeout(spendState.timer);
-  if(background && state.view!=='spend')return;
-  if(background && settingsInteractionActive()){
+  if(state.view!=='spend')return;
+  if(background && (document.hidden||settingsInteractionActive())){
     spendState.timer=setTimeout(()=>renderSpend(true).catch(showError),5000);
     return;
   }
   const version=state.pageVersion,renderVersion=++spendState.version;
-  const current=()=>version===state.pageVersion&&renderVersion===spendState.version;
-  $('#content').innerHTML='<p class="subtext" role="status">Loading spend…</p>';
+  const current=()=>state.view==='spend'&&version===state.pageVersion&&renderVersion===spendState.version;
+  const context=spendContext(),retained=spendState.displayed===context;
+  // Same-context spend and PR polling have independent lifetimes. Keep the PR
+  // timer alive if this fetch fails or its background commit is deferred.
+  if(!retained)clearTimeout(spendPRState.timer);
+  if(retained)spendRefreshNotice('Updating…');
+  else {spendState.displayed='';spendPRState.key='';spendPRState.data=null;spendPRState.promise=null;MoyaiUI.render($('#content'), '<p class="subtext" role="status">Loading spend…</p>');}
   const query=new URLSearchParams();if(spendState.start)query.set('start',spendState.start);if(spendState.end)query.set('end',spendState.end);
   let data,identityStatus;
   try{
-    data=await api('/api/spend?'+query);
+    data=await api('/api/spend?'+query,{recent});
     if(!current())return;
-    identityStatus=data.scope==='organization'?await api('/api/admin/identities/status'):null;
+    if(retained&&data.scope!==spendState.scope){spendState.displayed='';MoyaiUI.render($('#content'), '<p class="subtext" role="status">Loading spend…</p>');}
+    if(data.scope!=='organization'){clearTimeout(spendPRState.timer);spendPRState.key='';spendPRState.data=null;spendPRState.promise=null;}
+    // Account-link controls belong to Infrastructure, not the report's critical path.
+    identityStatus=null;
   }catch(error){
     if(!current())return;
-    $('#content').innerHTML=`<div class="page-heading"><h1>Spend</h1></div><div class="error-banner" role="alert">${esc(error.message)}</div>${renderSpendFilters(spendState.start,spendState.end)}`;
+    if(retained&&spendState.displayed===context&&error.status!==401&&error.status!==403){
+      spendRefreshNotice('Could not update. '+error.message+' Use Refresh to retry.',true);
+      if(spendState.pending)spendState.timer=setTimeout(()=>{if(current())renderSpend(true).catch(showError);},5000);
+      return;
+    }
+    clearTimeout(spendPRState.timer);
+    spendState.displayed='';spendPRState.key='';spendPRState.data=null;spendPRState.promise=null;
+    MoyaiUI.render($('#content'), `<div class="page-heading"><h1>${state.role==='admin'?'Spend & usage':'Spend'}</h1></div><div class="error-banner" role="alert">${esc(error.message)}</div>${renderSpendFilters(spendState.start,spendState.end)}`);
     bindSpendFilters();
     return;
   }
   if(!current())return;
-  const admin=data.scope==='organization';
+  if(background&&data.scope===spendState.scope&&(document.hidden||settingsInteractionActive())){
+    spendRefreshNotice();
+    spendState.timer=setTimeout(()=>{if(current())renderSpend(true).catch(showError);},5000);
+    return;
+  }
+  const restore=retained&&data.scope===spendState.scope?preserveSpendView():()=>{};
+  const admin=data.scope==='organization';spendState.scope=data.scope;
+  spendState.pending=!!(data.total.pending_costs||admin&&data.infrastructure.pending);
   spendState.start=data.start;spendState.end=data.end;
-  if(!admin)spendState.user='';
+  state.navigationCache?.put('/api/spend?'+new URLSearchParams({start:data.start,end:data.end}),data);
+  if(admin){
+    const rendered=renderAdminSpend(data,identityStatus,null,!recent,recent,background);
+    spendState.displayed=spendContext(data.start,data.end);restore();
+    await rendered;if(!current())return;
+    if(data.infrastructure.pending||data.total.pending_costs)spendState.timer=setTimeout(()=>{if(current())renderSpend(true).catch(showError);},5000);
+    return;
+  }
+  spendState.user='';
   const pending=data.total.pending_costs,missing=data.total.missing_costs;
   const verified=data.total.requests>0&&!pending&&!missing;
-  const identities=data.identities,google=identities.filter(u=>u.kind==='google'),slack=identities.filter(u=>u.kind==='slack');
-  const users=spendState.user?data.users.filter(u=>u.id===spendState.user):data.users;
-  const sessions=data.sessions.filter(s=>!spendState.user||s.user_id===spendState.user);
-  $('#content').innerHTML=`<div class="page-heading"><div><h1>${admin?'Spend':'Your LLM spend'}</h1><p class="subtext">${admin?'Model usage and infrastructure costs across your team.':'Only your model usage and costs, including your linked Slack activity.'}</p></div><span class="badge">USD</span></div>
-    ${renderSpendFilters(data.start,data.end)}
-    ${admin?renderCostSummary(data):renderPersonalSpendSummary(data)}
-    ${admin?renderInfrastructure(data):''}
-    <div class="spend-reconciliation ${verified?'verified':''}" role="status"><strong>${verified?'✓ All tracked LLM requests priced':missing?'Some costs are unavailable':data.total.requests?'Requests in progress':'Ready to track usage'}</strong><p>${verified?(admin?'User totals add up to the costs returned by your gateway for these requests.':'Your total includes the costs returned by the gateway for your requests.'):data.total.requests?`${spendCount(pending)} requests are in progress; ${spendCount(missing)} returned no final cost. Missing costs are not treated as free.`:'New model requests will be attributed to the signed-in user using the cost returned by LiteLLM.'}</p></div>
-    ${admin?`<section class="card spend-section"><div class="section-header"><h2>LLM spend by user</h2><label class="spend-user-filter"><span class="sr-only">Filter user</span><select id="spend-user"><option value="">All users</option>${data.users.map(u=>`<option value="${esc(u.id)}" ${spendState.user===u.id?'selected':''}>${esc(u.email||u.name)}</option>`).join('')}</select></label></div><div class="spend-table-wrap" role="region" aria-label="LLM spend by user" tabindex="0"><table class="spend-table"><thead><tr><th>User</th><th>Sessions</th><th>Requests</th><th>Tokens</th><th>Spend</th></tr></thead><tbody>${users.map(u=>`<tr><td><strong>${esc(u.email||u.name)}</strong><small>${u.kind==='google'?'Google SSO':u.kind==='slack'?esc(slackIdentityStatus(u)):u.kind==='unattributed'?'Earlier or unmatched gateway usage':'Shared sign-in'}</small></td><td>${spendCount(u.sessions)}</td><td>${spendCount(u.requests)}</td><td>${spendCount(u.total_tokens)}</td><td><strong>${dollars(u.spend)}</strong>${(u.pending_costs||u.missing_costs)?`<small>${spendCount(u.pending_costs)} pending · ${spendCount(u.missing_costs)} missing</small>`:''}</td></tr>`).join('')||'<tr><td colspan="5" class="subtext">No recorded model usage in this period.</td></tr>'}</tbody><tfoot><tr><th>${spendState.user?'Selected user':'All users'}</th><td colspan="3"></td><th>${dollars(spendState.user?(users[0]?.spend||0):data.total.spend)}</th></tr></tfoot></table></div><p class="subtext spend-note">Each response is attributed to the person who sent that message. Requests recorded without a user identity stay under “Unattributed / earlier usage.”</p></section>`:''}
-    <section class="card spend-section"><h2>${admin?'Sessions':'Your sessions'}${spendState.user?' for selected user':''}</h2><div class="spend-table-wrap" role="region" aria-label="Session spend" tabindex="0"><table class="spend-table"><thead><tr><th>Session</th>${admin?'<th>User</th>':''}<th>Requests</th><th>Spend</th></tr></thead><tbody>${sessions.map(s=>`<tr><td><a href="#run=${esc(s.run_id)}">${esc(s.title)}</a></td>${admin?`<td>${esc(s.user_name)}</td>`:''}<td>${spendCount(s.requests)}</td><td>${dollars(s.spend)}${s.missing_costs?'<small>Cost missing</small>':s.pending_costs?'<small>Cost pending</small>':''}</td></tr>`).join('')||`<tr><td colspan="${admin?4:3}" class="subtext">${admin?'Attributed sessions will appear after a model request.':'No model requests attributed to you in this period.'}</td></tr>`}</tbody></table></div></section>
-    <section class="card spend-section"><h2>${admin?'Models · all users':'Your models'}</h2><div class="spend-models">${data.models.map(m=>`<div><span>${esc(modelName(m.model))}</span><strong>${dollars(m.spend)}</strong><small>${spendCount(m.requests)} requests</small></div>`).join('')||'<p class="subtext">No usage yet.</p>'}</div></section>
-    <details class="card spend-section"><summary>Request costs · latest 500 in this period</summary><div class="spend-table-wrap" role="region" aria-label="Exact request costs" tabindex="0"><table class="spend-table"><thead><tr><th>Time</th><th>Model</th><th>Cache read tokens</th><th>Cache write tokens</th><th>Cost source</th><th>Exact USD</th></tr></thead><tbody>${data.request_details.filter(r=>!spendState.user||r.user_id===spendState.user).map(r=>`<tr><td><a href="#run=${esc(r.run_id)}" title="${esc(r.id)}">${esc(new Date(r.created_at).toLocaleString())}</a></td><td>${esc(modelName(r.model))}</td><td>${r.cache_read_input_tokens==null?'Not reported':spendCount(r.cache_read_input_tokens)}</td><td>${r.cache_creation_input_tokens==null?'Not reported':spendCount(r.cache_creation_input_tokens)}</td><td>${r.cost_source==='response_header'?'Response header':r.cost_source==='response_usage'?'Response usage':r.cost!==null?'Earlier record':'Not returned'}</td><td>${r.cost!==null?'$'+esc(r.cost):r.status==='pending'?'In progress':'Unknown'}</td></tr>`).join('')||'<tr><td colspan="6">No requests in this period.</td></tr>'}</tbody></table></div></details>
-    ${admin?renderSlackIdentities(slack,google,identityStatus):''}
-    <p class="subtext spend-note">LLM costs are saved from Moyai’s inference responses across gateway key rotations. ${admin?'Infrastructure uses the provider reports and monthly bills above.':'Each response is attributed to the person who sent that message. Your view excludes other users and infrastructure costs.'} Calls made with separate credential-proxy keys are not included. Usage before tracking began or outside Moyai is not included. An interrupted or failed request may have no returned cost, so this is not a full audit of the key’s lifetime spend. ${data.tracked_since?'Per-user tracking began '+esc(new Date(data.tracked_since).toLocaleString())+'.':''}</p>`;
-  if(admin)bindInfrastructure(data);
-  if(admin&&data.infrastructure.pending)spendState.timer=setTimeout(()=>{if(current())renderSpend(true).catch(showError);},5000);
-  bindSpendFilters();
-  if(!admin)return;
-  $('#spend-user').onchange=()=>{spendState.user=$('#spend-user').value;renderSpend().catch(showError);};
-  $('#refresh-identities').onclick=async()=>{const button=$('#refresh-identities');button.disabled=true;try{await api('/api/admin/identities/refresh',{method:'POST'});button.textContent='Profiles queued';toast('Profile refresh queued. Use Refresh above to see updated matches.');}catch(error){button.disabled=false;showError(error);}};
-  document.querySelectorAll('.spend-link-form').forEach(form=>form.onsubmit=async e=>{e.preventDefault();const button=form.querySelector('button');button.disabled=true;try{await api('/api/admin/spend/link-slack',{method:'POST',body:JSON.stringify({slack_user_id:form.dataset.slack,google_user_id:form.elements.google.value})});await renderSpend();toast('Slack usage linked to Google account.');}catch(error){button.disabled=false;showError(error);}});
+  const sessions=data.sessions;
+  MoyaiUI.render($('#content'), `<div class="page-heading"><div><h1>Your LLM spend</h1><p class="subtext">Only your model usage and costs, including your linked Slack activity.</p></div><span class="badge">USD</span></div>
+    ${renderSpendFilters(data.start,data.end)}<div id="spend-refresh-status" role="status"></div>
+    ${renderPersonalSpendSummary(data)}
+    <div class="spend-reconciliation ${verified?'verified':''}" role="status"><strong>${verified?'✓ All tracked LLM requests priced':missing?'Some costs are unavailable':data.total.requests?'Costs pending':'Ready to track usage'}</strong><p>${verified?'Your total includes the costs returned by the gateway for your requests.':data.total.requests?`${spendCount(pending)} costs await confirmation; ${spendCount(missing)} costs are unavailable. Missing costs are not treated as free.`:'New model requests will be attributed to the signed-in user using the cost returned by LiteLLM.'}</p></div>
+    <section class="card spend-section"><h2>Your sessions</h2><div class="spend-table-wrap" role="region" aria-label="Session spend" tabindex="0"><table class="spend-table"><thead><tr><th>Session</th><th>Requests</th><th>Spend</th></tr></thead><tbody>${sessions.map(s=>`<tr><td><a href="#run=${esc(s.run_id)}">${esc(s.title)}</a></td><td>${spendCount(s.requests)}</td><td>${dollars(s.spend)}${s.missing_costs?'<small>Cost missing</small>':s.pending_costs?'<small>Cost pending</small>':''}</td></tr>`).join('')||`<tr><td colspan="3" class="subtext">No model requests attributed to you in this period.</td></tr>`}</tbody></table></div></section>
+    <section class="card spend-section"><h2>Your models</h2><div class="spend-models">${data.models.map(m=>`<div><span>${esc(modelName(m.model))}</span><strong>${dollars(m.spend)}</strong><small>${spendCount(m.requests)} requests</small></div>`).join('')||'<p class="subtext">No usage yet.</p>'}</div></section>
+    <details class="card spend-section"><summary>Request costs · latest 500 in this period</summary><div class="spend-table-wrap" role="region" aria-label="Exact request costs" tabindex="0"><table class="spend-table"><thead><tr><th>Time</th><th>Model</th><th>Cache read tokens</th><th>Cache write tokens</th><th>Cost source</th><th>Exact USD</th></tr></thead><tbody>${data.request_details.map(r=>`<tr><td><a href="#run=${esc(r.run_id)}" title="${esc(r.id)}">${esc(new Date(r.created_at).toLocaleString())}</a></td><td>${esc(modelName(r.model))}</td><td>${r.cache_read_input_tokens==null?'Not reported':spendCount(r.cache_read_input_tokens)}</td><td>${r.cache_creation_input_tokens==null?'Not reported':spendCount(r.cache_creation_input_tokens)}</td><td>${spendCostSource(r)}</td><td>${spendCostValue(r)}</td></tr>`).join('')||'<tr><td colspan="6">No requests in this period.</td></tr>'}</tbody></table></div></details>
+    <p class="subtext spend-note">LLM costs are saved from inference responses and recovered gateway receipts. Recorded costs are preserved across gateway key rotations. Each response is attributed to the person who sent that message. Your view excludes other users and infrastructure costs. Calls made with separate credential-proxy keys are not included. Usage before tracking began or outside Moyai is not included. An interrupted or failed request may have no returned cost, so this is not a full audit of the key’s lifetime spend. ${data.tracked_since?'Per-user tracking began '+esc(new Date(data.tracked_since).toLocaleString())+'.':''}</p>`);
+  bindSpendFilters();spendState.displayed=spendContext(data.start,data.end);restore();
+  if(pending)spendState.timer=setTimeout(()=>{if(current())renderSpend(true).catch(showError);},5000);
 }

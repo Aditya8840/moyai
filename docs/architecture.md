@@ -14,7 +14,7 @@
 | Hermes | Source pinned to commit `7968c72a3cb80beaae51948378944dd6e3423b96`; dependencies prepared through Hermes PM; terminal, file, and workspace MCP tools. |
 | Model access | OpenAI Chat Completions through your LiteLLM-compatible gateway. The control plane pins the model, caps output and request count, and keeps the model key outside sandboxes. |
 | Native connections | First-class Linear, Slack, Notion, and GitHub cards; OAuth when app clients are configured; validated personal/integration-token alternative; encrypted token storage and OAuth refresh. |
-| Tool discovery | Hermes keeps terminal/file tools direct and exposes workspace MCP tools through `tool_search`, `tool_describe`, and `tool_call`. Full connector schemas load on demand; the upfront catalog listing has a 600 estimated-token budget. |
+| Tool discovery | Codex uses native client `tool_search` and Claude uses native `ToolSearch` to load authorized MCP schemas, then calls discovered tools directly. Hermes keeps terminal/file tools direct and uses `tool_search`, `tool_describe`, and `tool_call`; its upfront catalog listing has a 600 estimated-token budget. |
 | Organization controls | Shared connections, separate admin/member access, enabled/paused and read-only policies, health checks, and an audit history of connection changes. |
 | Slack sessions | Mention @Moyai in a channel the bot has joined. Signed, deduplicated events start one saved session per thread. AgentChat routes mentions, thread follow-ups, and direct messages into saved conversations. Each top-level DM starts a new session; replies and native working status stay in its thread. |
 | External writes | All enabled connected-app tools run directly, including new tools, GitHub PR creation/maintenance, Linear ticket creation/updates/comments, Slack messages and Notion writes. Read-only/paused policies still block writes. Ambiguous write failures are reported as uncertain and never retried automatically. |
@@ -270,7 +270,7 @@ can temporarily change the observed count; capacity above the ceiling queues.
 memory, concurrency and account quotas still apply; the app setting is not a
 reservation of provider capacity. Each sandbox currently requests 2 CPU/4 GiB.
 
-With Temporal enabled, a top-level chat can use `agents_fanout` to supply either
+With Temporal enabled, any chat agent can use `agents_fanout` to supply either
 explicit labeled assignments or common instructions plus an ordered list of
 items. The server divides items into balanced contiguous partitions and assigns
 each a stable one-based index. For example, 100 items with `workers=5` creates
@@ -279,12 +279,13 @@ five workers with exactly 20 cases each. Repeated launch calls with the same
 requires a new key. Each child inherits the initiating message's user, selected
 model, repository and enabled app set, and receives an isolated snapshot of the
 parent's current files. Finish file writes before delegating. Child conversations
-start fresh; child changes are not automatically merged. Workers cannot launch
-further children. Child agents follow the same policy: all enabled connected-app tools execute directly under the organization connection policies.
+start fresh; child changes are not automatically merged. Workers can delegate their assigned work to further agents with the same shared
+queue and concurrency bounds. Each level keeps its direct parent and original workflow ancestry;
+credentials still require the current requester and original session scope. Child agents follow the same policy: all enabled connected-app tools execute directly under the organization connection policies.
 
 After the delegation tool completes, the coordinator checkpoints between tool
 rounds, terminates its sandbox and waits durably. Its original user message stays
-open. Once every child has settled (including failures), it reacquires capacity,
+open. Once every child and its descendants have settled (including failures), it reacquires capacity,
 restores its checkpoint and continues the same request with the worker reports.
 This works even with only one available sandbox slot. Each child is an ordinary
 Temporal `SessionWorkflow`; parent/group relationships and result data are stored

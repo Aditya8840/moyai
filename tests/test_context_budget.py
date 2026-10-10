@@ -115,11 +115,13 @@ def test_all_routes_check_injected_input_before_admission(workspace, monkeypatch
         assert payload[output_field] == 8000
         assert payload['model'] == 'openai/gpt-6-astra'
         assert 'injected-private-memory' in json.dumps(payload)
+        assert 'injected-private-skills' in json.dumps(payload)
         assert 'tool-schema' in json.dumps(payload)
         return 9000, 'fixture'
     monkeypatch.setattr(app.state.context_budget, 'limits', small_limits)
     monkeypatch.setattr(app.state.context_budget, 'count', count)
     monkeypatch.setattr('app.memory.Memory.context', lambda *a: 'injected-private-memory')
+    monkeypatch.setattr('app.skills.Skills.context', lambda *a: 'injected-private-skills')
     monkeypatch.setattr('app.context_budget.httpx.AsyncClient', lambda **kw: pytest.fail('Inference admitted'))
     run = app.state.store.create_run('context check', '', 'modal', [], model='openai/gpt-6-astra')
     app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
@@ -131,10 +133,11 @@ def test_all_routes_check_injected_input_before_admission(workspace, monkeypatch
     assert app.state.store.run(run['id'])['model_calls'] == 0
     assert not app.state.store.rows('SELECT * FROM model_requests')
     assert 'injected-private-memory' not in json.dumps(app.state.store.events(run['id']))
+    assert 'injected-private-skills' not in json.dumps(app.state.store.events(run['id']))
 
 
 def test_compaction_splits_to_fit_and_advances_only_returned_prefix(workspace, monkeypatch, tmp_path):
-    from sandbox.context_store import ContextStore
+    from agent.context_store import ContextStore
     app, client = workspace
     async def small_limits(model): return limits(7000, 1000)
     monkeypatch.setattr(app.state.context_budget, 'limits', small_limits)
@@ -179,7 +182,7 @@ def test_revocation_during_count_cannot_admit_model(workspace, monkeypatch):
 
 
 @pytest.mark.parametrize('route,field', [('messages', 'messages'), ('responses', 'input'), ('chat/completions', 'messages')])
-@pytest.mark.parametrize('code,expected', [('context_length_exceeded', 409), ('rate_limit_exceeded', 502)])
+@pytest.mark.parametrize('code,expected', [('context_length_exceeded', 409), ('rate_limit_exceeded', 400)])
 def test_only_confirmed_provider_context_rejection_can_request_recovery(workspace, monkeypatch, route, field, code, expected):
     app, client = workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
@@ -332,6 +335,7 @@ def test_native_window_is_authenticated_and_reserves_injected_context(workspace,
     assert client.get(path).status_code == 401
     response = client.get(path, headers={'Authorization': 'Bearer cap'})
     assert response.status_code == 200
-    assert response.json() == {'model': 'openai/gpt-6-astra', 'input_budget': 72000 - 1400 - 4096}
+    assert response.json() == {'model': 'openai/gpt-6-astra', 'input_budget': 72000 - 1400 - 4096,
+                               'live_compaction': True}
     assert 'private' not in response.text
     assert not app.state.store.rows('SELECT * FROM model_requests')

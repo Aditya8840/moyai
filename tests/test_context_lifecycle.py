@@ -1,13 +1,101 @@
 import json
+import os
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 
 import pytest
 
 from sandbox import agent as lifecycle
-from sandbox.context_store import ContextStore, ContextUnavailable, open_context
-from sandbox.harness_agent import TurnJournal
+from agent.context_store import ContextStore, ContextUnavailable, open_context
+from agent.harnesses.harness_agent import TurnJournal
 from test_runner import runner
+
+
+@pytest.mark.parametrize('fresh_child', [False, True])
+def test_native_plaintext_is_removed_before_attachments_and_project_start(tmp_path, monkeypatch, fresh_child):
+    root, home, temporary = tmp_path / 'session/.native-sdk', tmp_path / 'root', tmp_path / 'tmp'
+    old_paths = [root / 'claude/projects/parent.jsonl', home / '.claude/projects/parent.jsonl',
+                 home / '.cache/litellm-harness/parent.json', temporary / 'claude-resume-parent/session.jsonl',
+                 temporary / 'litellm-harness-parent/state.json', temporary / 'moyai-codex-parent/logs/runtime.log']
+    for path in old_paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('PRIVATE PARENT TRANSCRIPT')
+    unrelated = temporary / 'unrelated.txt'
+    unrelated.write_text('Preserve unrelated files')
+    old_temp = tmp_path / 'previous-temp'
+    old_temp.mkdir()
+    monkeypatch.setattr(tempfile, 'tempdir', str(old_temp))
+    monkeypatch.setenv('TMPDIR', str(old_temp))
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'test-capability')
+    monkeypatch.setattr(lifecycle, 'Path', lambda p: Path(tmp_path / str(p).lstrip('/')) if str(p).startswith('/') else Path(p))
+    order, project_temporaries = [], []
+    def check(name):
+        order.append(name)
+        assert all(not path.exists() for path in old_paths)
+        assert unrelated.read_text() == 'Preserve unrelated files'
+        assert tempfile.gettempdir() == os.environ['TMPDIR'] == str(old_temp)
+        path = Path(tempfile.mkdtemp(prefix='project-service-')) / 'state'
+        path.write_text('PROJECT STARTUP DATA')
+        project_temporaries.append(path)
+    monkeypatch.setattr(lifecycle, 'prepare_attachments', lambda *a, **k: check('attachments'))
+    def project(*args):
+        check('project')
+        raise RuntimeError('Stop the fixture before running user code')
+    monkeypatch.setattr(lifecycle, 'prepare_project', project)
+    monkeypatch.setattr(lifecycle, 'emit', lambda *a, **k: None)
+    result = lifecycle.run_agent({'harness': 'codex', 'repo_url': '', 'fresh_child': fresh_child}, SimpleNamespace())
+    assert result == 1 and order == ['attachments', 'project']
+    assert not root.exists() and all(path.exists() for path in project_temporaries)
+    assert tempfile.tempdir == os.environ['TMPDIR'] == str(old_temp)
+    assert unrelated.exists()
+
+
+async def test_real_sdk_resume_temporary_is_owned_and_removed_on_lifecycle_failure(tmp_path, monkeypatch):
+    from claude_agent_sdk import ClaudeAgentOptions
+    from claude_agent_sdk._internal.session_resume import materialize_resume_session
+    from agent.harnesses.native_session import NativeSession, native_storage
+    from uuid import uuid4
+    root = tmp_path / 'session/.native-sdk'
+    session_id = str(uuid4())
+    class SavedTranscript:
+        async def load(self, key):
+            assert key['session_id'] == session_id
+            return [{'type': 'user', 'message': {'role': 'user', 'content': 'PRIVATE RESUME MARKER'}}]
+    old_temp = str(tmp_path / 'project-temp')
+    Path(old_temp).mkdir()
+    project_file = Path(old_temp) / 'project-service-state'
+    project_file.write_text('KEEP PROJECT SERVICE RUNNING')
+    monkeypatch.setattr(tempfile, 'tempdir', old_temp)
+    monkeypatch.delenv('TMPDIR', raising=False)
+    store = ContextStore(root.parent / 'context.sqlite3', 'run')
+    native = NativeSession(SimpleNamespace(cwd=str(tmp_path), spec={}, relay=SimpleNamespace()), store, 'claude-agent-sdk', {})
+    try:
+        with pytest.raises(RuntimeError, match='workspace interrupted'):
+            with native_storage(root, tmp_path / 'home', tmp_path / 'tmp'):
+                native.begin()
+                assert project_file.exists() and tempfile.tempdir == old_temp
+                try:
+                    with native.temporary_files():
+                        assert tempfile.gettempdir() == native.env['TMPDIR'] and 'TMPDIR' not in os.environ
+                        result = await materialize_resume_session(ClaudeAgentOptions(
+                            cwd=str(tmp_path), session_store=SavedTranscript(), resume=session_id,
+                            env={**native.env, 'ANTHROPIC_API_KEY': 'fixture-only'}))
+                        assert result is not None and result.config_dir.is_relative_to(root / 'tmp')
+                        transcript = next(result.config_dir.rglob('*.jsonl'))
+                        assert 'PRIVATE RESUME MARKER' in transcript.read_text()
+                        assert transcript.stat().st_mode & 0o777 == 0o600
+                        # Interrupt before SDK cleanup returns; owned plaintext
+                        # still goes away without breaking project services.
+                        raise RuntimeError('workspace interrupted')
+                finally:
+                    native.close()
+                    assert tempfile.tempdir == old_temp and project_file.exists()
+    finally:
+        store.close()
+    assert not root.exists() and not transcript.exists()
+    assert tempfile.tempdir == old_temp and 'TMPDIR' not in os.environ
+    assert project_file.read_text() == 'KEEP PROJECT SERVICE RUNNING'
 
 
 def test_runner_uses_checkpoint_without_serializing_all_chat_again(runner, monkeypatch):
@@ -24,9 +112,9 @@ def test_missing_checkpoint_context_stops_instead_of_forgetting_history(tmp_path
     assert not (tmp_path / 'context.sqlite3').exists()
 
 
-@pytest.mark.parametrize('harness', ['claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop'])
+@pytest.mark.parametrize('harness', ['claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop', 'pi'])
 def test_durable_harness_starts_new_turn_with_unknown_tool_outcome(tmp_path, monkeypatch, harness):
-    from sandbox.harness_registry import create_agent
+    from agent.harnesses.harness_registry import create_agent
     store = ContextStore(tmp_path / 'context.sqlite3', 'run')
     store.initialize([{'role': 'assistant', 'tool_calls': [{'id': 'old', 'function': {'name': 'Edit'}}]}])
     agent = create_agent(harness, spec={}, relay=SimpleNamespace(compact=lambda *_: 'Summary'),
@@ -61,10 +149,10 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
         def listen(self, *a): pass
         def close(self): pass
         def can_continue(self, *a): return False
-    monkeypatch.setattr(lifecycle, 'ActiveTurnSteering', Steering)
-    monkeypatch.setattr('sandbox.continuation.AgentSteer', Steering)
+    monkeypatch.setattr('agent.agent.ActiveTurnSteering', Steering)
+    monkeypatch.setattr('agent.agent.AgentSteer', Steering)
     events, prompts, actions = [], [], []
-    monkeypatch.setattr(lifecycle, 'emit', lambda kind, message, *a, **kw: events.append((kind, message, kw)))
+    monkeypatch.setattr(lifecycle, 'emit', lambda kind, message, data=None, **kw: events.append((kind, message, data, kw)))
     maintenance = []
     def maintain(snapshot, ack):
         maintenance.append(snapshot)
@@ -74,10 +162,14 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
         compact=lambda *a: pytest.fail('Reply must not wait for compaction'), last_error='', wait_group='', wait_credential='')
     class Adapter:
         compaction_window = 128_000
-        def __init__(self, context_store): self.store = context_store
+        def __init__(self, context_store, activity): self.store, self.activity = context_store, activity
         def validate(self): pass
         def close(self): pass
         def run_conversation(self, prompt, *, conversation_history, system_message):
+            self.activity.emit('status', 'Reconnecting',
+                {'activity_version': 1, 'phase': 'reconnecting', 'stage': 'model_transport'})
+            self.activity.emit('status', 'Recovered',
+                {'activity_version': 1, 'phase': 'recovered', 'stage': 'model_transport'})
             self.store.maintain(relay, input_budget=self.compaction_window)
             history = self.store.history()
             journal = TurnJournal(history, prompt, self.store)
@@ -88,7 +180,7 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
             journal.tool_finished(f'call{number}', f'receipt-{number}')
             journal.finish('Done')
             return {'completed': True, 'messages': journal.messages, 'final_response': 'Done'}
-    monkeypatch.setattr('sandbox.harness_registry.create_agent', lambda *a, **kw: Adapter(kw['context_store']))
+    monkeypatch.setattr('agent.agent.create_agent', lambda *a, **kw: Adapter(kw['context_store'], kw['activity']))
     session = tmp_path / 'session'
     session.mkdir()
     legacy = [{'role': 'user', 'content': 'Keep Escape support; do not deploy.'},
@@ -100,6 +192,8 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
     spec = {'run_id': 'run', 'prompt': 'Continue', 'repo_url': '', 'model': 'configured-model', 'broker_url': 'http://relay.test',
             'harness': 'claude-agent-sdk', 'chat_enabled': True}
     assert lifecycle.run_agent(spec, relay) == 0
+    assert [data['phase'] for kind, _, data, _ in events
+            if kind == 'status' and data and data.get('stage') == 'model_transport'] == ['reconnecting', 'recovered']
     assert len(maintenance) == 2 and all(snapshot for snapshot in maintenance)
     assert legacy_path.read_bytes() == original
     store = ContextStore(session / 'context.sqlite3', 'run')
@@ -120,10 +214,10 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
     store.close()
 
 
-@pytest.mark.parametrize('harness', ['claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop'])
+@pytest.mark.parametrize('harness', ['claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop', 'pi'])
 @pytest.mark.parametrize('outage', [False, True])
 def test_every_durable_harness_answers_with_full_tail_while_maintenance_pending(tmp_path, monkeypatch, harness, outage):
-    from sandbox.harness_registry import create_agent
+    from agent.harnesses.harness_registry import create_agent
     store = ContextStore(tmp_path / 'context.sqlite3', 'run')
     store.initialize([{'role': 'assistant', 'content': f'receipt-{i:03d} ' + 'log ' * 500} for i in range(60)])
     submitted = []

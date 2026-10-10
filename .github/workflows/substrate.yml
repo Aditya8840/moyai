@@ -4,6 +4,7 @@ on:
     paths:
       - 'app/**'
       - 'sandbox/**'
+      - 'agent/**'
       - 'scripts/substrate*'
       - 'Dockerfile.sandbox'
       - '.github/workflows/substrate.yml'
@@ -29,7 +30,7 @@ jobs:
           go-version: '1.27.0'
           cache: false
       - name: Unit and protocol tests
-        run: uv run --python 3.13 pytest -q tests/test_sandbox_providers.py tests/test_runner.py tests/test_durable.py tests/test_environment_discovery.py tests/test_infrastructure_costs.py
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_sandbox_providers.py tests/test_runner.py tests/test_durable.py tests/test_environments.py tests/test_environment_discovery.py tests/test_infrastructure_costs.py
       - uses: actions/checkout@v4
         with:
           repository: agent-substrate/substrate
@@ -42,6 +43,10 @@ jobs:
             ~/.cache/go-build
             ~/go/pkg/mod
           key: substrate-go-1.27-${{ runner.os }}-${{ runner.arch }}-92b74c0
+      - name: Pull the pinned local registry from the official mirror
+        run: |
+          docker pull public.ecr.aws/docker/library/registry:3@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8
+          docker tag public.ecr.aws/docker/library/registry:3@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8 registry:3
       - name: Create disposable Kubernetes cluster
         working-directory: .substrate
         run: hack/create-kind-cluster.sh

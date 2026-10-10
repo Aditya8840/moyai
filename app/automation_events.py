@@ -9,6 +9,7 @@ import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
+from contextlib import nullcontext
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -49,27 +50,8 @@ class AutomationEvents:
         self.automations = automations
         self.store, self.security = automations.store, automations.security
         self.lock = asyncio.Lock()
-        with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
-            columns = {r['name'] for r in conn.execute('PRAGMA table_info(automation_webhooks)')}
-            if columns and 'provider' not in columns:
-                conn.execute('ALTER TABLE automation_webhooks RENAME TO automation_webhooks_legacy')
-            conn.execute("""CREATE TABLE IF NOT EXISTS automation_webhooks (
-                automation_id TEXT NOT NULL REFERENCES automations(id), provider TEXT NOT NULL,
-                encrypted TEXT NOT NULL, PRIMARY KEY(automation_id,provider))""")
-            if columns and 'provider' not in columns:
-                for key in conn.execute('SELECT k.*,a.definition FROM automation_webhooks_legacy k JOIN automations a ON a.id=k.automation_id').fetchall():
-                    providers = {t.provider for _, t in sources(key) if t.provider != 'slack'}
-                    if len(providers) == 1:
-                        conn.execute('INSERT INTO automation_webhooks VALUES(?,?,?)', (key['automation_id'], providers.pop(), key['encrypted']))
-                conn.execute('DROP TABLE automation_webhooks_legacy')
-        self.store.execute("""CREATE TABLE IF NOT EXISTS automation_events (
-            occurrence TEXT PRIMARY KEY, automation_id TEXT NOT NULL REFERENCES automations(id),
-            revision INTEGER NOT NULL, context TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-            detail TEXT NOT NULL DEFAULT '', received_at TEXT NOT NULL, expires_at TEXT NOT NULL)""")
-        self.store.execute('CREATE INDEX IF NOT EXISTS automation_events_pending ON automation_events(status,received_at)')
-        self.store.execute('''CREATE TABLE IF NOT EXISTS automation_session_cursors (
-            automation_id TEXT PRIMARY KEY REFERENCES automations(id), message_id INTEGER NOT NULL)''')
+        if self.store.schema_updates:
+            initialize_schema(self.store)
 
     def source_ready(self, row, event):
         if event.provider == 'session':
@@ -120,7 +102,7 @@ class AutomationEvents:
 
     async def accept(self, row, delivery, context):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             result = self.accept_in(conn, row, delivery, context)
         # Do not ACK before the local durable write / optional volume checkpoint.
         await self.automations.checkpoints.flush()
@@ -182,7 +164,7 @@ class AutomationEvents:
         changed = False
         for candidate in self.store.rows('SELECT id FROM automations WHERE paused=0'):
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 row = conn.execute('SELECT * FROM automations WHERE id=?', (candidate['id'],)).fetchone()
                 if not row or row['paused'] or not any(t.provider == 'session' for _,t in sources(row)):
                     continue
@@ -214,11 +196,16 @@ class AutomationEvents:
             return
         async with self.lock:
             await self.capture_sessions()
-            # One head item per automation avoids a busy inbox starving others.
-            rows = self.store.rows("""SELECT e.* FROM automation_events e WHERE e.status='pending' AND e.rowid IN
-                (SELECT MIN(rowid) FROM automation_events WHERE status='pending' GROUP BY automation_id)
-                ORDER BY e.received_at LIMIT 200""")
+            # Drain bursts in bounded rounds across automations. Earlier sessions
+            # do not block new events; a full cap or unavailable setup still does.
+            rows = self.store.rows("""SELECT * FROM (
+                SELECT e.*,ROW_NUMBER() OVER (PARTITION BY automation_id ORDER BY received_at,occurrence) AS position
+                FROM automation_events e WHERE status='pending')
+                ORDER BY position,received_at,automation_id LIMIT 200""")
+            waiting = set()
             for event in rows:
+                if event['automation_id'] in waiting:
+                    continue
                 try:
                     result = await self.automations.launch(event['automation_id'], event['revision'], event['occurrence'], event['expires_at'], event=True)
                 except HTTPException as exc:
@@ -226,6 +213,7 @@ class AutomationEvents:
                         raise
                     continue
                 if result['outcome'] == 'waiting':
+                    waiting.add(event['automation_id'])
                     self.store.execute('UPDATE automation_events SET detail=? WHERE occurrence=?',
                                        (result['detail'], event['occurrence']))
                 else:
@@ -326,6 +314,32 @@ class AutomationEvents:
         if not valid:
             raise HTTPException(401, 'Webhook timestamp has expired.')
 
+    def configure(self, automation_id, body, owner_id, *, connection=None):
+        """One transactional owner for web and broker receiver configuration."""
+        with self.store.connect() if connection is None else nullcontext(connection) as conn:
+            if connection is None:
+                conn.begin_write()
+            row = conn.execute('SELECT * FROM automations WHERE id=?', (automation_id,)).fetchone()
+            if not row or row['owner_id'] != owner_id:
+                raise HTTPException(404, 'Automation not found for the current requester.')
+            if row['revision'] != body.revision:
+                raise HTTPException(409, 'Automation changed. Refresh before configuring the webhook.')
+            provider = self.provider(row, body.provider)
+            if provider in {'slack', 'session'}:
+                raise HTTPException(409, 'This automation does not use a webhook secret.')
+            if provider in {'linear', 'pagerduty'} and not body.secret:
+                raise HTTPException(422, 'Enter the signing secret from your provider webhook settings.')
+            secret = body.secret or secrets.token_urlsafe(32)
+            if not 16 <= len(secret) <= 512:
+                raise HTTPException(422, 'Use a signing secret of 16 to 512 characters.')
+            encrypted = self.security.encrypt(secret)
+            conn.execute("UPDATE automations SET paused=1,revision=revision+1,updated_at=?,sync_error='' WHERE id=?",
+                         (now(), automation_id))
+            conn.execute('INSERT INTO automation_webhooks VALUES(?,?,?) ON CONFLICT(automation_id,provider) DO UPDATE SET encrypted=excluded.encrypted',
+                         (automation_id, provider, encrypted))
+        self.automations.next_sync = 0
+        return secret, body.revision + 1
+
     def routes(self):
         router = APIRouter()
 
@@ -342,25 +356,9 @@ class AutomationEvents:
             self.security.require(request, mutation=True)
             row = self.automations.row(automation_id)
             self.automations.require_owner(row, request)
-            provider = self.provider(row, body.provider)
-            if provider in {'slack','session'}:
-                raise HTTPException(409, 'This automation does not use a webhook secret.')
-            if provider in {'linear','pagerduty'} and not body.secret:
-                raise HTTPException(422, 'Enter the signing secret from your provider webhook settings.')
-            secret = body.secret or secrets.token_urlsafe(32)
-            if len(secret) < 16:
-                raise HTTPException(422, 'Use a signing secret of at least 16 characters.')
-            with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
-                changed = conn.execute("UPDATE automations SET paused=1,revision=revision+1,updated_at=?,sync_error='' WHERE id=? AND revision=?",
-                                       (now(), automation_id, body.revision)).rowcount
-                if not changed:
-                    raise HTTPException(409, 'Automation changed. Refresh before configuring the webhook.')
-                conn.execute('INSERT INTO automation_webhooks VALUES(?,?,?) ON CONFLICT(automation_id,provider) DO UPDATE SET encrypted=excluded.encrypted',
-                             (automation_id, provider, self.security.encrypt(secret)))
-            self.automations.next_sync = 0
+            secret, revision = self.configure(automation_id, body, row['owner_id'])
             await self.automations.checkpoints.flush()
-            return {'secret': secret if not body.secret else '', 'revision': body.revision + 1}
+            return {'secret': secret if not body.secret else '', 'revision': revision}
 
         @router.post('/api/automations/{automation_id}/test-event')
         async def test_event(automation_id: str, body: TestEvent, request: Request):
@@ -375,3 +373,27 @@ class AutomationEvents:
 
 
         return router
+
+
+def initialize_schema(store):
+    with store.connect() as conn:
+        conn.begin_write()
+        columns = conn.column_names('automation_webhooks')
+        if columns and 'provider' not in columns:
+            conn.execute('ALTER TABLE automation_webhooks RENAME TO automation_webhooks_legacy')
+        conn.execute("""CREATE TABLE IF NOT EXISTS automation_webhooks (
+            automation_id TEXT NOT NULL REFERENCES automations(id), provider TEXT NOT NULL,
+            encrypted TEXT NOT NULL, PRIMARY KEY(automation_id,provider))""")
+        if columns and 'provider' not in columns:
+            for key in conn.execute('SELECT k.*,a.definition FROM automation_webhooks_legacy k JOIN automations a ON a.id=k.automation_id').fetchall():
+                providers = {t.provider for _, t in sources(key) if t.provider != 'slack'}
+                if len(providers) == 1:
+                    conn.execute('INSERT INTO automation_webhooks VALUES(?,?,?)', (key['automation_id'], providers.pop(), key['encrypted']))
+            conn.execute('DROP TABLE automation_webhooks_legacy')
+    store.execute("""CREATE TABLE IF NOT EXISTS automation_events (
+        occurrence TEXT PRIMARY KEY, automation_id TEXT NOT NULL REFERENCES automations(id),
+        revision INTEGER NOT NULL, context TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+        detail TEXT NOT NULL DEFAULT '', received_at TEXT NOT NULL, expires_at TEXT NOT NULL)""")
+    store.execute('CREATE INDEX IF NOT EXISTS automation_events_pending ON automation_events(status,received_at)')
+    store.execute('''CREATE TABLE IF NOT EXISTS automation_session_cursors (
+        automation_id TEXT PRIMARY KEY REFERENCES automations(id), message_id INTEGER NOT NULL)''')

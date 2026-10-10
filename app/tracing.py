@@ -11,12 +11,16 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.trace import SpanContext, SpanKind, Status, StatusCode, TraceFlags
 
-from sandbox.trace_content import trace_content
-from sandbox.memory_history import private_memory as is_memory_tool
+from agent.trace_content import private_tool, trace_content
+from sandbox.broker_failure import safe_error, error_summary
+from .native_trace import MODEL_TEXT_LIMIT
 from .slack_mentions import MENTION
 from .trace_outbox import RaindropEventOutbox, TraceOutbox
+from .user_preferences import UserPreferences
 
 log = logging.getLogger(__name__)
+# Message text also appears in compatibility attributes on the same OTLP span.
+MODEL_JSON_BYTES = 2 * 1024 * 1024
 
 
 def best_effort(method):
@@ -24,10 +28,21 @@ def best_effort(method):
     def wrapped(self, *args, **kwargs):
         if not self.enabled:
             return
+        connection = kwargs.get('connection')
+        if connection is not None:
+            # A caught SQL error still aborts a PostgreSQL transaction. Keep
+            # optional tracing inside the answer's transaction, but isolate
+            # capture failures so the answer and memory review can commit.
+            connection.execute('SAVEPOINT agent_trace_capture')
         try:
             return method(self, *args, **kwargs)
         except Exception as exc:
+            if connection is not None:
+                connection.execute('ROLLBACK TO SAVEPOINT agent_trace_capture')
             log.warning('Agent trace capture failed (%s)', type(exc).__name__)
+        finally:
+            if connection is not None:
+                connection.execute('RELEASE SAVEPOINT agent_trace_capture')
     return wrapped
 
 
@@ -40,19 +55,18 @@ def context(trace_id, span_id):
 
 
 class AgentTracing:
-    def __init__(self, store, settings, processor=None):
+    def __init__(self, store, settings, processor=None, *, preferences=None):
         self.store, self.settings = store, settings
+        self.preferences = preferences or UserPreferences(store, None, None)
         destinations = settings.trace_destinations()
         self.enabled = bool(destinations)
         self.resource = Resource({'service.name': 'moyai',
-                                  'deployment.environment.name': settings.trace_environment})
+                                  'deployment.environment.name': settings.trace_environment,
+                                  'deployment.environment': settings.trace_environment,
+                                  **({'agent.version': settings.moyai_build_sha} if settings.moyai_build_sha else {})})
         self.processor = processor
-        with store.connect() as conn:
-            conn.execute('''CREATE TABLE IF NOT EXISTS trace_contexts (
-                run_id TEXT NOT NULL, message_id INTEGER NOT NULL,
-                trace_id TEXT NOT NULL, span_id TEXT NOT NULL, parent_id TEXT,
-                session_id TEXT NOT NULL, agent_name TEXT NOT NULL,
-                PRIMARY KEY(run_id,message_id))''')
+        if store.schema_updates:
+            initialize_schema(store)
         self.outboxes = [TraceOutbox(store, *destination) for destination in destinations] if processor is None else []
         raindrop = next((d for d in destinations if d[0] == 'trace_outbox_raindrop'), None)
         self.events = (RaindropEventOutbox(store, raindrop[1].removesuffix('/traces') + '/events/track', raindrop[2])
@@ -70,14 +84,16 @@ class AgentTracing:
                     saved['session_id'], saved['agent_name'])
         root = f"{run['id']}:{message_id or 0}"
         parent = None
+        inherited_trace = None
         session = run['id']
         if run.get('parent_run_id'):
             groups = connection.execute('SELECT * FROM agent_groups WHERE id=?', (run['agent_group_id'],)).fetchall()
             if groups and groups[0]['status'] in {'preparing', 'running'}:
-                session = run['parent_run_id']
-                root = f"{session}:{groups[0]['message_id']}"
-                parent = identifier('agent:' + root, 8)
-        trace_id = identifier('trace:' + root, 16)
+                parent_run = connection.execute('SELECT * FROM runs WHERE id=?', (run['parent_run_id'],)).fetchone()
+                if parent_run:
+                    self.store.root_id_in(connection, run['id'])
+                    inherited_trace, parent, _, session, _ = self.identity(dict(parent_run), groups[0]['message_id'], connection)
+        trace_id = inherited_trace or identifier('trace:' + root, 16)
         span_id = identifier(f"agent:{run['id']}:{message_id or 0}", 8)
         name = ' '.join(self.content(run.get('agent_label') or 'moyai').split())[:160] or 'moyai'
         # Freeze attribution before a group finishes or a label changes. A late
@@ -87,8 +103,9 @@ class AgentTracing:
              format(parent, '016x') if parent else None, session, name))
         return trace_id, span_id, parent, session, name
 
-    def content(self, value):
-        return trace_content(value, secrets=(self.settings.litellm_api_key, self.settings.litellm_trace_api_key,
+    def content(self, value, *, limit=16000):
+        return trace_content(value, limit=limit, secrets=(self.settings.litellm_api_key, self.settings.litellm_trace_api_key,
+            self.settings.lens_feedback_api_key,
             self.settings.raindrop_write_key, self.settings.langfuse_secret_key,
             self.settings.langfuse_public_key, self.settings.langsmith_api_key,
             self.settings.braintrust_api_key, self.settings.modal_token_secret))
@@ -99,7 +116,8 @@ class AgentTracing:
         Raindrop accepts legacy content; LangSmith's GenAI mapper requires
         parts. Keep both representations of the same sanitized text.
         """
-        cleaned = [{'role': m['role'], 'content': self.content(m['content']) if m.get('content') is not None else None,
+        cleaned = [{'role': m['role'],
+                    'content': self.content(m['content'], limit=MODEL_TEXT_LIMIT) if m.get('content') is not None else None,
                     **({'tool_names': [self.content(n)[:120] for n in m['tool_names'][:100]]}
                        if 'tool_names' in m else {})} for m in messages]
         while True:
@@ -107,7 +125,7 @@ class AgentTracing:
             genai = json.dumps([{**m, 'parts': [{'type': 'text', 'content': m['content']}] if m['content'] is not None else []}
                                 for m in cleaned],
                                ensure_ascii=False)
-            if max(len(legacy), len(genai)) <= 16000:
+            if max(len(legacy.encode()), len(genai.encode())) <= MODEL_JSON_BYTES:
                 return legacy, genai
             # Shrink values, never the encoded JSON. Output choices are bounded
             # below, and tool names are capped, so content reduction terminates.
@@ -131,10 +149,10 @@ class AgentTracing:
         if not user:
             return None
         account = connection.execute('''SELECT u.kind,u.email,linked.email AS sso_email
-            FROM users u LEFT JOIN users linked ON linked.id=u.linked_user_id AND linked.kind='google'
+            FROM users u LEFT JOIN users linked ON linked.id=u.linked_user_id AND linked.kind IN ('google','cloudflare')
             WHERE u.id=?''', (user,)).fetchone()
         if account:
-            email = account['email'] if account['kind'] == 'google' else account['sso_email']
+            email = account['email'] if account['kind'] in {'google', 'cloudflare'} else account['sso_email']
             if email:
                 return email
         # Unlinked Slack and shared-password accounts have no SSO email.
@@ -153,6 +171,10 @@ class AgentTracing:
                       # Raindrop groups spans into conversations and turns by these keys.
                       'traceloop.association.properties.convo_id': session,
                       'traceloop.association.properties.event_id': format(trace_id, '032x'), **attrs}
+        attributes['deployment.environment'] = self.settings.trace_environment
+        attributes.pop('agent.version', None)
+        if self.settings.moyai_build_sha:
+            attributes['agent.version'] = self.settings.moyai_build_sha
         user = self.user_identity(run, message_id, connection)
         if user:
             attributes['user.id'] = user
@@ -208,7 +230,7 @@ class AgentTracing:
                 'braintrust.metadata.environment': self.settings.trace_environment,
                 'braintrust.tags': ['moyai', self.settings.trace_environment],
             })
-        error = self.content(attrs.get('output.value') or attrs.get('moyai.status') or 'Operation failed') if failed else None
+        error = self.content(attrs.get('error.message') or ('Operation ' + str(attrs.get('moyai.status') or 'failed'))) if failed else None
         span = ReadableSpan(
             name=agent_name if root else name, context=context(trace_id, agent_id if root else identifier(span_id, 8)),
             parent=context(trace_id, parent_id) if parent_id else None,
@@ -216,7 +238,7 @@ class AgentTracing:
             start_time=int(start), end_time=max(int(start), int(end)),
             status=Status(StatusCode.ERROR, error) if failed else Status(StatusCode.OK),
             # LangSmith maps exception events to errors; status alone is lost.
-            events=[Event('exception', {'exception.message': error}, timestamp=int(end))] if failed else [],
+            events=[Event('exception', {'exception.message': error, 'exception.type': str(attrs.get('error.type', 'OperationError'))}, timestamp=int(end))] if failed else [],
         )
         if self.processor is not None:
             self.processor.on_end(span)
@@ -226,7 +248,7 @@ class AgentTracing:
             self.events.enqueue(span, connection)
 
     @best_effort
-    def finish_turn(self, run_id, message_id, output, status, connection=None):
+    def finish_turn(self, run_id, message_id, output, status, *, connection=None):
         def rows(sql, values):
             return [dict(r) for r in connection.execute(sql, values).fetchall()] if connection is not None else self.store.rows(sql, values)
         run = rows('SELECT * FROM runs WHERE id=?', (run_id,))[0]
@@ -239,12 +261,33 @@ class AgentTracing:
         if message:
             inputs += [m['content'] for m in rows(
                 'SELECT content FROM messages WHERE run_id=? AND steering_parent_id=? ORDER BY id', (run_id, message_id))]
+        diagnostic = {}
+        if status not in {'completed', 'steered'}:
+            errors = rows("SELECT data FROM events WHERE run_id=? AND kind='error' "
+                          "AND json_number(data,'turn_id')=? AND json_text(data,'phase')='sdk_failure' "
+                          'ORDER BY id DESC LIMIT 1', (run_id, message_id or 0))
+            if errors:
+                diagnostic = self.error_attributes(json.loads(errors[0]['data']))
         self.emit(run, message_id, 'moyai', '', datetime.fromisoformat(started).timestamp() * 1e9,
                   time.time_ns(), {'gen_ai.operation.name': 'invoke_agent',
                   'openinference.span.kind': 'AGENT', 'input.value': self.content('\n\n'.join(inputs)),
                   'output.value': self.content(output), 'moyai.status': status,
-                  **self.slack_source(run_id, rows)}, root=True,
+                  **self.slack_source(run_id, rows), **diagnostic}, root=True,
                   failed=status not in {'completed', 'steered'}, connection=connection)
+
+    @best_effort
+    def runtime_phase(self, run_id, message_id, phase, start, end, *, segment=0, failed=False):
+        """Body-free controller timings, distinct from model and tool spans."""
+        if not message_id:
+            return
+        run = self.store.run(run_id)
+        if not run or run['mode'] != 'modal':
+            return
+        with self.store.connect() as connection:
+            self.emit(run, message_id, 'runtime.' + phase, f'runtime:{phase}:{segment}:{start}',
+                      start, end, {'moyai.runtime.phase': phase, 'moyai.runtime.segment': segment,
+                                   'moyai.runtime.duration_ms': max(0, end - start) / 1e6},
+                      failed=failed, connection=connection)
 
     def slack_source(self, run_id, rows):
         """Link the turn to its Slack thread with the Lens `agent.source.*` contract."""
@@ -259,7 +302,7 @@ class AgentTracing:
         mentioned = sorted(set(MENTION.findall(root)))
         names = {row['user_id']: row['name'] for row in rows(
             f"SELECT user_id,name FROM slack_mention_names WHERE name!='' AND user_id IN ({','.join('?' * len(mentioned))})",
-            tuple(mentioned))}
+            tuple(mentioned))} if mentioned else {}
         title = MENTION.sub(lambda match: '@' + names.get(match[1], 'someone'), root)
         return {'agent.source.type': 'slack', 'agent.source.url': url,
                 'agent.source.title': self.content(' '.join(title.split()))[:200]}
@@ -274,16 +317,16 @@ class AgentTracing:
         if not (0 < start <= end <= now + 60_000_000_000):
             return
         name = str(data['tool'])[:120]
-        private_memory = is_memory_tool(name)
+        omit = private_tool(name) and self.preferences.for_run(run)['omit_private_tool_payloads']
         self.emit(run, run.get('active_message_id'), name, str(data['call_id']), start, end,
                   {'gen_ai.operation.name': 'execute_tool', 'openinference.span.kind': 'TOOL',
                    'gen_ai.tool.name': name, 'gen_ai.tool.call.id': str(data['call_id']),
-                   'tool.name': name, 'input.value': self.content('[private tool payload omitted]' if private_memory else data.get('input')),
-                   'output.value': self.content('[private tool payload omitted]' if private_memory else data.get('output')),
+                   'tool.name': name, 'input.value': self.content('[private tool payload omitted]' if omit else data.get('input')),
+                   'output.value': self.content('[private tool payload omitted]' if omit else data.get('output')),
                    'moyai.status': str(data.get('status', 'completed'))}, failed=data.get('status') == 'error')
 
     @best_effort
-    def model(self, run, request_id, start, messages, response, status, *, gateway_id: str = ''):
+    def model(self, run, request_id, start, messages, response, status, *, gateway_id: str = '', error=None):
         # Keep images, system prompts, loaded skills and private reasoning out of traces.
         inputs = [{'role': 'user', 'content': m.get('content')}
                   for m in messages if isinstance(m, dict) and m.get('role') == 'user'][-5:]
@@ -303,6 +346,8 @@ class AgentTracing:
                  'llm.model_name': run.get('active_model') or run.get('model', ''),
                  'input.value': input_value,
                  'output.value': output_value, 'moyai.status': status}
+        if status != 'completed':
+            attrs.update(self.error_attributes(error or {}))
         model = attrs['gen_ai.request.model']
         provider = model.partition('/')[0] if '/' in model else 'openai'
         attrs.update({'gen_ai.system': provider, 'gen_ai.provider.name': provider,
@@ -343,6 +388,25 @@ class AgentTracing:
         self.emit(run, run.get('active_message_id'), 'chat ' + attrs['gen_ai.request.model'],
                   request_id, start, time.time_ns(), attrs, failed=status != 'completed')
 
+    @staticmethod
+    def error_attributes(error):
+        error = safe_error(error)
+        attrs = {'error.message': error_summary(error),
+                 'error.type': next((error[key] for key in ('error_code', 'sdk_error', 'code', 'exception_type', 'native_status')
+                                     if error.get(key) not in {None, 'unknown', 'success'}), 'unknown')}
+        for key, value in error.items():
+            if key == 'request_ids':
+                attrs.update({'moyai.error.request_ids.' + name: identifier for name, identifier in value.items()})
+            else:
+                attrs['moyai.error.' + key] = value
+        return attrs
+
+    @best_effort
+    def broker(self, run, request_id, start, error):
+        self.emit(run, run.get('active_message_id'), 'broker ' + error.get('route', 'model'),
+            'broker:' + request_id, start, time.time_ns(),
+            {'openinference.span.kind': 'CHAIN', 'moyai.status': 'failed', **self.error_attributes(error)}, failed=True)
+
     def start(self):
         for outbox in self.exporters():
             outbox.start()
@@ -354,3 +418,12 @@ class AgentTracing:
         await asyncio.gather(*(outbox.close() for outbox in self.exporters()))
         if self.processor:
             await asyncio.to_thread(self.processor.shutdown)
+
+
+def initialize_schema(store):
+    with store.connect() as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS trace_contexts (
+            run_id TEXT NOT NULL, message_id INTEGER NOT NULL,
+            trace_id TEXT NOT NULL, span_id TEXT NOT NULL, parent_id TEXT,
+            session_id TEXT NOT NULL, agent_name TEXT NOT NULL,
+            PRIMARY KEY(run_id,message_id))''')

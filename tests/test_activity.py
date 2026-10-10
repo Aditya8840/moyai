@@ -6,8 +6,25 @@ import pytest
 from app.db import Store
 from app.message_queue import MessageQueue
 from app.progress import active_input, current_focus
-from sandbox.activity import ActivityReporter, public_text, result_status
+from agent.activity import ActivityReporter, public_text, result_status
 from test_durable import durable, drive  # noqa: F401
+
+
+@pytest.mark.parametrize('kind', [{'type': 'string'}, ['string', 'null'], None])
+def test_schema_type_values_are_data_and_private_content_is_still_redacted(kind):
+    from agent.trace_content import trace_content
+    result = trace_content({'type': kind, 'password': 'private-schema-secret',
+                            'content': [{'type': 'reasoning', 'text': 'private-reasoning'}]})
+    assert 'private-schema-secret' not in result and 'private-reasoning' not in result
+    assert '[redacted]' in result
+
+
+def test_formatting_fallback_does_not_swallow_durable_emission_errors(monkeypatch):
+    def fail(*args):
+        raise OSError('persistence unavailable')
+    reporter = ActivityReporter(fail)
+    with pytest.raises(OSError, match='persistence unavailable'):
+        reporter.start('x', 'tool_search', {})
 
 
 def test_parallel_tools_pair_by_id_and_do_not_publish_private_bodies():
@@ -40,17 +57,62 @@ def test_only_explicit_result_status_marks_tool_errors(result, expected):
     assert result_status(result) == expected
 
 
+def test_connector_details_are_bounded_and_private_payloads_stay_omitted():
+    events = []
+    activity = ActivityReporter(lambda kind, message, data: events.append(data))
+    activity.start('repo', 'mcp__moyai__github_repository', {'repository_id': 123})
+    activity.complete('repo', 'mcp__moyai__github_repository', {}, {'name': 'moyai', 'token': 'hidden'})
+    assert '123' in events[0]['input'] and 'moyai' in events[1]['output']
+    assert 'hidden' not in events[1]['output']
+    for name in ('credentials_run', 'memory_search', 'skills_read_file'):
+        activity.start(name, 'mcp__moyai__' + name, {'value': 'private-marker'})
+        activity.complete(name, 'mcp__moyai__' + name, {}, {'value': 'private-marker'})
+        assert 'input' not in events[-2] and 'output' not in events[-1]
+        assert events[-1]['details_notice']
+    assert 'private-marker' not in json.dumps(events)
+    activity.start('fill', 'mcp__moyai__browser_fill', {'label': 'Sign in', 'value': 'secret-login'})
+    assert 'secret-login' not in events[-1]['input']
+
+
+def test_view_image_keeps_a_snapshot_and_rejects_outside_paths(tmp_path, monkeypatch):
+    from PIL import Image
+    from agent.tools import tool_images
+    monkeypatch.setattr(tool_images, 'WORKSPACE', tmp_path)
+    source = tmp_path / 'image.png'
+    Image.new('RGB', (4, 4), 'red').save(source)
+    events = []
+    activity = ActivityReporter(lambda kind, message, data: events.append(data))
+    activity.start('image', 'view_image', {'path': str(source)})
+    from pathlib import Path
+    saved = Path(events[0]['image_path'])
+    assert events[0]['image_preview'].startswith('data:image/jpeg;base64,')
+    assert len(events[0]['image_preview']) <= 66000
+    before = saved.read_bytes()
+    Image.new('RGB', (4, 4), 'blue').save(source)
+    activity.complete('image', 'view_image', {}, 'Image viewed.')
+    assert saved.read_bytes() == before
+    assert events[-1]['image_path'] == str(saved)
+    assert events[-1]['path'] == str(source)
+    assert 'image_path' not in tool_images.snapshot('/etc/passwd')
+    linked = tmp_path / 'link.png'
+    linked.symlink_to(source)
+    assert 'image_path' not in tool_images.snapshot(str(linked))
+    assert 'image_path' not in tool_images.snapshot(None)
+
+
 def test_public_details_are_bounded_redacted_and_exclude_reasoning():
     events = []
     activity = ActivityReporter(lambda *args: events.append(args))
     activity.start('a', 'terminal', {'command': 'TOKEN="secret-marker" curl -H "Authorization: Bearer header-marker" https://example.org', 'env': {'KEY': 'hidden-env'}})
-    activity.complete('a', 'terminal', {}, {'output': 'private-result-marker', 'exit_code': 2})
-    activity.start('b', 'write_file', {'path': '/workspace/result.py', 'content': 'private-file-marker'})
+    activity.complete('a', 'terminal', {}, {'output': 'command-result-marker', 'exit_code': 2})
+    activity.start('b', 'write_file', {'path': '/workspace/result.py', 'content': 'file-content-marker'})
     activity.commentary('<think>private-reasoning-marker</think>I found the relevant file.')
     activity.commentary('<reasoning>unfinished private thought')
     text = json.dumps(events)
-    for secret in ('secret-marker', 'header-marker', 'hidden-env', 'private-result-marker', 'private-file-marker', 'private-reasoning-marker', 'private thought'):
+    for secret in ('secret-marker', 'header-marker', 'private-reasoning-marker', 'private thought'):
         assert secret not in text
+    assert 'command-result-marker' in text and 'file-content-marker' in text
+    assert 'hidden-env' not in text
     assert '/workspace/result.py' in text and 'I found the relevant file.' in text
     assert events[1][2]['phase'] == 'error' and events[1][2]['exit_code'] == 2
     assert len(public_text('a' * 5000)) == 2001
@@ -282,3 +344,95 @@ def test_focus_envelope_is_bounded_and_never_becomes_a_chat_update():
     reporter.commentary('<status>API_KEY=secret-marker</status>Visible message')
     assert events[-1][1] == 'Visible message'
     assert '<status>' not in json.dumps(events) and 'secret-marker' not in json.dumps(events)
+
+
+def test_unknown_native_fields_and_messages_do_not_enter_diagnostics():
+    from types import SimpleNamespace
+    from agent.harnesses.sdk_failure import exception_details, codex_details, claude_details
+    assert codex_details({'codexErrorInfo': {'private-payload': {'httpStatusCode': 'secret'}},
+                          'message': 'secret'}) == {'source': 'native_error'}
+    assert claude_details(SimpleNamespace(subtype='private-subtype', is_error=True,
+        terminal_reason='private-reason', errors=['secret'], api_error_status=True)) == {
+            'source': 'native_result', 'native_status': 'unknown', 'is_error': True, 'error_count': 1}
+    cause = ConnectionResetError(54, 'private-network-body')
+    error = RuntimeError('private-exception-body')
+    error.__cause__ = cause
+    assert exception_details(error) == {'source': 'exception', 'exception_type': 'RuntimeError',
+                                        'cause_type': 'ConnectionResetError'}
+
+
+@pytest.mark.parametrize('failure', ['native', 'mcp'])
+async def test_claude_hooks_hide_intermediate_failures_and_collapse_completed_progress(tmp_path, failure):
+    from pathlib import Path
+    import shutil
+    import subprocess
+    from types import SimpleNamespace
+    from agent.harnesses.claude_harness import ClaudeAgent
+    from agent.harnesses.harness_agent import TurnJournal
+
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node is needed to exercise the production activity renderer')
+    store = Store(tmp_path)
+    run = store.create_run('Save my preference', '', 'demo', [],
+                           chat_enabled=True, harness='claude-agent-sdk')
+    turn = store.claim_message(run['id'])
+    store.update_run(run['id'], status='running')
+    emitted = []
+
+    def emit(kind, text, data):
+        data = {**data, 'activity_id': str(len(emitted)), 'input_id': turn['id']}
+        emitted.append((kind, text, data))
+        store.event(run['id'], kind, text, data)
+
+    agent = ClaudeAgent(spec={}, relay=SimpleNamespace(), config={},
+                        activity=ActivityReporter(emit), step=lambda: None,
+                        cwd=str(tmp_path), definition=None)
+    agent.journal = TurnJournal([], 'Save my preference')
+    tool = {'tool_name': 'mcp__moyai__memory_save',
+            'tool_input': {'content': 'private-preference-marker'}}
+    agent.pending_text.append('<status>Saving your preference</status>I will save that preference once.')
+    await agent.tool_hook({**tool, 'hook_event_name': 'PreToolUse'}, 'rejected', {})
+    error = ({'hook_event_name': 'PostToolUseFailure', 'error': 'temporary-unavailable-marker'}
+             if failure == 'native' else {'hook_event_name': 'PostToolUse', 'tool_response': {
+                 'isError': True, 'content': [{'type': 'text', 'text': 'temporary-unavailable-marker'}]}})
+    await agent.tool_hook({**tool, **error}, 'rejected', {})
+    # Journal re-delivery retains source identity; it cannot repeat the opening.
+    for kind, text, data in emitted[:2]:
+        store.event(run['id'], kind, 'Replayed acknowledgement' if kind == 'message' else text, data)
+    agent.pending_text.append('<status>Verifying the saved preference</status>')
+    await agent.tool_hook({**tool, 'hook_event_name': 'PreToolUse'}, 'saved', {})
+    await agent.tool_hook({**tool, 'hook_event_name': 'PostToolUse',
+                          'tool_response': {'saved': True, 'content': 'private-preference-marker'}}, 'saved', {})
+    assert not agent.journal.pending
+    assert 'temporary-unavailable-marker' in json.dumps(agent.journal.messages)
+    events = store.events(run['id'])
+    assert [event['data']['phase'] for event in events if event['kind'] == 'tool'] == [
+        'started', 'error', 'started', 'completed']
+    assert 'private-preference-marker' not in json.dumps(events)
+    assert [event['message'] for event in events if event['kind'] == 'message'] == [
+        'I will save that preference once.']
+
+    def projection():
+        snapshot = {**store.run(run['id']), 'messages': store.messages(run['id']),
+                    'events': store.events(run['id'])}
+        result = subprocess.run([node, '-e',
+            "const fs=require('node:fs'),ui=require(process.argv[1]),run=JSON.parse(fs.readFileSync(0,'utf8'));"
+            "const turn=ui.current(run);process.stdout.write(JSON.stringify({"
+            "rows:turn.rows.filter(r=>r.kind==='tool').map(r=>r.state),headline:turn.headline,"
+            "html:ui.html(turn),collapsed:[...ui.completedHistory(run).keys()]}));",
+            str(Path(__file__).resolve().parents[1] / 'app/static/activity.js')],
+            input=json.dumps(snapshot), text=True, capture_output=True, check=True)
+        return json.loads(result.stdout)
+
+    active = projection()
+    assert active['rows'] == ['completed']
+    assert active['headline'] == 'Verifying the saved preference'
+    assert active['collapsed'] == []
+    assert 'temporary-unavailable-marker' not in active['html']
+    store.finish_message(run['id'], turn['id'], 'Saved to your personal preferences.')
+    store.update_run(run['id'], status='idle')
+    finished = projection()
+    assert finished['collapsed'] == [str(turn['id'])]
+    assert finished['rows'] == ['completed']
+    assert store.messages(run['id'])[-1]['content'] == 'Saved to your personal preferences.'

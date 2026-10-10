@@ -33,16 +33,19 @@ def test_drafts_require_explicit_enable_and_keep_identity(workspace, monkeypatch
     assert app.state.store.messages(run['id'])[0]['user_id']==owner
     assert run['chat_enabled'] and run['agent_label']=='Automation · Check tickets'
     blocked=client.post(path,json={'revision':1,'client_id':'another-occurrence'}).json()
-    assert blocked['outcome']=='skipped' and not blocked['run_id']
+    assert blocked['outcome']=='started' and blocked['run_id'] != run['id']
     app.state.store.update_run(run['id'],status='idle')
-    # Pending input still prevents overlapping work even if status is stale.
-    assert client.post(path,json={'revision':1,'client_id':'third-occurrence'}).json()['outcome']=='skipped'
+    # Pending input on an earlier session does not block an independent occurrence.
+    assert client.post(path,json={'revision':1,'client_id':'third-occurrence'}).json()['outcome']=='started'
     message=app.state.store.claim_message(run['id'])
     app.state.store.finish_message(run['id'],message['id'],'Finished with PR link','completed')
     app.state.store.update_run(run['id'],status='idle',summary='Finished with PR link')
     next_run=client.post(path,json={'revision':1,'client_id':'fourth-occurrence'}).json()
     assert next_run['run_id'] != run['id']
     assert 'Finished with PR link' in app.state.store.run(next_run['run_id'])['prompt']
+    app.state.session_lifecycle.request_delete(run['id'], owner, False)
+    history = {row['run_id']: row for row in client.get('/api/automations').json()['automations'][0]['history']}
+    assert history[run['id']]['status'] == 'deleting' and history[run['id']]['outcome'] == 'started'
 
 
 def test_ownership_csrf_revision_and_admin_pause(workspace, monkeypatch):
@@ -73,7 +76,7 @@ def test_timing_and_repository_validation(workspace):
     assert client.post('/api/automations',json={'definition':{'name':'Job','prompt':'Do work','owner_id':'someone'}}).status_code==422
     a=create(client,timing={'frequency':'weekdays','time':'09:30','timezone':'America/Los_Angeles'})
     schedule=app.state.automations.schedule(app.state.automations.row(a['id']))
-    assert schedule.policy.overlap==ScheduleOverlapPolicy.SKIP
+    assert schedule.policy.overlap==ScheduleOverlapPolicy.ALLOW_ALL
     assert schedule.policy.catchup_window==timedelta(minutes=15)
     assert schedule.spec.time_zone_name=='America/Los_Angeles'
     assert schedule.spec.calendars[0].day_of_week[0].start==1
@@ -130,6 +133,8 @@ async def test_stale_schedule_and_downtime_do_not_launch_old_work(workspace, mon
 
 async def test_retry_flushes_receipt_after_checkpoint_failure(workspace,monkeypatch):
     app,client=workspace
+    # Keep unrelated Slack flushes from consuming the injected failure.
+    client.portal.call(app.state.slack.chat.shutdown)
     a=create(client)
     service=app.state.automations
     from app.temporal_runtime import TemporalRunManager
@@ -193,16 +198,21 @@ def test_my_linear_issues_uses_session_identity_not_connection_owner(workspace,m
     assert client.post('/broker/'+run_id+'/tools/call',headers=headers,json={'name':'linear_my_issues','arguments':{'email':'someone@berri.ai'}}).status_code==422
 
 
-def test_concurrent_occurrences_admit_only_one_session(workspace,monkeypatch):
+def test_concurrent_occurrences_admit_independent_sessions(workspace,monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     app,client=workspace
     a=create(client)
     monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
     def launch(i):return asyncio.run(app.state.automations.launch(a['id'],1,'concurrent-'+str(i),manual=True))
     with ThreadPoolExecutor(max_workers=4) as pool:
-        results=list(pool.map(launch,range(4)))
-    assert sum(bool(r['run_id']) for r in results)==1
-    assert len(app.state.store.rows('SELECT * FROM runs'))==1
+        results=list(pool.map(launch,range(20)))
+    assert all(r['outcome']=='started' for r in results)
+    assert len({r['run_id'] for r in results})==20
+    assert len(app.state.store.rows('SELECT * FROM runs'))==20
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        retries=list(pool.map(launch,range(20)))
+    assert retries==results
+    assert len(app.state.store.rows('SELECT * FROM runs'))==20
 
 
 def test_owner_access_is_rechecked_at_execution(workspace):
@@ -215,16 +225,57 @@ def test_owner_access_is_rechecked_at_execution(workspace):
     assert not app.state.store.rows('SELECT * FROM runs')
 
 
-def test_active_child_keeps_automation_busy(workspace,monkeypatch):
+@pytest.mark.parametrize('depth', [1, 3])
+def test_active_child_does_not_block_independent_occurrences(workspace,monkeypatch,depth):
     app,client=workspace
     monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
     a=create(client)
     root=client.post(f"/api/automations/{a['id']}/run",json={'revision':1,'client_id':'root-with-children'}).json()['run_id']
     app.state.store.update_run(root,status='idle')
     app.state.store.execute("UPDATE messages SET status='completed' WHERE run_id=?",(root,))
-    child=app.state.store.create_run('Work still running','','demo',[])
-    app.state.store.execute('UPDATE runs SET parent_run_id=? WHERE id=?',(root,child['id']))
+    parent = root
+    for _ in range(depth):
+        child=app.state.store.create_run('Work still running','','demo',[])
+        app.state.store.execute('UPDATE runs SET parent_run_id=? WHERE id=?',(parent,child['id']))
+        app.state.store.update_run(parent,status='completed')
+        parent = child['id']
     assert not app.state.automations.finished(root)
-    assert client.post(f"/api/automations/{a['id']}/run",json={'revision':1,'client_id':'overlap-with-children'}).json()['outcome']=='skipped'
+    assert client.post(f"/api/automations/{a['id']}/run",json={'revision':1,'client_id':'overlap-with-children'}).json()['outcome']=='started'
     app.state.store.update_run(child['id'],status='completed')
     assert app.state.automations.finished(root)
+
+
+def test_builder_metadata_and_queue_setting_round_trip(workspace):
+    app, client = workspace
+    a = create(client, metadata={'team': 'engineering', 'owner': '<script>demo</script>', 'notes': 'x' * 501}, queue_events=False)
+    assert a['definition']['metadata']['team'] == 'engineering'
+    assert a['definition']['queue_events'] is False
+    notes = '界' * 16370 + '\nreview notes!'
+    assert len(notes) == 16384
+    saved = client.put('/api/automations/' + a['id'], json={
+        'revision': a['revision'], 'definition': {**a['definition'], 'metadata': {'team': 'platform', 'notes': notes}, 'queue_events': True}})
+    assert saved.status_code == 200
+    current = client.get('/api/automations').json()['automations'][0]
+    assert current['paused'] and current['revision'] == 2
+    assert current['definition']['metadata'] == {'team': 'platform', 'notes': notes}
+    assert current['definition']['queue_events'] is True
+    for metadata in ({' ': 'empty'}, {'a' * 81: 'long key'}, {'team': 'x' * 16385}, {str(i): '' for i in range(21)}):
+        result = client.post('/api/automations', json={'definition': {**a['definition'], 'metadata': metadata}})
+        assert result.status_code == 422
+
+
+def test_metadata_schema_advertises_entry_limits():
+    schema = Definition.model_json_schema()['properties']['metadata']
+    assert schema['maxProperties'] == 20
+    assert schema['propertyNames'] == {'minLength': 1, 'maxLength': 80}
+    assert schema['additionalProperties'] == {'type': 'string', 'maxLength': 16384}
+
+
+def test_library_templates_are_valid_editable_workflows(workspace):
+    app, client = workspace
+    templates = client.get('/api/automations').json()['templates']
+    assert {t['id'] for t in templates} == {'linear-pr', 'weekly-digest', 'ci-failure', 'daily-triage'}
+    for template in templates:
+        trigger = {'event': {**template['event'], 'repository': 'example/project'}} if template.get('event') else {'schedule': template.get('schedule', {})}
+        d = Definition(name=template['name'], prompt=template['prompt'], plugins=template['plugins'], triggers=[trigger])
+        assert not d.queue_events and not d.metadata

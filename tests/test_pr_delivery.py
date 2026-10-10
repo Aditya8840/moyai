@@ -1,15 +1,246 @@
 import hashlib
 import json
 
+import httpx
+import pytest
+
 from app import captures, pr_delivery
+from storage_fixture import MemoryObjects
 from test_computer import PNG, WEBM
 from test_slack import slack_app
 from test_slack_chat import publication, start
 from test_workspace import workspace
 
 
-def test_pr_cards_require_a_receipt_from_this_run_or_a_direct_child(workspace):
-    app, _ = workspace
+@pytest.fixture
+def native_pr(workspace, monkeypatch):
+    from scripts.github_identity_fixture import IdentityProvider
+    from test_github import connected, select
+    app, client = workspace
+    run_id, _ = connected(app)
+    select(app, (202,))
+    url = publication(app, run_id)
+    provider = IdentityProvider()
+    state = {'status': 200, 'on_request': None, 'files': [], 'pr': pr_response(
+        head={'sha': 'a' * 40, 'ref': 'moyai/native-pr'},
+        base={'ref': 'main', 'repo': provider.repos[202]}, user={'login': 'moyai[bot]'},
+        changed_files=0, additions=3, deletions=1, body='A **native** PR', created_at='2026-10-08T10:00:00Z')}
+    calls = []
+    def handle(request):
+        calls.append((request.method, request.url.path))
+        if state['on_request']:
+            state['on_request'](request.url.path)
+        if '/pulls/' in request.url.path:
+            assert request.method == 'GET'
+            assert provider.tokens[request.headers['authorization'].removeprefix('Bearer ')] == [202]
+            return httpx.Response(state['status'], json=state['files'] if request.url.path.endswith('/files') else state['pr'])
+        return provider.handle(request)
+    original = httpx.AsyncClient
+    monkeypatch.setattr(app.state.connectors.github, 'app_jwt', lambda config=None: 'fixture-jwt')
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(handle), **kwargs))
+    return app, client, run_id, url, provider, state, calls
+
+
+def test_native_pr_reads_confirmed_family_receipts_without_a_computer(native_pr):
+    app, client, parent, url, _, state, calls = native_pr
+    store = app.state.store
+    child, grandchild, other = [store.create_run('PR scope', '', 'demo', [])['id'] for _ in range(3)]
+    store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (parent, child))
+    store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (child, grandchild))
+    child_url = publication(app, child, 101)
+    grandchild_url = publication(app, grandchild, 102)
+    foreign_url = publication(app, other, 103)
+    endpoint = f'/api/runs/{parent}/pull-request'
+    data = client.get(endpoint, params={'url': url}).json()
+    assert {key: data[key] for key in ('number', 'repository_id', 'author', 'head_ref', 'base', 'additions',
+                                     'deletions', 'changed_files', 'body', 'body_truncated')} == {
+        'number': 100, 'repository_id': 202, 'author': 'moyai[bot]', 'head_ref': 'moyai/native-pr',
+        'base': 'main', 'additions': 3, 'deletions': 1, 'changed_files': 0,
+        'body': 'A **native** PR', 'body_truncated': False}
+    state['pr'].update(number=101, html_url=child_url)
+    assert client.get(endpoint, params={'url': child_url}).status_code == 200
+    state['pr'].update(number=102, html_url=grandchild_url)
+    assert client.get(endpoint, params={'url': grandchild_url}).status_code == 200
+    count = len(calls)
+    for denied in [ foreign_url, url + '/files', url + '?fake=1', url.replace('github.com', 'evil.example')]:
+        assert client.get(endpoint, params={'url': denied}).status_code == 404
+    store.execute("UPDATE runs SET deleted_at='deleted' WHERE id=?", (child,))
+    assert client.get(endpoint, params={'url': child_url}).status_code == 404
+    assert len(calls) == count and store.run(parent)['sandbox_id'] == ''
+    client.cookies.clear()
+    assert client.get(endpoint, params={'url': url}, headers={'Authorization': 'Bearer run-capability-only'}).status_code == 401
+
+
+def test_native_pr_permanent_identity_needs_only_pr_token_header_and_files(native_pr):
+    _, client, run_id, url, _, _, calls = native_pr
+    endpoint = f'/api/runs/{run_id}/pull-request'
+    assert client.get(endpoint, params={'url': url}).status_code == 200
+    reads = [('GET', '/repositories/202/pulls/100'), ('GET', '/repositories/202/pulls/100/files')]
+    assert calls == [('POST', '/app/installations/10/access_tokens'), *reads]
+    calls.clear()
+    assert client.get(endpoint, params={'url': url}).status_code == 200
+    assert calls == reads
+
+
+@pytest.mark.parametrize('arguments,refresh_metadata', [
+    ({'repository_id': 202}, False),
+    ({'repository': 'BerriAI/moyai'}, True),
+    ({'repository_id': 202, 'repository': 'BerriAI/moyai'}, True),
+    ({}, True),
+])
+def test_broker_pr_reader_preserves_repository_lookup_shapes(native_pr, arguments, refresh_metadata):
+    _, client, run_id, _, _, _, calls = native_pr
+    response = client.post(f'/broker/{run_id}/tools/call', headers={'Authorization': 'Bearer run-capability-only'},
+                           json={'name': 'github_pull_request', 'arguments': {'number': 100, **arguments}})
+    assert response.status_code == 200 and response.json()['repository_id'] == 202, response.text
+    assert (('GET', '/repositories/202') in calls) is refresh_metadata
+
+
+def test_broker_pr_reader_checks_name_agreement_and_selected_ids(native_pr):
+    from test_github import select
+    app, client, run_id, _, _, _, calls = native_pr
+    select(app, (101, 202))
+    for arguments in [{'repository_id': 202, 'repository': 'BerriAI/litellm'}, {'repository_id': 999}]:
+        calls.clear()
+        response = client.post(f'/broker/{run_id}/tools/call', headers={'Authorization': 'Bearer run-capability-only'},
+                               json={'name': 'github_pull_request', 'arguments': {'number': 100, **arguments}})
+        assert 'error' in response.json() and 'files' not in response.json(), response.text
+        assert not any('/pulls/' in path for _, path in calls)
+
+
+def test_native_pr_renamed_metadata_updates_existing_references_without_a_repository_read(native_pr):
+    app, client, run_id, url, _, state, calls = native_pr
+    github, store = app.state.connectors.github, app.state.store
+    store.execute('UPDATE runs SET github_repository_id=202,repo_url=? WHERE id=?',
+                  ('https://github.com/BerriAI/moyai', run_id))
+    state['pr']['base']['repo'] = {**state['pr']['base']['repo'], 'full_name': 'BerriAI/renamed',
+                                  'html_url': 'https://github.com/BerriAI/renamed'}
+    state['pr']['html_url'] = url.replace('BerriAI/moyai', 'BerriAI/renamed')
+    response = client.get(f'/api/runs/{run_id}/pull-request', params={'url': url})
+    assert response.status_code == 200 and response.json()['repository'] == 'BerriAI/renamed', response.text
+    assert github.target('BerriAI/moyai') == github.target('BerriAI/renamed') == 202
+    assert store.run(run_id)['repo_url'] == 'https://github.com/BerriAI/renamed'
+    assert ('GET', '/repositories/202') not in calls
+
+
+@pytest.mark.parametrize('wrong', ['number', 'repository', 'owner'])
+def test_native_pr_rejects_wrong_upstream_identity_before_reading_files(native_pr, wrong):
+    _, client, run_id, url, _, state, calls = native_pr
+    if wrong == 'number':
+        state['pr']['number'] = 999
+    elif wrong == 'repository':
+        state['pr']['base']['repo'] = {**state['pr']['base']['repo'], 'id': 999}
+    else:
+        state['pr']['base']['repo'] = {**state['pr']['base']['repo'], 'owner': {'id': 999}}
+    response = client.get(f'/api/runs/{run_id}/pull-request', params={'url': url})
+    assert response.status_code == 502 and 'files' not in response.json(), response.text
+    assert not any(path.endswith('/files') for _, path in calls)
+
+
+def test_native_pr_keeps_bounded_projection_and_permanent_identity_across_rename(native_pr):
+    app, client, run_id, url, provider, state, _ = native_pr
+    github = app.state.connectors.github
+    provider.repos[202].update(full_name='BerriAI/renamed', html_url='https://github.com/BerriAI/renamed')
+    github.remember_repository(provider.repos[202], github.saved_credentials())
+    for row in app.state.store.rows('SELECT id,result FROM github_publications WHERE run_id=?', (run_id,)):
+        result = {**json.loads(row['result']), 'repository_id': 202}
+        app.state.store.execute('UPDATE github_publications SET result=? WHERE id=?', (json.dumps(result), row['id']))
+    renamed = url.replace('BerriAI/moyai', 'BerriAI/renamed')
+    state['pr'].update(html_url=renamed, body='b' * 20001, changed_files=101)
+    state['files'] = [{'filename': f'{n}.py', 'status': 'modified', 'additions': 1, 'deletions': 0,
+                       'patch': '+' + 'x' * 16000} for n in range(101)]
+    endpoint = f'/api/runs/{run_id}/pull-request'
+    for selected in [url, renamed]:
+        response = client.get(endpoint, params={'url': selected})
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data['repository_id'] == 202 and data['html_url'] == renamed
+        assert len(data['body']) == 20000 and data['body_truncated']
+        assert len(data['files']) == 100 and data['files_truncated']
+        assert sum(len(f['patch']) for f in data['files']) == 160000
+        assert all(f['patch_truncated'] for f in data['files'])
+
+
+def test_broker_pr_reader_still_discovers_new_rename_after_legacy_migration(native_pr):
+    app, client, run_id, url, provider, state, _ = native_pr
+    app.state.connectors.save('github', {'kind': 'github_app', 'installation_id': 10,
+                                        'repositories': ['BerriAI/moyai-devin']}, 'Legacy connection')
+    provider.repos[202].update(full_name='BerriAI/renamed', html_url='https://github.com/BerriAI/renamed')
+    state['pr']['html_url'] = url.replace('BerriAI/moyai', 'BerriAI/renamed')
+    response = client.post(f'/broker/{run_id}/tools/call', headers={'Authorization': 'Bearer run-capability-only'},
+                           json={'name': 'github_pull_request', 'arguments': {'repository': 'BerriAI/renamed', 'number': 100}})
+    assert response.status_code == 200 and response.json()['repository_id'] == 202, response.text
+    # A second, previously unknown name is still resolved by selected_target.
+    provider.repos[202].update(full_name='BerriAI/renamed-again', html_url='https://github.com/BerriAI/renamed-again')
+    state['pr']['html_url'] = url.replace('BerriAI/moyai', 'BerriAI/renamed-again')
+    response = client.post(f'/broker/{run_id}/tools/call', headers={'Authorization': 'Bearer run-capability-only'},
+                           json={'name': 'github_pull_request', 'arguments': {'repository': 'BerriAI/renamed-again', 'number': 100}})
+    assert response.status_code == 200 and response.json()['repository'] == 'BerriAI/renamed-again', response.text
+
+
+@pytest.mark.parametrize('phase,change,expected', [
+    ('before', 'policy', 403), ('before', 'selection', 403),
+    ('/repositories/202/pulls/100', 'selection', 403), ('/app/installations/10/access_tokens', 'policy', 403),
+    ('/repositories/202/pulls/100', 'policy', 403), ('/repositories/202/pulls/100/files', 'rotation', 403),
+    ('/repositories/202/pulls/100/files', 'disconnect', 403), ('/repositories/202/pulls/100/files', 'delete', 404),
+    ('/repositories/202/pulls/100/files', 'receipt', 404),
+])
+def test_native_pr_revalidates_access_and_receipt_scope(native_pr, phase, change, expected):
+    from test_github import select
+    app, client, run_id, url, _, state, calls = native_pr
+    store, github = app.state.store, app.state.connectors.github
+    def revoke(path):
+        if path != phase:
+            return
+        if change == 'policy':
+            store.execute("INSERT INTO connection_policies(provider,enabled) VALUES('github',0)")
+        elif change == 'selection':
+            select(app, (101,))
+        elif change == 'rotation':
+            github.save_app({**github.app_config(), 'pem': 'rotated-fixture-key'})
+        elif change == 'disconnect':
+            store.execute("DELETE FROM connections WHERE provider='github'")
+        elif change == 'delete':
+            store.execute("UPDATE runs SET deleted_at='deleted' WHERE id=?", (run_id,))
+        else:
+            store.execute('DELETE FROM github_publications WHERE run_id=?', (run_id,))
+    state['on_request'] = revoke
+    revoke('before')
+    response = client.get(f'/api/runs/{run_id}/pull-request', params={'url': url})
+    assert response.status_code == expected, response.text
+    assert 'files' not in response.json() and 'fixture-' not in response.text
+    if phase == 'before':
+        assert calls == []
+    elif not phase.endswith('/files'):
+        assert not any(path.endswith('/files') for _, path in calls)
+
+
+def test_broker_pr_named_lookup_revalidates_selection_before_reading_pr(native_pr):
+    from test_github import select
+    app, client, run_id, _, _, state, calls = native_pr
+    def revoke(path):
+        if path == '/repositories/202':
+            select(app, (101,))
+    state['on_request'] = revoke
+    response = client.post(f'/broker/{run_id}/tools/call', headers={'Authorization': 'Bearer run-capability-only'},
+                           json={'name': 'github_pull_request', 'arguments': {'repository': 'BerriAI/moyai', 'number': 100}})
+    assert 'error' in response.json() and 'files' not in response.json(), response.text
+    assert not any('/pulls/' in path for _, path in calls)
+
+
+@pytest.mark.parametrize('upstream,expected', [(401, 403), (403, 403), (404, 404), (500, 502)])
+def test_native_pr_distinguishes_revoked_missing_and_transient_reads(native_pr, upstream, expected):
+    app, client, run_id, url, _, state, _ = native_pr
+    # Read-only policy permits this UI read without granting any write access.
+    app.state.store.execute("INSERT INTO connection_policies(provider,read_only) VALUES('github',1)")
+    state['status'] = upstream
+    assert client.get(f'/api/runs/{run_id}/pull-request', params={'url': url}).status_code == expected
+    state['status'] = 200
+    assert client.get(f'/api/runs/{run_id}/pull-request', params={'url': url}).status_code == 200
+
+
+def test_pr_cards_require_a_receipt_from_this_subtree(workspace):
+    app, client = workspace
     store = app.state.store
     runs = [store.create_run('PR handoff', '', 'demo', [])['id'] for _ in range(4)]
     parent, other, child, grandchild = runs
@@ -19,9 +250,34 @@ def test_pr_cards_require_a_receipt_from_this_run_or_a_direct_child(workspace):
     answer = '\n'.join(f'[View PR]({url})' for url in urls)
     with store.connect() as conn:
         selected = pr_delivery.select_prs(conn, parent, answer)
-        assert [pr.url for pr in selected] == [urls[0], urls[2]]
+        assert [pr.url for pr in selected] == [urls[0], urls[2], urls[3]]
         # A child cannot borrow its parent's publication receipt.
         assert [pr.url for pr in pr_delivery.select_prs(conn, child, answer)] == [urls[2], urls[3]]
+    for run_id, expected in [(parent, [urls[0], urls[2], urls[3]]), (child, [urls[2], urls[3]])]:
+        data = client.get(f'/api/runs/{run_id}').json()
+        assert data['pull_requests'] == data['pr_summary']['pull_requests']
+        assert [pr['url'] for pr in data['pull_requests']] == expected
+
+
+def test_session_pr_list_alias_tracks_publications_and_deleted_children(workspace):
+    app, client = workspace
+    store = app.state.store
+    parent = store.create_run('Discuss https://github.com/BerriAI/moyai/pull/999', '', 'demo', [])['id']
+    child = store.create_run('Child publication', '', 'demo', [])['id']
+    store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (parent, child))
+    data = client.get(f'/api/runs/{parent}').json()
+    assert data['pull_requests'] == data['pr_summary']['pull_requests'] == []
+    url = publication(app, child, title='A confirmed change')
+    data = client.get(f'/api/runs/{parent}').json()
+    assert data['pull_requests'] == data['pr_summary']['pull_requests']
+    assert [(pr['url'], pr['title']) for pr in data['pull_requests']] == [(url, 'A confirmed change')]
+    store.execute("UPDATE runs SET deleted_at='deleted' WHERE id=?", (child,))
+    data = client.get(f'/api/runs/{parent}').json()
+    assert data['pull_requests'] == data['pr_summary']['pull_requests'] == []
+    store.execute("UPDATE runs SET deleted_at='' WHERE id=?", (child,))
+    data = client.get(f'/api/runs/{parent}').json()
+    assert data['pull_requests'] == data['pr_summary']['pull_requests']
+    assert [pr['url'] for pr in data['pull_requests']] == [url]
 
 
 def test_pr_selection_requires_the_exact_url_and_supports_legacy_receipts(workspace):
@@ -46,22 +302,30 @@ def test_pr_selection_requires_the_exact_url_and_supports_legacy_receipts(worksp
         assert pr_delivery.select_prs(conn, run_id, url) == []
 
 
-def test_capture_selection_uses_this_answers_exact_paths_and_one_of_each_kind(workspace):
+@pytest.mark.parametrize('remote', [False, True])
+def test_capture_selection_uses_this_answers_exact_paths_and_one_of_each_kind(workspace, remote):
     app, _ = workspace
-    run_id = app.state.store.create_run('Capture handoff', '', 'demo', [])['id']
-    root = captures.directory(app.state.settings, run_id)
-    root.mkdir(parents=True)
+    store = app.state.store
+    if remote:
+        store.objects = MemoryObjects()
+    run_id = store.create_run('Capture handoff', '', 'demo', [])['id']
     for name, raw in [('first.png', PNG), ('second.png', PNG + b'second'),
                       ('flow.webm', WEBM), ('other.webm', WEBM + b'other')]:
-        (root / name).write_bytes(raw)
+        store.artifacts.save(run_id + '-captures/' + name, raw)
     answer = ('[Video](/workspace/moyai-captures/flow.webm)\n'
               '![Result](moyai-captures/second.png)\n'
               '[Extra](moyai-captures/first.png) [Extra video](moyai-captures/other.webm)')
-    selected = pr_delivery.select_captures(app.state.settings, run_id, answer)
+    if remote:
+        store.objects.fail = True
+    with store.connect() as conn:
+        conn.begin_write()
+        selected = pr_delivery.select_captures(app.state.settings, run_id, answer, store=store, conn=conn)
+    if remote:
+        assert store.objects.reads == 0
     assert [capture.name for capture in selected] == ['flow.webm', 'second.png']
     assert [capture.sha256 for capture in selected] == [
         hashlib.sha256(WEBM).hexdigest(), hashlib.sha256(PNG + b'second').hexdigest()]
-    assert pr_delivery.select_captures(app.state.settings, run_id, 'No demo in this answer.') == []
+    assert pr_delivery.select_captures(app.state.settings, run_id, 'No demo in this answer.', store=store) == []
     for reference in [
         '/workspace/moyai-captures/first.png.extra',
         '/workspace/moyai-captures/first.png?download=true',
@@ -72,7 +336,8 @@ def test_capture_selection_uses_this_answers_exact_paths_and_one_of_each_kind(wo
         'https://other.example/?file=/workspace/moyai-captures/first.png',
         'https://workspace.example/api/runs/' + 'f' * 32 + '/computer/captures/first.png',
     ]:
-        assert pr_delivery.select_captures(app.state.settings, run_id, f'[Other]({reference})') == [], reference
+        assert pr_delivery.select_captures(app.state.settings, run_id, f'[Other]({reference})', store=store) == [], reference
+        assert pr_delivery.link_captures(app.state.settings, run_id, f'[Other]({reference})', selected) == f'[Other]({reference})'
 
 
 def test_capture_selection_skips_symlinks_invalid_bytes_and_oversized_files(workspace, monkeypatch):
@@ -87,24 +352,27 @@ def test_capture_selection_skips_symlinks_invalid_bytes_and_oversized_files(work
     monkeypatch.setattr(captures, 'MAX_FILE', len(PNG))
     answer = '\n'.join(f'[Capture](moyai-captures/{name})' for name in
                        ['link.png', 'corrupt.png', 'large.png', 'missing.png', 'valid.png'])
-    assert [capture.name for capture in pr_delivery.select_captures(app.state.settings, run_id, answer)] == ['valid.png']
+    assert [capture.name for capture in pr_delivery.select_captures(app.state.settings, run_id, answer,
+        store=app.state.store)] == ['valid.png']
 
 
-async def test_entire_capture_batch_is_revalidated_before_any_external_upload(slack_app, monkeypatch):
+@pytest.mark.parametrize('remote', [False, True])
+async def test_entire_capture_batch_is_revalidated_before_any_external_upload(slack_app, monkeypatch, remote):
     app, _, run_id = start(slack_app)
+    store = app.state.store
+    if remote:
+        store.objects = MemoryObjects()
     channel = app.state.slack.channel
     source = channel.source_for_run(run_id, {'kind': 'answer'})
     credentials = await app.state.connectors.credentials('slack')
     credentials['bot']['scope'] += ',files:write'
     app.state.connectors.save('slack', credentials, 'Test organization')
-    root = captures.directory(app.state.settings, run_id)
-    root.mkdir(parents=True)
-    (root / 'flow.webm').write_bytes(WEBM)
-    (root / 'result.png').write_bytes(PNG)
+    store.artifacts.save(run_id + '-captures/flow.webm', WEBM)
+    store.artifacts.save(run_id + '-captures/result.png', PNG)
     selected = pr_delivery.select_captures(app.state.settings, run_id,
-        '[Video](moyai-captures/flow.webm) ![Image](moyai-captures/result.png)')
+        '[Video](moyai-captures/flow.webm) ![Image](moyai-captures/result.png)', store=store)
     assert [capture.name for capture in selected] == ['flow.webm', 'result.png']
-    (root / 'result.png').write_bytes(PNG + b'replaced after answer collection')
+    store.artifacts.save(run_id + '-captures/result.png', PNG + b'replaced after answer collection')
     uploads = []
 
     async def request(method, url, **kwargs):
@@ -174,10 +442,10 @@ async def test_sidebar_pr_family_deduplicates_receipts_and_never_counts_answer_l
     service, calls, responses = sidebar_github(app, monkeypatch)
     responses.update({n: pr_response(n) for n in (100, 101, 102)})
     first = service.summaries([parent])[parent]
-    assert first['unknown'] == 2 and first['label'] == ''
+    assert first['unknown'] == 3 and first['label'] == ''
     result = await refreshed(service, [parent, child, deleted])
-    assert result[parent]['open'] == 2 and result[parent]['label'] == 'PR is ready'
-    assert {pr['number'] for pr in result[parent]['pull_requests']} == {100, 101}
+    assert result[parent]['open'] == 3 and result[parent]['label'] == 'PR is ready'
+    assert {pr['number'] for pr in result[parent]['pull_requests']} == {100, 101, 102}
     assert {pr['number'] for pr in result[child]['pull_requests']} == {100, 101, 102}
     assert result[deleted]['pull_requests'] == []
     assert len(calls) == 3
@@ -238,12 +506,14 @@ async def test_sidebar_pr_rechecks_connection_policy_selection_and_inflight_rota
     select(app, (202,))
     # Old authorization-key cache entries cannot publish into the new scope.
     assert service.summaries([run_id])[run_id]['unknown'] == 1
+    saved = store.rows('SELECT * FROM github_pr_snapshots')
     async def rotate(method, path, **kwargs):
         select(app, (101,))
         return pr_response()
     monkeypatch.setattr(service.github, 'request', rotate)
     await refreshed(service, [run_id])
     assert service.summaries([run_id])[run_id]['unknown'] == 1
+    assert store.rows('SELECT * FROM github_pr_snapshots') == saved
     await service.close()
 
 
@@ -292,6 +562,13 @@ async def test_sidebar_pr_rejects_mismatched_or_incomplete_github_snapshots(work
         pr_response(merged='false'), pr_response(draft='false'), pr_response(state='open', merged=True),
         pr_response(requested_reviewers={}), pr_response(requested_teams=[{'id': False}]),
         {key: value for key, value in pr_response().items() if key != 'merged'},
+        pr_response(created_at='2026-10-07'), pr_response(created_at=123),
+        pr_response(created_at='0001-01-01T00:00:00+14:00'),
+        pr_response(state='closed', merged=True, merged_at='2026-10-07T12:00:00'),
+        pr_response(state='closed', merged=True, merged_at='not a date'),
+        pr_response(merged_at='2026-10-07T12:00:00Z'),
+        pr_response(state='closed', merged=True, created_at='2026-10-07T13:00:00Z',
+                    merged_at='2026-10-07T12:00:00Z'),
     ]
     for response in malformed:
         responses[100] = response
@@ -300,6 +577,88 @@ async def test_sidebar_pr_rejects_mismatched_or_incomplete_github_snapshots(work
         summary = (await refreshed(service, [run_id]))[run_id]
         assert summary['unknown'] == 1 and not summary['label'], response
     await service.close()
+
+
+async def test_pr_status_restores_verified_dates_stale_and_keeps_current_authorization(workspace, monkeypatch):
+    from datetime import datetime
+    from app.connector_errors import ConnectorError
+    from app.db import Store
+    from app.session_pull_requests import Receipt, SessionPullRequests
+    from test_github import select
+    app, _ = workspace
+    store = app.state.store
+    run_id = store.create_run('Retained PR status', '', 'demo', [])['id']
+    publication(app, run_id)
+    service, calls, responses = sidebar_github(app, monkeypatch)
+    responses[100] = pr_response(state='closed', merged=True,
+        created_at='2026-09-30T23:00:00-07:00', merged_at='2026-10-07T23:30:00-07:00')
+    result = (await refreshed(service, [run_id]))[run_id]
+    pr = result['pull_requests'][0]
+    assert pr['created_at'] == '2026-10-01T06:00:00+00:00'
+    assert pr['merged_at'] == '2026-10-08T06:30:00+00:00'
+    receipt = Receipt.model_validate_json(store.rows('SELECT result FROM github_publications')[0]['result'])
+    saved = store.rows('SELECT * FROM github_pr_snapshots')
+    assert len(saved) == 1 and datetime.fromisoformat(saved[0]['observed_at']).utcoffset().total_seconds() == 0
+    await service.close()
+
+    # Open the same SQLite database through a new Store/service, as at startup.
+    reopened = Store(store.path.parent)
+    monkeypatch.setattr(service.github, 'store', reopened)
+    restored = SessionPullRequests(service.github)
+    target, key, cached = restored.status(receipt, restored.context())
+    assert target == 202 and key == (service.github.connection_version(), 202, 100)
+    assert cached.value.merged_at == pr['merged_at'] and cached.fresh_until == 0
+    responses[100] = ConnectorError('Temporary GitHub outage')
+    result = (await refreshed(restored, [run_id]))[run_id]
+    assert result['merged'] == 1 and result['stale']
+    assert result['pull_requests'][0]['merged_at'] == pr['merged_at']
+    for _ in range(3):
+        restored.summaries([run_id])
+    assert len(calls) == 2 and not restored.pending
+    assert reopened.rows('SELECT * FROM github_pr_snapshots') == saved
+
+    reopened.execute("INSERT INTO connection_policies(provider,enabled) VALUES('github',0)")
+    assert restored.status(receipt, restored.context()) == (None, None, None)
+    reopened.execute("UPDATE connection_policies SET enabled=1 WHERE provider='github'")
+    select(app, (101,))
+    assert restored.summaries([run_id])[run_id]['unknown'] == 1
+    select(app, (202,))
+    assert restored.status(receipt, restored.context())[2] is None
+    await restored.close()
+
+
+async def test_pr_status_missing_observation_survives_restart_without_reviving_merge(workspace, monkeypatch):
+    from app.session_pull_requests import Receipt, SessionPullRequests
+    app, _ = workspace
+    store = app.state.store
+    run_id = store.create_run('Missing PR', '', 'demo', [])['id']
+    publication(app, run_id)
+    service, _, responses = sidebar_github(app, monkeypatch)
+    responses[100] = pr_response(state='closed', merged=True, merged_at='2026-10-07T12:00:00Z')
+    assert (await refreshed(service, [run_id]))[run_id]['merged'] == 1
+    responses[100] = None
+    for cached in service.cache.values():
+        cached.retry_at = 0
+    assert (await refreshed(service, [run_id]))[run_id]['unknown'] == 1
+    assert store.rows('SELECT snapshot FROM github_pr_snapshots') == [{'snapshot': ''}]
+    await service.close()
+    receipt = Receipt.model_validate_json(store.rows('SELECT result FROM github_publications')[0]['result'])
+    restored = SessionPullRequests(service.github)
+    assert restored.status(receipt, restored.context())[2].value is None
+    assert (await refreshed(restored, [run_id]))[run_id]['unknown'] == 1
+    await restored.close()
+
+    # Older merged records may lack timestamps; that does not invent a date.
+    restored = SessionPullRequests(service.github)
+    responses[100] = pr_response(state='closed', merged=True)
+    result = (await refreshed(restored, [run_id]))[run_id]
+    assert result['merged'] == 1
+    assert result['pull_requests'][0]['merged_at'] is None
+    await restored.close()
+    store.execute("UPDATE github_pr_snapshots SET snapshot=?", ('{"state":"merged"}',))
+    restored = SessionPullRequests(service.github)
+    assert restored.status(receipt, restored.context())[2] is None
+    await restored.close()
 
 
 async def test_sidebar_pr_lookup_batches_large_pinned_lists_and_tolerates_bad_connection(workspace, monkeypatch):

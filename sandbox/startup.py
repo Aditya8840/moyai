@@ -4,6 +4,15 @@ import time
 import urllib.error
 import urllib.request
 
+try:
+    from .broker_failure import TRANSIENT_STATUSES
+except ImportError:  # Loaded by the sandbox script, outside a Python package.
+    from broker_failure import TRANSIENT_STATUSES
+
+
+# The local caller must outlive the relay's complete metadata reconnect window.
+REPOSITORY_METADATA_BUDGET = 180
+
 
 class StartupUnavailable(RuntimeError):
     def __init__(self, stage, reason):
@@ -11,23 +20,28 @@ class StartupUnavailable(RuntimeError):
         super().__init__('Workspace services are temporarily unavailable. Reconnecting before starting work.')
 
 
-def read_with_reconnect(request, reader, *, stage, notify=None, budget=45,
-                        opener=None, clock=None, sleep=None):
+def read_with_reconnect(request, reader, **options):
     if request.get_method() != 'GET':
         raise ValueError('Only read-only startup requests may be retried')
+    return _read_with_reconnect(request, reader, **options)
+
+
+def _read_with_reconnect(request, reader, *, stage, notify=None, budget=45, attempt_timeout=10,
+                         opener=None, clock=None, sleep=None):
+    # Callers must establish read-only semantics before entering this loop.
     opener, clock, sleep = opener or urllib.request.urlopen, clock or time.monotonic, sleep or time.sleep
     deadline, attempt = clock() + budget, 0
     while True:
         if attempt and clock() >= deadline:
             raise StartupUnavailable(stage, reason) from None
         try:
-            with opener(request, timeout=min(10, max(1, deadline - clock()))) as response:
+            with opener(request, timeout=min(attempt_timeout, max(1, deadline - clock()))) as response:
                 result = reader(response)
             if attempt and notify:
                 notify('Workspace services reconnected. Preparing the agent.')
             return result
         except urllib.error.HTTPError as exc:
-            if exc.code not in {408, 425, 429, 500, 502, 503, 504}:
+            if exc.code not in TRANSIENT_STATUSES:
                 raise
             reason = f'HTTP {exc.code}'
             exc.close()

@@ -9,40 +9,46 @@ const settingsGroups = [
     {view:'secrets', title:'Secrets', description:'Manage personal and shared service access.'},
   ]},
   {id:'workspace', title:'Workspace', items:[
-    {view:'spend', title:'Spend', description:'See your own LLM usage and costs.', adminDescription:'See model usage and costs across your team.'},
+    {view:'spend', title:'Spend', description:'See your own LLM usage and costs.', memberOnly:true},
     {view:'runtime', title:'Runtime', description:'Check cloud setup and session limits.'},
     {view:'environments', title:'Environments', description:'Prepare repositories and workspace tools.', admin:true},
   ]},
   {id:'administration', title:'Administration', admin:true, items:[
     {view:'users', title:'Users', description:'Manage workspace members and roles.', admin:true},
-    {view:'adoption', title:'Adoption', description:'Track human requests and active teammates over time.', admin:true},
+    {view:'spend', title:'Spend & usage', description:'Review team costs, model usage, and human activity.', admin:true},
   ]},
 ];
-const settingsViews = new Set(['settings', ...settingsGroups.flatMap(group => group.items.map(item => item.view))]);
+// Keep old Usage analytics bookmarks routable without adding a second navigation entry.
+const settingsViews = new Set(['settings', 'adoption', ...settingsGroups.flatMap(group => group.items.map(item => item.view))]);
+
+function settingsItemVisible(item, role) {
+  return (!item.admin || role === 'admin') && (!item.memberOnly || role !== 'admin');
+}
 
 // The same destinations drive the overview and the persistent settings rail.
 function settingsNavigation(view, role) {
   const link = (target, title, icon) => `<a href="#${target}"${view === target ? ' aria-current="page"' : ''}>${icon ? settingsIcon(target) : '<span class="settings-overview-icon" aria-hidden="true">⊞</span>'}<span>${title}</span></a>`;
   return `<a class="settings-back" href="#tasks"><span aria-hidden="true">←</span> Back to workspace</a>
     <div class="settings-nav-title">Settings</div>${link('settings', 'Overview')}
-    ${settingsGroups.filter(group => !group.admin || role === 'admin').map(group => `<div class="settings-nav-group"><h2>${group.title}</h2>${group.items.filter(item => !item.admin || role === 'admin').map(item => link(item.view, item.title, true)).join('')}</div>`).join('')}`;
+    ${settingsGroups.filter(group => !group.admin || role === 'admin').map(group => `<div class="settings-nav-group"><h2>${group.title}</h2>${group.items.filter(item => settingsItemVisible(item, role)).map(item => link(item.view, item.title, true)).join('')}</div>`).join('')}`;
 }
 
 function updateSettingsNavigation() {
   const nav = $('#settings-navigation');
-  if (nav) nav.innerHTML = settingsNavigation(state.view, state.role);
+  if (nav) MoyaiUI.render(nav, settingsNavigation(state.view, state.role));
 }
 
 function settingsLoadError(title, error, retry) {
-  $('#content').innerHTML = `<section class="settings-load-error"><h1>${esc(title)}</h1><div role="alert"><h2>Unable to load this page</h2><p>${esc(error.message)}</p><p>Check your connection and try again.</p></div><button id="settings-retry">Try again</button></section>`;
+  MoyaiUI.render($('#content'), `<section class="settings-load-error"><h1>${esc(title)}</h1><div role="alert"><h2>Unable to load this page</h2><p>${esc(error.message)}</p><p>Check your connection and try again.</p></div><button id="settings-retry">Try again</button></section>`);
   $('#settings-retry').onclick = retry;
 }
 
 function confirmSettingsAction(title, description, action) {
   return new Promise(resolve => {
-    const dialog = document.createElement('dialog');
+    const dialog = MoyaiUI.createDialog();
+    dialog.dataset.dialogScope = 'settings';
     dialog.setAttribute('aria-label', title);
-    dialog.innerHTML = `<h2>${esc(title)}</h2><p>${esc(description)}</p><div class="credential-actions"><button class="quiet" data-cancel>Cancel</button><button class="danger" data-confirm>${esc(action)}</button></div>`;
+    MoyaiUI.render(dialog, `<h2>${esc(title)}</h2><p>${esc(description)}</p><div class="credential-actions"><button class="quiet" data-cancel>Cancel</button><button class="danger" data-confirm>${esc(action)}</button></div>`);
     document.body.append(dialog);
     dialog.querySelector('[data-cancel]').onclick = () => dialog.close();
     dialog.querySelector('[data-confirm]').onclick = () => dialog.close('confirmed');
@@ -58,7 +64,8 @@ function confirmSettingsAction(title, description, action) {
 
 // Background polling must not replace the control someone is using.
 function settingsInteractionActive() {
-  return !!document.querySelector('dialog[open]') ||
+  return !!document.querySelector('[data-slot="dialog-content"][data-state="open"]') ||
+    !!document.querySelector('[data-slot="select-trigger"][data-state="open"]') ||
     !!(document.querySelector('#content')?.contains(document.activeElement) &&
       document.activeElement?.matches('button,a,input,select,textarea,summary,[tabindex="0"]'));
 }
@@ -106,28 +113,20 @@ function settingsIcon(view) {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[view] || ''}</svg>`;
 }
 
-async function renderSettings() {
+async function renderSettings(recent=false) {
   const version = state.pageVersion;
-  $('#content').innerHTML = '<p class="subtext" role="status">Loading settings…</p>';
-  const session = await api('/api/session');
+  MoyaiUI.render($('#content'), '<p class="subtext" role="status">Loading settings…</p>');
+  const session = await api('/api/session',{recent});
   if (version !== state.pageVersion) return;
   applyUserSession(session);
   if (!session.authenticated) { await boot(); return; }
   const admin = state.role === 'admin';
-  $('#content').innerHTML = `<section class="settings-page">
+  MoyaiUI.render($('#content'), `<section class="settings-page">
     <div class="page-heading"><div><h1>Settings</h1><p class="subtext">Make Moyai work the way your team does.</p></div></div>
-    <section class="settings-group" aria-labelledby="personal-preferences-title">
-      <h2 id="personal-preferences-title">Personal preferences</h2>
-      <div class="chat-preference">
-        <label for="send-immediately"><input id="send-immediately" type="checkbox" ${state.preferences.send_immediately?'checked':''} aria-describedby="send-immediately-description send-immediately-status"><span>Send messages immediately</span></label>
-        <p id="send-immediately-description" class="subtext">While Moyai is working, send follow-ups into the active response instead of queueing them. Saved for your account across chats.${session.identity?'':' Shared password and local sign-ins use a shared profile.'}</p>
-        <p id="send-immediately-status" class="subtext" role="status">${state.preferences.send_immediately?'On · Enter and the send button send immediately.':'Off · Follow-ups queue while Moyai is working.'}</p>
-      </div>
-    </section>
     <div class="settings-grid">${settingsGroups.filter(group => !group.admin || admin).map(group => `
       <section class="settings-group" aria-labelledby="settings-${group.id}">
         <h2 id="settings-${group.id}">${group.title}${group.admin ? '<span>Admin</span>' : ''}</h2>
-        <div class="settings-links">${group.items.filter(item => !item.admin || admin).map(item => `
+        <div class="settings-links">${group.items.filter(item => settingsItemVisible(item, state.role)).map(item => `
           <a class="settings-link" href="#${item.view}">
             <span class="settings-icon">${settingsIcon(item.view)}</span>
             <span class="settings-copy"><strong>${item.title}</strong><span>${admin && item.adminDescription || item.description}</span></span>
@@ -135,25 +134,54 @@ async function renderSettings() {
           </a>`).join('')}</div>
       </section>`).join('')}</div>
     <section class="card settings-form-section" id="title-model-settings"><div><h2>Session titles</h2><p class="subtext">Choose the model that names new chats. Existing titles and the chat model stay the same.</p></div><form id="title-model-form"><label for="title-model">Gateway model ID</label><input id="title-model" maxlength="200" required placeholder="openai/gpt-4.1-nano" aria-describedby="title-model-status" ${admin?'':'disabled'}><button type="submit" ${admin?'':'disabled'}>Save model</button><p id="title-model-status" role="status">Loading…</p></form></section>
-  </section>`;
-  const preferenceInput=$('#send-immediately'),preferenceStatus=$('#send-immediately-status'),userId=state.userId;
-  preferenceInput.onchange=async()=>{
-    const previous=state.preferences.send_immediately;
-    preferenceInput.disabled=true;preferenceStatus.textContent='Saving…';
-    try{
-      const saved=await api('/api/settings/preferences',{method:'PUT',body:JSON.stringify({send_immediately:preferenceInput.checked})});
-      if(state.userId===userId)state.preferences=saved;
-      if(version!==state.pageVersion)return;
-      preferenceInput.checked=saved.send_immediately;
-      preferenceStatus.textContent=saved.send_immediately?'Saved · Messages now go straight into the active response.':'Saved · Follow-ups will queue while Moyai is working.';
-    }catch(error){
-      if(version!==state.pageVersion)return;
-      preferenceInput.checked=previous;
-      preferenceStatus.textContent='Could not confirm the change. '+error.message+' Reload settings to check, or try again.';
-    }finally{if(version===state.pageVersion)preferenceInput.disabled=false;}
-  };
+    <section class="settings-group" aria-labelledby="preferences-title">
+      <div><h2 id="preferences-title">Preferences</h2><p class="subtext">Saved for your account.${session.identity?'':' Shared password and local sign-ins use a shared profile.'}</p></div>
+      <div class="settings-preferences">
+        <div class="settings-preference">
+          <label for="send-immediately">
+            <span class="settings-copy"><strong id="send-immediately-title">Send messages immediately</strong><span id="send-immediately-description">Send follow-ups into the active response instead of queueing them while Moyai is working.</span></span>
+            <input id="send-immediately" type="checkbox" ${state.preferences.send_immediately?'checked':''} role="switch" aria-labelledby="send-immediately-title" aria-describedby="send-immediately-description send-immediately-status">
+          </label>
+          <p id="send-immediately-status" class="subtext" role="status">${state.preferences.send_immediately?'On':'Off'}</p>
+        </div>
+        <div class="settings-preference">
+          <label for="omit-private-tool-payloads">
+            <span class="settings-copy"><strong id="omit-private-tool-payloads-title">Hide private tool content in traces</strong><span id="omit-private-tool-payloads-description">Hide inputs and results from credential, skill, memory, and connector tools in new responses. Secret redaction stays on either way.</span></span>
+            <input id="omit-private-tool-payloads" type="checkbox" ${state.preferences.omit_private_tool_payloads?'checked':''} role="switch" aria-labelledby="omit-private-tool-payloads-title" aria-describedby="omit-private-tool-payloads-description omit-private-tool-payloads-status">
+          </label>
+          <p id="omit-private-tool-payloads-status" class="subtext" role="status">${state.preferences.omit_private_tool_payloads?'On':'Off'}</p>
+        </div>
+      </div>
+    </section>
+  </section>`);
+  const userId=state.userId;
+  for(const key of ['send_immediately','omit_private_tool_payloads']){
+    const id=key.replaceAll('_','-'),input=$('#'+id),status=$('#'+id+'-status');
+    input.onchange=async()=>{
+      const previous=state.preferences[key],hadFocus=document.activeElement===input;
+      input.disabled=true;status.textContent='Saving…';
+      try{
+        const saved=await api('/api/settings/preferences',{method:'PUT',body:JSON.stringify({[key]:input.checked})});
+        if(state.userId!==userId)return;
+        // Another switch may have saved since this request started.
+        state.preferences[key]=saved[key];
+        if(version!==state.pageVersion)return;
+        input.checked=saved[key];
+        status.textContent=(saved[key]?'On':'Off')+' · Saved';
+      }catch(error){
+        if(version!==state.pageVersion||state.userId!==userId)return;
+        input.checked=previous;
+        status.textContent='Could not confirm the change. '+error.message+' Reload settings to check, or try again.';
+      }finally{
+        if(version===state.pageVersion&&state.userId===userId){
+          input.disabled=false;
+          if(hadFocus&&document.activeElement===document.body)input.focus();
+        }
+      }
+    };
+  }
   try{
-    const saved=await api('/api/settings/session-titles');if(version!==state.pageVersion)return;
+    const saved=await api('/api/settings/session-titles',{recent});if(version!==state.pageVersion)return;
     $('#title-model').value=saved.model;
     $('#title-model-status').textContent=!saved.enabled?'Title generation is disabled by the server.':!saved.gateway_configured?'Gateway access must be configured on the server.':admin?'Enter the exact model ID enabled on your gateway.':'Only administrators can change the workspace title model.';
     $('#title-model-form').onsubmit=async event=>{

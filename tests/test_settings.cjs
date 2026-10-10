@@ -1,12 +1,13 @@
 const assert = require('node:assert/strict');
 const {test} = require('node:test');
 const {readFileSync} = require('node:fs');
-const vm = require('node:vm');
+const vm = require('./helpers/ui-vm.cjs');
 
 function setup({automations = false, role = 'admin'} = {}) {
   const elements = new Map();
   const context = {
     state: {pageVersion: 1, role: 'admin', runsRefresh: 0},
+    document: {activeElement:null,body:{}},
     restoreSessionScope:()=>{},renderSidebar:()=>{},
     $: key => {if (!elements.has(key)) elements.set(key, {}); return elements.get(key);},
     api: async () => ({authenticated: true, role, csrf: 'fresh', user_id: 'test-user'}),
@@ -22,19 +23,23 @@ test('standalone Settings has working sections without depending on automations'
   const {context, elements} = setup();
   await context.renderSettings();
   const html = elements.get('#content').innerHTML;
-  for (const view of ['skills', 'connections', 'secrets', 'runtime', 'environments', 'users', 'spend', 'adoption']) {
+  for (const view of ['skills', 'connections', 'secrets', 'runtime', 'environments', 'users', 'spend']) {
     assert.match(html, new RegExp(`href="#${view}"`));
   }
-  assert.doesNotMatch(html, /href="#automations"/);
+  assert.doesNotMatch(html, /href="#(?:automations|adoption)"/);
+  assert.equal((html.match(/href="#spend"/g)||[]).length,1);
+  assert.match(html, /id="settings-administration"[\s\S]*href="#spend"/);
+  assert.equal(vm.runInContext("settingsViews.has('adoption')", context), true);
   assert.equal(vm.runInContext("settingsViews.has('automations')", context), false);
 });
 
-test('every Settings card renders a non-empty decorative icon, including Adoption', async () => {
+test('every Settings card renders a non-empty decorative icon, including Spend & usage', async () => {
   const {context, elements} = setup({automations: true});
   await context.renderSettings();
   const html = elements.get('#content').innerHTML;
   const views = vm.runInContext('settingsGroups.flatMap(group => group.items.map(item => item.view))', context);
-  assert.ok(views.includes('adoption'));
+  assert.ok(views.includes('spend'));
+  assert.ok(!views.includes('adoption'));
   for (const view of views) {
     const card = html.match(new RegExp(`<a class="settings-link" href="#${view}">([\\s\\S]*?)</a>`));
     assert.ok(card, `${view} card should be rendered`);
@@ -116,6 +121,68 @@ test('delayed preference save updates the account without overwriting a newly op
   assert.equal(context.state.preferences.send_immediately,true);
 });
 
+test('both preferences live at the bottom and private tool omission defaults off', async () => {
+  const {context,elements}=setup();
+  await context.renderSettings();
+  const html=elements.get('#content').innerHTML;
+  assert.ok(html.indexOf('id="preferences-title"')>html.indexOf('id="title-model-settings"'));
+  assert.match(html,/id="omit-private-tool-payloads" type="checkbox"\s+role="switch"/);
+  assert.equal(context.state.preferences.omit_private_tool_payloads,false);
+});
+
+test('independent preference saves can finish out of order without resetting each other', async () => {
+  const {context,elements}=setup();
+  await context.renderSettings();
+  const pending=[];
+  context.api=async(url,options)=>new Promise(resolve=>pending.push({resolve,body:JSON.parse(options.body)}));
+  const chat=elements.get('#send-immediately'),trace=elements.get('#omit-private-tool-payloads');
+  chat.checked=true;const first=chat.onchange();
+  trace.checked=true;const second=trace.onchange();
+  assert.deepEqual(pending.map(p=>p.body),[{send_immediately:true},{omit_private_tool_payloads:true}]);
+  pending[1].resolve({send_immediately:true,omit_private_tool_payloads:true});await second;
+  pending[0].resolve({send_immediately:true,omit_private_tool_payloads:false});await first;
+  assert.equal(context.state.preferences.send_immediately,true);
+  assert.equal(context.state.preferences.omit_private_tool_payloads,true);
+  context.api=async()=>{throw Error('Connection lost.');};
+  trace.checked=false;await trace.onchange();
+  assert.equal(trace.checked,true);
+  assert.equal(trace.disabled,false);
+  assert.match(elements.get('#omit-private-tool-payloads-status').textContent,/Could not confirm/);
+});
+
+test('a preference response cannot update a different signed-in account', async () => {
+  const {context,elements}=setup();
+  await context.renderSettings();
+  context.api=async()=>{
+    context.state.userId='another-user';
+    return {send_immediately:true,omit_private_tool_payloads:true};
+  };
+  const input=elements.get('#omit-private-tool-payloads');
+  input.checked=true;await input.onchange();
+  assert.equal(context.state.preferences.omit_private_tool_payloads,false);
+});
+
+test('a keyboard save restores switch focus only if the user has not moved elsewhere', async () => {
+  const {context,elements}=setup();
+  await context.renderSettings();
+  const input=elements.get('#omit-private-tool-payloads');
+  let focused=0;
+  input.focus=()=>{focused++;context.document.activeElement=input;};
+  context.document.activeElement=input;
+  context.api=async()=>{
+    context.document.activeElement=context.document.body;
+    return {omit_private_tool_payloads:true};
+  };
+  input.checked=true;await input.onchange();
+  assert.equal(focused,1);
+  context.api=async()=>{
+    context.document.activeElement={id:'another-control'};
+    return {omit_private_tool_payloads:false};
+  };
+  input.checked=false;await input.onchange();
+  assert.equal(focused,1);
+});
+
 test('settings navigation selects exactly one destination and respects member access', () => {
   const {context} = setup({automations: true});
   const member = context.settingsNavigation('skills', 'member');
@@ -124,7 +191,12 @@ test('settings navigation selects exactly one destination and respects member ac
   assert.doesNotMatch(member, /href="#(?:users|adoption|environments)"/);
   assert.match(member, /href="#spend"/);
   const admin = context.settingsNavigation('spend', 'admin');
-  for (const view of ['automations','skills','memory','connections','secrets','runtime','environments','users','spend','adoption']) {
+  assert.equal((admin.match(/href="#spend"/g)||[]).length,1);
+  assert.match(admin, /<h2>Administration<\/h2>[\s\S]*href="#spend" aria-current="page"/);
+  assert.doesNotMatch(admin, /href="#adoption"/);
+  assert.match(member, /<h2>Workspace<\/h2>[\s\S]*href="#spend"/);
+  assert.doesNotMatch(member, /Administration/);
+  for (const view of ['automations','skills','memory','connections','secrets','runtime','environments','users','spend']) {
     assert.match(admin, new RegExp(`href="#${view}"`));
   }
 });
@@ -163,11 +235,11 @@ test('library filters combine query and scope, survive redraw, and recover from 
   assert.equal(rows[0].onclick,handler);
 });
 
-test('background refresh defers while a dialog or page control is active', () => {
+test('background refresh defers while a dialog, portaled select or page control is active', () => {
   const {context} = setup();
-  let modal = null, contains = true, interactive = true;
+  let modal = null, menu = null, contains = true, interactive = true;
   context.document = {
-    querySelector:key=>key==='dialog[open]'?modal:{contains:()=>contains},
+    querySelector:key=>key==='[data-slot="dialog-content"][data-state="open"]'?modal:key==='[data-slot="select-trigger"][data-state="open"]'?menu:{contains:()=>contains},
     activeElement:{matches:()=>interactive},
   };
   assert.equal(context.settingsInteractionActive(),true);
@@ -177,4 +249,8 @@ test('background refresh defers while a dialog or page control is active', () =>
   assert.equal(context.settingsInteractionActive(),false);
   modal = {};
   assert.equal(context.settingsInteractionActive(),true);
+  modal = null; menu = {};
+  assert.equal(context.settingsInteractionActive(),true);
+  menu = null;
+  assert.equal(context.settingsInteractionActive(),false);
 });

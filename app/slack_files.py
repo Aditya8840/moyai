@@ -75,7 +75,7 @@ class SlackFiles:
         if not source or source['context_status'] != 'ready':
             return
         with store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             message = conn.execute("SELECT id,status FROM messages WHERE run_id=? AND role='user' ORDER BY id LIMIT 1", (run_id,)).fetchone()
             if not message or message['id'] != run.get('active_message_id') or message['status'] != 'running':
                 return
@@ -84,7 +84,7 @@ class SlackFiles:
                 return
             ids = json.loads(pending['files_json']) if pending else []
             messages = source.get('messages', [])
-            # The directly addressed message wins the shared five-file budget.
+            # The directly addressed message wins the shared per-message file budget.
             messages = sorted(messages, key=lambda item: item['ts'] != source['mention_ts'])
             for item in messages:
                 if item['ts'] == source['mention_ts'] or source.get('kind') == 'thread':
@@ -119,8 +119,8 @@ class SlackFiles:
                     name, raw, inspected = item
                     if total + len(raw) > MAX_MESSAGE:
                         raise ValueError('Attachments must total 20 MB or less per message.')
-                    store.attachments.save(attachment_id, row['user_id'], name, raw, inspected,
-                                           self.owner.settings.attachment_storage_limit_mb * 1024 * 1024)
+                    await asyncio.to_thread(store.attachments.save, attachment_id, row['user_id'], name, raw, inspected,
+                                            self.owner.settings.attachment_storage_limit_mb * 1024 * 1024)
                     total += len(raw)
                     attachments.append(attachment_id)
                 except ValueError as exc:
@@ -128,10 +128,18 @@ class SlackFiles:
                 except Exception:
                     errors.append('Could not read this Slack attachment. Upload it again or describe its contents.')
             with store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 current = conn.execute('SELECT status FROM messages WHERE id=?', (row['message_id'],)).fetchone()
                 if not current or current['status'] != 'running':
                     return
+                try:
+                    # Remote saves can yield after Slack's download guard.
+                    # Recheck the entire batch, including recovered draft IDs,
+                    # under the same writer lock that publishes their access.
+                    self.check_access(team)
+                except ValueError as exc:
+                    attachments = []
+                    errors.append(str(exc))
                 store.attachments.bind_in(conn, attachments, row['message_id'], row['user_id'])
                 if errors:
                     explanation = '\n\n[Slack attachments could not be read: ' + ' '.join(dict.fromkeys(errors)) + ' Do not guess the missing content.]'
