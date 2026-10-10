@@ -32,8 +32,21 @@ def test_list_query_count_stays_bounded_and_full_detail_keeps_answers(users_app,
     @contextmanager
     def counted():
         with connect() as conn:
-            conn.set_trace_callback(queries.append)
-            yield conn
+            if store.database:
+                execute = conn.raw.execute
+
+                def traced(sql, *args, **kwargs):
+                    queries.append(sql)
+                    return execute(sql, *args, **kwargs)
+
+                # Include Postgres ownership/transaction queries in the bound,
+                # and restore the pooled connection before another request.
+                with monkeypatch.context() as tracing:
+                    tracing.setattr(conn.raw, 'execute', traced)
+                    yield conn
+            else:
+                conn.set_trace_callback(queries.append)
+                yield conn
 
     monkeypatch.setattr(store, 'connect', counted)
     response = client.get('/api/runs?scope=all&view=sidebar')

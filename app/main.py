@@ -160,7 +160,17 @@ def create_app(settings: Settings | None = None):
     settings = settings or Settings()
     restore_checkpoint(settings)
     store = Store(settings.data_dir, default_model=settings.resolve_model(), auto_link_identities=settings.slack_identity_linking_enabled,
-                  max_pending_runs=settings.max_pending_runs, object_storage=ObjectStorage(settings))
+                  max_pending_runs=settings.max_pending_runs, object_storage=ObjectStorage(settings),
+                  database_url=settings.moyai_database_url, database_schema=settings.moyai_database_schema,
+                  database_initialize=settings.moyai_database_initialize, application_instance=True)
+    try:
+        return _create_app(settings, store)
+    except BaseException:
+        store.close()
+        raise
+
+
+def _create_app(settings, store):
     user_roles = UserRoles(store, settings)
     security = Security(settings, user_roles)
     from .sandbox_settings import SandboxSettings
@@ -197,7 +207,7 @@ def create_app(settings: Settings | None = None):
     context_budget = ContextBudget(settings)
     credentials.slots = model_slots
     manager.persist = checkpoints.flush
-    store.execute("INSERT OR IGNORE INTO organization(id,name) VALUES(1,?)", (settings.organization_name,))
+    store.execute("INSERT INTO organization(id,name) VALUES(1,?) ON CONFLICT DO NOTHING", (settings.organization_name,))
     slack = SlackSessions(store, connectors, manager, checkpoints, settings)
     from .session_titles import SessionTitles
     session_titles = SessionTitles(store, settings, checkpoints)
@@ -219,51 +229,51 @@ def create_app(settings: Settings | None = None):
 
     @asynccontextmanager
     async def lifespan(app):
-        # Close the previous process's attempts before session recovery can
-        # dispatch fresh inference; accounting recovery preserves this outcome.
-        store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
-        harness_gateway.maintenance.recover()
-        await manager.recover()
-        session_lifecycle.start()
-        await checkpoints.flush()
-        slack.recover()
-        identities.start()
-        environments.start()
-        automations.start()
-        spend.recovery.start()
-        watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
-        tracing.start()
-        infrastructure.start()
-        session_titles.start()
-        memory_review.start()
         try:
-            yield
-        finally:
-            await session_lifecycle.close()
-            await memory_review.close()
-            await spend.recovery.close()
-            await harness_gateway.maintenance.close()
-            await harness_gateway.live_context.close()
-            await computer.close()
-            await session_pull_requests.close()
-            await session_titles.close()
-            await infrastructure.close()
-            await automations.close()
-            await environments.close()
-            await identities.close()
-            await slack.shutdown()
+            # Close the previous process's attempts before session recovery can
+            # dispatch fresh inference; accounting recovery preserves this outcome.
+            store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
+            harness_gateway.maintenance.recover()
+            await manager.recover()
+            session_lifecycle.start()
+            await checkpoints.flush()
+            slack.recover()
+            identities.start()
+            environments.start()
+            automations.start()
+            spend.recovery.start()
+            watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
+            tracing.start()
+            infrastructure.start()
+            session_titles.start()
+            memory_review.start()
             try:
-                await manager.shutdown()
+                yield
             finally:
-                await manager.modal_clients.close()
-            await tracing.close()
-            if watcher:
-                watcher.cancel()
-                await asyncio.gather(watcher, return_exceptions=True)
-            try:
+                await session_lifecycle.close()
+                await memory_review.close()
+                await spend.recovery.close()
+                await harness_gateway.maintenance.close()
+                await harness_gateway.live_context.close()
+                await computer.close()
+                await session_pull_requests.close()
+                await session_titles.close()
+                await infrastructure.close()
+                await automations.close()
+                await environments.close()
+                await identities.close()
+                await slack.shutdown()
+                try:
+                    await manager.shutdown()
+                finally:
+                    await manager.modal_clients.close()
+                await tracing.close()
+                if watcher:
+                    watcher.cancel()
+                    await asyncio.gather(watcher, return_exceptions=True)
                 await checkpoints.flush()
-            finally:
-                await asyncio.to_thread(store.objects.close)
+        finally:
+            await asyncio.to_thread(store.close)
 
     session_lifecycle = SessionLifecycle(store, security, manager, checkpoints)
     app = FastAPI(title="Moyai", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None,
@@ -375,6 +385,12 @@ def create_app(settings: Settings | None = None):
 
     @app.get("/health")
     async def health():
+        if store.database:
+            from .database import DatabaseError
+            try:
+                store.rows('SELECT 1')
+            except DatabaseError:
+                raise HTTPException(503, 'Database is unavailable.') from None
         return {"status": "ok"}
 
     @app.get("/api/session")
@@ -607,7 +623,7 @@ def create_app(settings: Settings | None = None):
         # response completing during this request must be included or replayed
         # by SSE, never skipped between independent database reads.
         with store.connect() as connection:
-            connection.execute('BEGIN')
+            connection.begin_read()
             run = store.run(run_id, connection=connection)
             if not run or run['deleted_at']:
                 raise HTTPException(404, "Task not found")
@@ -1176,8 +1192,8 @@ def create_app(settings: Settings | None = None):
         harness_gateway.live_context.require_current(run, request, selected_model)
         admitted = store.execute("UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 "
             "WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) "
-            "AND status IN ('running','reconnecting','awaiting_approval') AND token_hash=? AND active_message_id IS ? "
-            "AND active_user_id IS ? AND active_model IS ? AND (coalesce(active_model,'')!='' OR model IS ?)",
+            "AND status IN ('running','reconnecting','awaiting_approval') AND token_hash=? AND active_message_id IS NOT DISTINCT FROM ? "
+            "AND active_user_id IS NOT DISTINCT FROM ? AND active_model IS NOT DISTINCT FROM ? AND (coalesce(active_model,'')!='' OR model IS NOT DISTINCT FROM ?)",
             (run_id, settings.max_agent_iterations, settings.max_agent_iterations * 3,
              run['token_hash'], run['active_message_id'], run['active_user_id'], run['active_model'], run['model']))
         if not admitted:
