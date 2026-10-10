@@ -918,7 +918,7 @@ def test_results_are_only_sent_to_original_thread_and_never_ping_users(slack_app
     wait_for(lambda: bool(app.state.store.rows("SELECT 1 FROM slack_activity WHERE refreshed_at>0")))
     finish(app, run_id, 'Hello <!channel> <@U12345678>. The key is model-test-key.\n```python\nprint("hello")\n```')
     app.state.slack.chat.last_post.clear()
-    asyncio.run(app.state.slack.chat.deliver_one())
+    client.portal.call(app.state.slack.chat.deliver_one)
     sent = slack_app[3][-1]
     assert sent['channel'] == 'C12345678' and sent['thread_ts'] == ROOT
     assert '<!channel>' not in sent['text'] and '<@U12345678>' not in sent['text']
@@ -937,7 +937,7 @@ def test_answers_render_mentions_only_for_users_already_mentioned_in_the_thread(
     wait_for(lambda: bool(app.state.store.rows("SELECT 1 FROM slack_activity WHERE refreshed_at>0")))
     finish(app, run_id, 'Credit to <@U0B1TDTHL4Q> and <@U0C59A1GHPD>. Not <@U00000001>, <@U99999999>, <!channel> or `<@U0B1TDTHL4Q>`')
     app.state.slack.chat.last_post.clear()
-    asyncio.run(app.state.slack.chat.deliver_one())
+    client.portal.call(app.state.slack.chat.deliver_one)
     text = sent[-1]['text']
     assert 'Credit to <@U0B1TDTHL4Q> and <@U0C59A1GHPD>.' in text
     assert 'Not &lt;@U00000001&gt;, &lt;@U99999999&gt;, &lt;!channel&gt; or `&lt;@U0B1TDTHL4Q&gt;`' in text
@@ -947,22 +947,27 @@ def test_answers_render_mentions_only_for_users_already_mentioned_in_the_thread(
 def test_uncertain_outbox_delivery_survives_restart_without_resending(slack_app, monkeypatch):
     app, client, run_id = start(slack_app)
     wait_for(lambda: bool(app.state.store.rows("SELECT 1 FROM slack_activity WHERE refreshed_at>0")))
-    finish(app, run_id, 'An important answer')
+    request = app.state.connectors.request
     attempts = []
-    async def fail(*args, **kwargs):
-        attempts.append(1)
-        raise TimeoutError('The provider response was lost')
+    async def fail(method, url, **kwargs):
+        if url.endswith('chat.postMessage'):
+            attempts.append(1)
+            raise TimeoutError('The provider response was lost')
+        return await request(method, url, **kwargs)
     monkeypatch.setattr(app.state.connectors, 'request', fail)
+    # The live watcher can send as soon as collection publishes the answer.
+    # Install the failed transport first, and let either delivery task finish.
+    finish(app, run_id, 'An important answer')
     app.state.slack.chat.last_post.clear()
-    asyncio.run(app.state.slack.chat.deliver_one())
-    assert app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='answer'")[0]['status'] == 'uncertain'
+    client.portal.call(app.state.slack.chat.deliver_one)
+    wait_for(lambda: app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='answer'")[0]['status'] == 'uncertain')
     # A fresh database handle observes the same durable cursor and outbox.
     reopened = Store(app.state.settings.data_dir)
     assert len(reopened.rows("SELECT * FROM slack_outbox WHERE kind='answer'")) == 1
     app.state.slack.chat.collect()
-    app.state.slack.recover()
+    client.portal.call(app.state.slack.recover)
     app.state.slack.chat.last_post.clear()
-    asyncio.run(app.state.slack.chat.deliver_one())
+    client.portal.call(app.state.slack.chat.deliver_one)
     assert attempts == [1]
 
 
@@ -1286,7 +1291,7 @@ def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app):
     assert not app.state.store.rows("SELECT * FROM slack_outbox WHERE kind IN ('ack','progress','control')")
     finish(app, run_id, 'Here is the answer.')
     app.state.slack.chat.last_post.clear()
-    asyncio.run(app.state.slack.chat.deliver_one())
+    client.portal.call(app.state.slack.chat.deliver_one)
     assert slack_app[3][-1]['text'].startswith('Here is the answer.')
 
 
@@ -1302,7 +1307,7 @@ def test_status_failure_does_not_prevent_the_answer(slack_app, monkeypatch):
     wait_for(lambda: bool(app.state.store.rows("SELECT 1 FROM slack_activity WHERE retry_at>0")))
     finish(app, run_id, 'Still answered.')
     app.state.slack.chat.last_post.clear()
-    asyncio.run(app.state.slack.chat.deliver_one())
+    client.portal.call(app.state.slack.chat.deliver_one)
     assert sent[-1]['text'].startswith('Still answered.')
     assert app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='answer'")[0]['status'] == 'sent'
 
