@@ -433,21 +433,29 @@ class SlackChat:
                                {'captures': [item.model_dump() for item in media]})
                 chunks = split_reply(slack_text(value, self.mentionable_in(conn, run_id),
                                                public_url=self.settings.public_url, run_id=run_id))
+                feedback_message_id = (message['id'] if message['status'] == 'completed'
+                                       and self.owner.lens_feedback and self.owner.lens_feedback.enabled else None)
                 for index, chunk in enumerate(chunks):
                     suffix = '\n\n' + self.link(run_id) if index == len(chunks) - 1 else ''
-                    metadata = {'pull_requests': [pr.model_dump() for pr in prs]} if suffix and prs else None
+                    metadata = {'pull_requests': [pr.model_dump() for pr in prs]} if suffix and prs else {}
+                    if suffix and feedback_message_id is not None:
+                        metadata['feedback_message_id'] = feedback_message_id
                     if table_parts:
                         # Queue the structured answer once; text chunks remain the fallback.
                         if index == 0:
-                            self.queue_table_parts(conn, run_id, message['id'], table_parts, prs)
+                            self.queue_table_parts(conn, run_id, message['id'], table_parts, prs,
+                                                   feedback_message_id)
                     else:
-                        self.queue(conn, run_id, f"answer:{message['id']}:{index}", 'answer', chunk + suffix, metadata)
+                        self.queue(conn, run_id, f"answer:{message['id']}:{index}", 'answer', chunk + suffix,
+                                   metadata or None)
             conn.execute('UPDATE slack_threads SET last_message_id=? WHERE run_id=?', (message['id'], run_id))
 
-    def queue_table_parts(self, conn, run_id, message_id, parts, prs):
+    def queue_table_parts(self, conn, run_id, message_id, parts, prs, feedback_message_id=None):
         for index, (chunk, blocks) in enumerate(parts):
             suffix = '\n\n' + self.link(run_id) if index == len(parts) - 1 else ''
             metadata = {'pull_requests': [pr.model_dump() for pr in prs]} if suffix and prs else {}
+            if suffix and feedback_message_id is not None:
+                metadata['feedback_message_id'] = feedback_message_id
             if blocks:
                 metadata['blocks'] = blocks
             self.queue(conn, run_id, f'answer:{message_id}:{index}', 'answer', chunk + suffix, metadata)
@@ -526,8 +534,10 @@ class SlackChat:
                     elif data.get('captures'):
                         sent_ts = await self.owner.channel.deliver_captures(source, data['captures'])
                     else:
-                        if data.get('pull_requests') or data.get('blocks'):
-                            content = self.owner.channel.build_rich_reply(source, row['text'], data.get('pull_requests', ()), data.get('blocks'))
+                        if data.get('pull_requests') or data.get('blocks') or data.get('feedback_message_id') is not None:
+                            content = self.owner.channel.build_rich_reply(
+                                source, row['text'], data.get('pull_requests', ()), data.get('blocks'),
+                                data.get('feedback_message_id'))
                             response = await self.owner.agentchat.reply_rich(self.owner.channel, source, content)
                         else:
                             response = await self.owner.agentchat.reply(self.owner.channel, source, row['text'])

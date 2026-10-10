@@ -135,6 +135,7 @@ class Settings(BaseSettings):
     # Separate destination/key; enabling traces never reroutes inference.
     litellm_trace_endpoint: str = ""
     litellm_trace_api_key: str = ""
+    lens_feedback_endpoint: str = ""
     raindrop_trace_endpoint: str = "https://api.raindrop.ai/v1/traces"
     raindrop_write_key: str = ""
     raindrop_project_id: str = ""
@@ -291,6 +292,25 @@ class Settings(BaseSettings):
                       parsed.password or parsed.query or parsed.fragment or not parsed.path.endswith('/v1/traces')):
             raise ValueError('Use an HTTPS trace endpoint ending in /v1/traces, without credentials or query parameters.')
         return value
+
+    @field_validator('lens_feedback_endpoint')
+    @classmethod
+    def validate_lens_feedback_endpoint(cls, value):
+        parsed = urlsplit(value)
+        if value and (parsed.scheme != 'https' or not parsed.hostname or parsed.username or
+                      parsed.password or parsed.query or parsed.fragment or
+                      not parsed.path.endswith('/lens/feedback')):
+            raise ValueError('Use an HTTPS feedback endpoint ending in /lens/feedback, without credentials or query parameters.')
+        return value
+
+    def lens_feedback_target(self) -> tuple[str, dict[str, str]] | None:
+        endpoint = self.lens_feedback_endpoint
+        if not endpoint and self.litellm_trace_endpoint:
+            parsed = urlsplit(self.litellm_trace_endpoint)
+            endpoint = f'{parsed.scheme}://{parsed.netloc}/lens/feedback'
+        if not endpoint or not self.litellm_trace_api_key:
+            return None
+        return endpoint, {'Authorization': 'Bearer ' + self.litellm_trace_api_key}
 
     @field_validator('langfuse_base_url', 'langsmith_endpoint', 'braintrust_api_url')
     @classmethod

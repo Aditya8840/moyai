@@ -621,6 +621,34 @@ function renderActivitySummary(run){
   if(!shown.length)target.textContent='No tool activity yet.';
   if(turns.length>shown.length){const more=MoyaiUI.createElement('button', document);more.className='quiet';more.dataset.moreHistory='';more.textContent='Show earlier turns';more.onclick=()=>{state.activityHistoryLimit+=5;target.dataset.signature='';renderActivitySummary(state.chatRun);};target.append(more);}
 }
+function showReplyFeedback(run,message){
+  const existing=message.feedback||{};
+  const dialog=MoyaiUI.createDialog();
+  dialog.className='reply-feedback-dialog';
+  dialog.setAttribute('aria-labelledby','reply-feedback-heading');
+  MoyaiUI.render(dialog, `<form class="reply-feedback-form"><h2 id="reply-feedback-heading">Reply feedback</h2><fieldset class="reply-feedback-scores" role="radiogroup" aria-required="true"><legend>How helpful was this reply?</legend><div>${Array.from({length:11},(_,score)=>`<label><input type="radio" name="score" value="${score}" ${existing.score===score?'checked':''} required><span>${score}</span></label>`).join('')}</div></fieldset><label for="reply-feedback-comment">Comment (optional)</label><textarea id="reply-feedback-comment" name="comment" maxlength="10000" rows="4">${esc(existing.comment||'')}</textarea><p class="reply-feedback-error" data-feedback-error role="alert" aria-live="polite"></p><footer><button type="button" class="quiet" data-feedback-cancel>Cancel</button><button type="submit" class="primary">Submit</button></footer></form>`);
+  document.body.append(dialog);
+  dialog.addEventListener('close',()=>{dialog.remove();document.querySelector(`[data-feedback-message="${message.id}"]`)?.focus();},{once:true});
+  const form=dialog.querySelector('form'),error=form.querySelector('[data-feedback-error]'),submit=form.querySelector('[type="submit"]');
+  form.addEventListener('invalid',()=>{error.textContent='Choose a score from 0 to 10.';},{capture:true});
+  form.querySelector('[data-feedback-cancel]').onclick=()=>dialog.close();
+  form.addEventListener('submit',async event=>{
+    event.preventDefault();
+    const selected=form.querySelector('input[name="score"]:checked');
+    if(!selected){error.textContent='Choose a score from 0 to 10.';return;}
+    error.textContent='';submit.disabled=true;
+    try{
+      const result=await api(`/api/runs/${run.id}/messages/${message.id}/feedback`,{method:'POST',body:JSON.stringify({score:Number(selected.value),comment:form.elements.comment.value})});
+      if(state.chatRun?.id===run.id){
+        updateChat({...state.chatRun,messages:state.chatRun.messages.map(item=>String(item.id)===String(message.id)?{...item,feedback:result}:item)});
+      }
+      dialog.close();
+    }catch(failure){error.textContent=failure.message||'Feedback could not be saved.';}
+    finally{submit.disabled=false;}
+  });
+  dialog.showModal();
+  dialog.querySelector('input[name="score"]:checked')?.focus();
+}
 function updateChat(run,initial=false){
   syncChatComposer(run);
   const previous=state.chatRun?.id===run.id?state.chatRun:null;
@@ -633,14 +661,15 @@ function updateChat(run,initial=false){
   const box=$('#conversation');const atBottom=initial||box.scrollHeight-box.scrollTop-box.clientHeight<100;
   state.messageQueue?.render(run);
   const {transcript}=MoyaiQueue.presentation(run);
-  const signature=JSON.stringify(transcript);
+  const signature=JSON.stringify([transcript,run.feedback_enabled]);
   if(box.dataset.messages!==signature){
     box.dataset.messages=signature;
     const previousTemplates=box.messageTemplates||new Map(),templates=new Map();
     const messages=transcript.map((m,index)=>{
       const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(transcript[index-1]?.status)?transcript[index-1].status:null;
-      const signature=JSON.stringify([m,failure,run.mode]),previous=previousTemplates.get(m.id);
-      const html=previous?.signature===signature?previous.html:`<article data-region-key="message:${esc(m.id)}" data-region-leaf class="chat-message ${m.role==='user'?'user':'assistant'} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?esc(m.user_name||'Earlier message'):'<img src="/static/favicon.svg?v=moyai-train-1" alt="">Moyai'}<small>${m.role==='user'?(m.status==='queued'&&m.send_immediately?'Sending…':m.steering_parent_id?'Steering':!['completed','queued'].includes(m.status)?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?MoyaiSkillText.message(m):renderMarkdown(m.content)}</div>${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">${globalThis.MoyaiIcon?.('copy',16)||'Copy'}</button>`:''}</article>`;
+      const signature=JSON.stringify([m,m.feedback,failure,run.mode,run.feedback_enabled]),previous=previousTemplates.get(m.id);
+      const feedback=m.role==='assistant'&&run.feedback_enabled&&!['running','streaming','queued','injected'].includes(m.status)?`<button class="feedback-message quiet" type="button" data-feedback-message="${esc(m.id)}" aria-label="${m.feedback?`Update feedback, score ${m.feedback.score} out of 10`:'Give feedback'}" title="${m.feedback?`Feedback ${esc(m.feedback.status||'pending')}`:'Give feedback'}">${globalThis.MoyaiIcon?.('chat',16)||''}${m.feedback?`<span>${esc(m.feedback.score)}/10</span>`:''}</button>`:'';
+      const html=previous?.signature===signature?previous.html:`<article data-region-key="message:${esc(m.id)}" data-region-leaf class="chat-message ${m.role==='user'?'user':'assistant'} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?esc(m.user_name||'Earlier message'):'<img src="/static/favicon.svg?v=moyai-train-1" alt="">Moyai'}<small>${m.role==='user'?(m.status==='queued'&&m.send_immediately?'Sending…':m.steering_parent_id?'Steering':!['completed','queued'].includes(m.status)?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?MoyaiSkillText.message(m):renderMarkdown(m.content)}</div>${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">${globalThis.MoyaiIcon?.('copy',16)||'Copy'}</button>${feedback}`:''}</article>`;
       templates.set(m.id,{signature,html});
       return html+`${m.role==='user'?`<div data-region-key="activity:${esc(m.id)}" data-region-preserve data-activity-slot="${m.id}"></div>`:''}`;
     }).join('');
@@ -649,6 +678,10 @@ function updateChat(run,initial=false){
     MoyaiActivity.sync(box,run,{markdown:renderMarkdown,copy:copyText,loadActivity});
     box.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=()=>showAttachment(run.messages.flatMap(message=>message.attachments||[]).find(file=>file.id===button.dataset.attachment)));
     box.querySelectorAll('.copy-message').forEach(b=>b.onclick=()=>copyText(run.messages.find(m=>String(m.id)===b.dataset.message).content,b));
+    box.querySelectorAll('.feedback-message').forEach(button=>button.onclick=()=>showReplyFeedback(
+      state.chatRun,
+      state.chatRun.messages.find(message=>String(message.id)===button.dataset.feedbackMessage),
+    ));
     box.querySelectorAll('.copy-code').forEach(b=>b.onclick=()=>copyText(b.closest('.code-block').querySelector('code').textContent,b));
     if(atBottom)box.scrollTop=box.scrollHeight;
   }

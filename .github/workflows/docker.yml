@@ -23,7 +23,7 @@ jobs:
       - name: Test Slack requester identity and DM delivery
         run: uv run --python 3.13 pytest -q --tb=line tests/test_slack_sender.py tests/test_identities.py
       - name: Test instant session metadata and chat routing
-        run: uv run --python 3.13 pytest -q --tb=line tests/test_session_metadata.py tests/test_sessions.py tests/test_slack_chat.py tests/test_slack_web_mirror.py tests/test_side_chats.py tests/test_session_titles.py tests/test_agent_sidebar.py tests/test_session_folders.py tests/test_session_list_performance.py
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_session_metadata.py tests/test_sessions.py tests/test_slack_chat.py tests/test_slack_feedback.py tests/test_slack_web_mirror.py tests/test_side_chats.py tests/test_session_titles.py tests/test_agent_sidebar.py tests/test_session_folders.py tests/test_session_list_performance.py
       - name: Test private storage, migration and legacy file compatibility
         run: uv run --python 3.13 pytest -q --tb=line tests/test_blob_storage.py tests/test_storage_maintenance.py tests/test_attachments.py tests/test_audio.py tests/test_slack_files.py tests/test_skill_saving.py tests/test_artifact_files.py tests/test_agents.py tests/test_persistence.py tests/test_capture_release.py
       - uses: actions/setup-node@v4
@@ -48,7 +48,7 @@ jobs:
       - name: Test active input delivery and queue ownership
         run: uv run --python 3.13 pytest -q --tb=line tests/test_steering_latency.py tests/test_active_steering.py tests/test_message_queue.py tests/test_send_now_interrupt.py
       - name: Test model trace content and parallel exports
-        run: uv run --python 3.13 pytest -q --tb=line tests/test_tracing.py tests/test_trace_outbox.py tests/test_parallel_tracing.py
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_tracing.py tests/test_trace_outbox.py tests/test_lens_feedback.py tests/test_parallel_tracing.py
       - name: Test persistent context and real SDK continuation
         run: uv run --python 3.13 pytest -q tests/test_context_store.py tests/test_context_gateway.py tests/test_context_budget.py tests/test_context_recovery.py tests/test_context_lifecycle.py tests/test_claude_sdk_transport.py tests/test_claude_message_buffer.py tests/test_claude_native_compaction.py tests/test_harnesses.py tests/test_harness_gateway.py tests/test_spend.py tests/test_goals.py tests/test_continuation.py
       - name: Test cloud diagnostics and durable recovery

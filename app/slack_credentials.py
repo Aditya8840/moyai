@@ -102,6 +102,14 @@ class SlackCredentials:
             if set(form) != {'payload'} or len(form['payload']) != 1:
                 raise ValueError()
             payload = json.loads(form['payload'][0])
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise HTTPException(400, 'Invalid Slack access action.') from None
+        return await self.receive_payload(payload)
+
+    async def receive_payload(self, payload):
+        try:
+            if not isinstance(payload, dict):
+                raise ValueError()
             action, = payload['actions']
             if payload['type'] != 'block_actions' or action['type'] != 'button':
                 raise ValueError()

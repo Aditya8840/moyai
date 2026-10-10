@@ -51,6 +51,7 @@ from .session_pull_requests import SessionPullRequests
 from sandbox.memory_history import scrub_memory_history
 from .environments import Environments
 from .tracing import AgentTracing
+from .lens_feedback import FeedbackNotConfigured, LensFeedback
 from .attachments import MAX_FILES, upload_limit
 from .artifact_files import routes as artifact_file_routes
 from .automations import Automations
@@ -144,6 +145,12 @@ class QueueChange(BaseModel):
     content: str | None = Field(default=None, min_length=1, max_length=16000)
 
 
+class FeedbackBody(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)
+    score: int = Field(ge=0, le=10)
+    comment: str = Field(default='', max_length=10000)
+
+
 class ConnectionPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool
@@ -205,10 +212,11 @@ def _create_app(settings, store):
     memory.reviewer = store.memory_review = memory_review
     from .context_budget import ContextBudget, ContextPressure, provider_context_rejection
     context_budget = ContextBudget(settings)
+    lens_feedback = LensFeedback(store, settings)
     credentials.slots = model_slots
     manager.persist = checkpoints.flush
     store.execute("INSERT INTO organization(id,name) VALUES(1,?) ON CONFLICT DO NOTHING", (settings.organization_name,))
-    slack = SlackSessions(store, connectors, manager, checkpoints, settings)
+    slack = SlackSessions(store, connectors, manager, checkpoints, settings, lens_feedback=lens_feedback)
     from .session_titles import SessionTitles
     session_titles = SessionTitles(store, settings, checkpoints)
     slack.session_titles = session_titles
@@ -244,6 +252,7 @@ def _create_app(settings, store):
             spend.recovery.start()
             watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
             tracing.start()
+            lens_feedback.start()
             infrastructure.start()
             session_titles.start()
             memory_review.start()
@@ -268,6 +277,7 @@ def _create_app(settings, store):
                 finally:
                     await manager.modal_clients.close()
                 await tracing.close()
+                await lens_feedback.close()
                 if watcher:
                     watcher.cancel()
                     await asyncio.gather(watcher, return_exceptions=True)
@@ -279,6 +289,7 @@ def _create_app(settings, store):
     app = FastAPI(title="Moyai", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None,
                   dependencies=[Depends(session_lifecycle.require_live_api)])
     app.state.session_lifecycle = session_lifecycle
+    app.state.lens_feedback = lens_feedback
     app.state.session_pull_requests = session_pull_requests
     app.include_router(session_lifecycle.routes())
     app.state.sandbox_settings = sandbox_settings
@@ -635,12 +646,16 @@ def _create_app(settings, store):
         identities.wake.set()  # Resolve newly discovered mentions in saved Slack history.
         actor = store.identity(security.session_info(request))
         messages = skills.message_mentions(messages, actor)
+        feedback_rows = lens_feedback.for_messages(run_id, feedback_author(request))
+        messages = [{**message, 'feedback': feedback_rows.get(message['id'])}
+                    if message['role'] == 'assistant' else message for message in messages]
         sidebar_id = store.root_id(run_id)
         run['workflow_root_id'] = sidebar_id
         pr_summary = session_pull_requests.summaries([run_id])[run_id]
         return {**public_run(run), **session_lifecycle.metadata(run, actor, security.role(request) == 'admin'),
                 **store.sidebar_metadata(actor, [sidebar_id]).get(sidebar_id, {}),
                 'pr_summary': pr_summary,
+                'feedback_enabled': lens_feedback.enabled,
                 **activity_data, "approvals": store.approvals(run_id), "messages": messages,
                 'pull_requests': pr_summary['pull_requests'],
                 'pr_write_access': connectors.github.access_requests(run, actor),
@@ -650,6 +665,33 @@ def _create_app(settings, store):
                 "credential_requests": credentials.pending(run,store.identity(security.session_info(request)),security.role(request)=='admin'),
                 "slack_mirroring": slack.chat.mirroring(run_id),
                 "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "slack_source": store.slack_source(run_id)}
+
+    def feedback_author(request):
+        actor = store.identity(security.session_info(request))
+        rows = store.rows('''
+            SELECT COALESCE(NULLIF(linked.email,''),NULLIF(users.email,''),linked.name,users.name,'') AS author
+            FROM users
+            LEFT JOIN users AS linked ON linked.id=users.linked_user_id
+            WHERE users.id=?
+        ''', (actor,))
+        return rows[0]['author'] or actor if rows else actor
+
+    @app.post('/api/runs/{run_id}/messages/{message_id}/feedback')
+    async def submit_feedback(run_id: str, message_id: int, body: FeedbackBody, request: Request):
+        security.require(request, mutation=True)
+        if not store.run(run_id):
+            raise HTTPException(404, 'Session not found.')
+        try:
+            result = lens_feedback.submit(run_id, message_id, feedback_author(request),
+                                          body.score, body.comment, 'web')
+        except FeedbackNotConfigured:
+            raise HTTPException(409, 'Lens feedback is not configured.') from None
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        await checkpoints.flush()
+        return {'message_id': message_id, **result}
 
     @app.get('/api/runs/{run_id}/activity')
     async def activity_history(run_id: str, request: Request, message_id: int = Query(gt=0, le=2**63-1),
@@ -1095,7 +1137,7 @@ def _create_app(settings, store):
 
     @app.post('/hooks/slack/interactions')
     async def slack_interactions(request: Request):
-        return await slack.access.receive(request)
+        return await slack.feedback.receive(request)
 
     @app.post("/hooks/slack/events")
     async def slack_events(request: Request):
