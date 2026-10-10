@@ -219,6 +219,8 @@ def test_authenticated_web_feedback_api_persists_and_returns_current_actor_feedb
         assert service.for_messages(run['id'], 'alice@berri.ai')[assistant['id']]['status'] == 'delivered'
         assert client.post(f"/api/runs/{run['id']}/messages/{prompt['id']}/feedback",
                            json={'score': 4}).status_code == 404
+        app.state.store.execute('UPDATE runs SET deleted_at=? WHERE id=?', ('deleted', run['id']))
+        assert client.post(endpoint, json={'score': 4}).status_code == 404
         client.cookies.clear()
         assert client.post(endpoint, json={'score': 4}).status_code == 401
 

@@ -679,7 +679,8 @@ def _create_app(settings, store):
     @app.post('/api/runs/{run_id}/messages/{message_id}/feedback')
     async def submit_feedback(run_id: str, message_id: int, body: FeedbackBody, request: Request):
         security.require(request, mutation=True)
-        if not store.run(run_id):
+        run = store.run(run_id)
+        if not run or run['deleted_at']:
             raise HTTPException(404, 'Session not found.')
         try:
             result = lens_feedback.submit(run_id, message_id, feedback_author(request),

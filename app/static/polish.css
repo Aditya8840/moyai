@@ -278,12 +278,15 @@ body { color: var(--text); letter-spacing: -0.006em; }
 .reply-feedback-form h2 { margin: 0; font-size: 18px; font-weight: 600; }
 .reply-feedback-scores { border: 0; margin: 0; padding: 0; min-width: 0; }
 .reply-feedback-scores legend { margin-bottom: 10px; font-size: 13px; color: #57535e; }
-.reply-feedback-scores > div { display: flex; justify-content: space-between; gap: 4px; overflow-x: auto; padding: 2px; }
-.reply-feedback-scores label { position: relative; flex: 0 0 32px; height: 36px; }
+.reply-feedback-scores > div { display: grid; grid-template-columns: repeat(11, minmax(0, 1fr)); gap: 6px; padding: 2px; }
+.reply-feedback-scores label { position: relative; min-width: 0; height: 36px; }
 .reply-feedback-scores input { position: absolute; opacity: 0; inset: 0; }
-.reply-feedback-scores span { display: grid; place-items: center; height: 100%; border: 1px solid var(--line); border-radius: 7px; font-size: 13px; cursor: pointer; }
+.reply-feedback-scores span { display: grid; place-items: center; height: 36px; border: 1px solid var(--line); border-radius: 7px; font-size: 13px; cursor: pointer; }
 .reply-feedback-scores input:checked + span { border-color: #80669a; background: #f3eff7; color: #5b3f73; }
 .reply-feedback-scores input:focus-visible + span { outline: 2px solid #80669a; outline-offset: 2px; }
+@media (max-width: 420px) {
+  .reply-feedback-scores > div { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+}
 .reply-feedback-form > label { font-size: 13px; color: #57535e; }
 .reply-feedback-form textarea { width: 100%; min-height: 96px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font: inherit; }
 .reply-feedback-error { min-height: 18px; margin: 0; color: #a04450; font-size: 12px; }
