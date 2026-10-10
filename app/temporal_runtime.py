@@ -283,6 +283,21 @@ class TemporalRunManager(DurableRunner):
                        message_id=state.get('message_id'), segment=state.get('segment'),
                        schedule_to_start_ms=round(queue_ms, 2), duration_ms=elapsed_ms(started),
                        error_type=error_type)
+            if self.store.tracing:
+                # begin_turn may have claimed a message during this activity.
+                # Use its saved identity so the first queue delay is not lost.
+                try:
+                    current = await database(self.state, run_id)
+                    inactive = {'idle', 'warm', 'warm_cleanup', 'unknown'}
+                    timed = state if before not in inactive else current
+                    if timed.get('phase', 'idle') not in inactive and not timed.get('computer_only'):
+                        await database(self.store.tracing.runtime_phase, run_id,
+                                       timed.get('message_id'), 'activity_queue',
+                                       int(info.current_attempt_scheduled_time.timestamp() * 1e9),
+                                       int(info.started_time.timestamp() * 1e9),
+                                       segment=timed.get('segment', 0))
+                except Exception:
+                    log.warning('Activity queue trace capture failed')
 
     @activity.defn(name='launch_automation')
     async def launch_automation(self, automation_id: str, revision: int, occurrence: str, expires_at: str, trigger_id: str = 'default') -> dict:

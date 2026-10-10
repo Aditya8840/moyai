@@ -28,6 +28,55 @@ class Processor:
         pass
 
 
+@pytest.mark.parametrize('fails', [False, True])
+async def test_runtime_step_spans_keep_original_phase_and_turn(tmp_path, fails):
+    from app.durable_runner import DurableRunner
+    from types import SimpleNamespace
+    store, tracing, processor, run, message = setup(tmp_path)
+    state = {'phase': 'install', 'message_id': message['id'], 'segment': 2}
+
+    async def step(run_id, state):
+        state['phase'] = 'launch'
+        if fails:
+            raise ValueError('private error body')
+        return 'receipt'
+
+    manager = SimpleNamespace(store=store, _step=step)
+    if fails:
+        with pytest.raises(ValueError, match='private error body'):
+            await DurableRunner.step(manager, run['id'], state)
+    else:
+        assert await DurableRunner.step(manager, run['id'], state) == 'receipt'
+    tracing.runtime_phase(run['id'], message['id'], 'activity_queue', 1000000, 3000000)
+    store.finish_message(run['id'], message['id'], 'Done')
+    phase, queue, root = processor.spans
+    assert phase.name == 'runtime.install'
+    assert phase.parent == queue.parent == root.context
+    assert phase.attributes['moyai.runtime.segment'] == 2
+    assert phase.attributes['moyai.runtime.duration_ms'] >= 0
+    assert phase.status.is_ok is (not fails)
+    assert queue.attributes['moyai.runtime.duration_ms'] == 2
+    payload = encode_spans(processor.spans).SerializeToString()
+    assert b'private error body' not in payload
+
+
+async def test_runtime_trace_failure_cannot_replace_step_result(tmp_path, monkeypatch):
+    from app.durable_runner import DurableRunner
+    from types import SimpleNamespace
+    store, tracing, _, run, message = setup(tmp_path)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError('trace export unavailable')
+
+    async def step(*args):
+        return 'completed'
+
+    monkeypatch.setattr(tracing, 'emit', broken)
+    manager = SimpleNamespace(store=store, _step=step)
+    assert await DurableRunner.step(manager, run['id'],
+                                   {'phase': 'finish', 'message_id': message['id']}) == 'completed'
+
+
 def setup(tmp_path, *, build_sha='', environment='development'):
     store = Store(tmp_path)
     settings = Settings(_env_file=None, litellm_trace_endpoint='https://gateway-dev.litellm-sandbox.ai/lens-ingest/v1/traces',

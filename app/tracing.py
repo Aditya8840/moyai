@@ -279,6 +279,20 @@ class AgentTracing:
                   **self.slack_source(run_id, rows), **diagnostic}, root=True,
                   failed=status not in {'completed', 'steered'}, connection=connection)
 
+    @best_effort
+    def runtime_phase(self, run_id, message_id, phase, start, end, *, segment=0, failed=False):
+        """Body-free controller timings, distinct from model and tool spans."""
+        if not message_id:
+            return
+        run = self.store.run(run_id)
+        if not run or run['mode'] != 'modal':
+            return
+        with self.store.connect() as connection:
+            self.emit(run, message_id, 'runtime.' + phase, f'runtime:{phase}:{segment}:{start}',
+                      start, end, {'moyai.runtime.phase': phase, 'moyai.runtime.segment': segment,
+                                   'moyai.runtime.duration_ms': max(0, end - start) / 1e6},
+                      failed=failed, connection=connection)
+
     def slack_source(self, run_id, rows):
         """Link the turn to its Slack thread with the Lens `agent.source.*` contract."""
         events = rows('SELECT thread_ts,context_json FROM slack_events WHERE run_id=?', (run_id,))

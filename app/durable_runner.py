@@ -660,6 +660,19 @@ class DurableRunner(RunManager):
         self.save(run_id, state)
 
     async def step(self, run_id, state):
+        phase, message_id, segment = state['phase'], state.get('message_id'), state.get('segment', 0)
+        started = time.time_ns()
+        failed = True
+        try:
+            result = await self._step(run_id, state)
+            failed = False
+            return result
+        finally:
+            if self.store.tracing:
+                await database(self.store.tracing.runtime_phase, run_id, message_id, phase,
+                               started, time.time_ns(), segment=segment, failed=failed)
+
+    async def _step(self, run_id, state):
         phase = state['phase']
         run = await database(self.store.run, run_id)
         if phase in {'waiting_children', 'waiting_credential'}:

@@ -56,8 +56,9 @@ async def test_slack_finish_saves_answer_and_trace_without_requiring_mentions(fi
     assert [(m['role'], m['status']) for m in saved] == [('user', 'completed'), ('assistant', 'completed')]
     assert saved[-1]['content'] == 'The saved answer.'
     outbox = store.rows('SELECT * FROM trace_outbox')
-    assert len(outbox) == 1
-    root = spans(outbox[0]['payload'])[0]
+    emitted = [span for row in outbox for span in spans(row['payload'])]
+    assert sorted(span.name for span in emitted) == ['moyai', 'runtime.finish']
+    root = next(span for span in emitted if span.name == 'moyai')
     attributes = {item.key: item.value.string_value for item in root.attributes}
     assert attributes['agent.source.type'] == 'slack'
     assert attributes['agent.source.title'] == title
@@ -67,7 +68,9 @@ async def test_slack_finish_saves_answer_and_trace_without_requiring_mentions(fi
     manager.save(run_id, state)
     assert await manager.advance(run_id) is False
     assert len(store.messages(run_id)) == 2
-    assert len(store.rows('SELECT * FROM trace_outbox')) == 1
+    emitted = [span for row in store.rows('SELECT * FROM trace_outbox') for span in spans(row['payload'])]
+    assert [span.name for span in emitted].count('moyai') == 1
+    assert [span.name for span in emitted].count('runtime.finish') == 2
     assert store.rows('SELECT status FROM messages WHERE id=?', (message_id,))[0]['status'] == 'completed'
 
 
