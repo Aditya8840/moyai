@@ -19,7 +19,8 @@ from .runner import RunManager, SAVE_WARNING, TERMINAL, completed_response, safe
 from .security import digest
 from .sandboxes import ProvisioningTerminated
 from .db import database
-from sandbox.transport_recovery import MAX_TRANSPORT_ATTEMPTS, valid_retry
+from .runtime_files import RUNTIME_COMMAND, RUNTIME_ROOT, SANDBOX_PYTHON
+from agent.transport_recovery import MAX_TRANSPORT_ATTEMPTS, valid_retry
 
 
 class LostExecution(Exception):
@@ -597,7 +598,8 @@ class DurableRunner(RunManager):
         # Pass capabilities only in the exec environment, never in a persisted
         # task spec, command argument or Temporal payload. Reused machines have
         # an older creation-time environment, so every launch overrides it.
-        process = await sandbox.exec.aio('/usr/local/bin/python', '/opt/workspace-runner/durable_process.py', *args,
+        process = await sandbox.exec.aio(SANDBOX_PYTHON, '-I', '-c', RUNTIME_COMMAND,
+                                         RUNTIME_ROOT, 'durable_process.py', *args,
                                          timeout=30, env=self.settings.broker_environment(token) if token else {})
         output, _ = await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
         if await process.wait.aio() != 0:

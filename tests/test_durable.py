@@ -14,6 +14,7 @@ from app.config import MODEL_CATALOG, Settings
 from app.db import Store
 from app.main import public_messages
 from app.durable_runner import DurableRunner
+from app.runtime_files import RUNTIME_COMMAND
 from app.temporal_runtime import TemporalRunManager
 from app.runner import RunManager
 from app.session_lifecycle import SessionLifecycle
@@ -815,3 +816,20 @@ async def test_sdk_diagnostics_survive_durable_result_and_activity_storage(durab
     assert len(cloud.launches) == 1, 'Diagnostic metadata alone must never authorize replay'
     event = next(e for e in manager.store.events(run_id) if e['data'].get('phase') == 'sdk_failure')
     assert all(event['data'][key] == value for key, value in diagnostic.items())
+
+
+@pytest.mark.parametrize('packaged', [False, True])
+def test_supervisor_launcher_can_resume_flat_and_packaged_runtimes(tmp_path, packaged):
+    runtime = tmp_path / 'workspace-runner'
+    runtime.mkdir()
+    legacy = runtime / 'durable_process.py'
+    legacy.write_text('import json, sys; print(json.dumps(["legacy", *sys.argv[1:]]))')
+    if packaged:
+        (runtime / 'sandbox').mkdir()
+        (runtime / 'sandbox/durable_process.py').write_text(
+            'import json, sys; print(json.dumps(["packaged", *sys.argv[1:]]))')
+    result = subprocess.run(
+        [sys.executable, '-I', '-c', RUNTIME_COMMAND, str(runtime), 'durable_process.py', 'read', '/journal', '42'],
+        check=True, capture_output=True, text=True, timeout=10,
+    )
+    assert json.loads(result.stdout) == ['packaged' if packaged else 'legacy', 'read', '/journal', '42']
