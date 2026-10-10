@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sandbox.codex_harness import CodexAgent
+from agent.harnesses.codex_harness import CodexAgent
 from sandbox.codex_runtime import RuntimeLease, discard_orphan
 from test_codex_tool_readiness import readiness_case
 from test_codex_tool_search import search_case
@@ -240,7 +240,8 @@ def test_lease_close_attempts_all_resources_even_when_one_fails(fault):
 
 @pytest.mark.parametrize('turn_failed', [False, True])
 def test_entrypoint_always_closes_relay_without_changing_turn_outcome(monkeypatch, turn_failed):
-    from sandbox import agent, codex_runtime
+    from agent import agent
+    from sandbox import codex_runtime
     calls = []
     relay = SimpleNamespace(url='http://fixture', close=lambda: calls.append('relay'))
     relay.start = lambda: relay

@@ -16,7 +16,7 @@ import pytest
 
 from app.db import Store
 from app.temporal_runtime import TemporalRunManager
-from sandbox import agent
+from agent import agent
 from sandbox.startup import StartupUnavailable, read_with_reconnect
 from sandbox.broker_transport import unseal
 from test_broker_transport import diagnostic_relay
@@ -131,7 +131,8 @@ def test_repository_metadata_reconnects_only_during_startup(route, name, startin
 @pytest.mark.parametrize('outcome', ['transient', 'legacy', 'git_failure', 'exhausted',
                                       'slow_success', 'slow_retry', 'slow_exhausted'])
 def test_agent_repository_startup_uses_relay_without_replaying_git(checkout, tmp_path, monkeypatch, outcome):
-    from sandbox import github_tools, harness_registry
+    from agent.tools import github_tools
+    from agent.harnesses import harness_registry
     from sandbox.startup import _read_with_reconnect
     from sandbox.broker_relay import BrokerRelay
     from sandbox.access_transport import open_broker
@@ -251,8 +252,8 @@ def test_reconnecting_capability_still_works_and_stop_revokes_it(workspace):
     for outcome in ('transient', 'exhausted')
 ] + [('codex', outcome) for outcome in ('401', '403', 'invalid', 'late', 'followup', 'control', 'timeout')])
 def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, outcome):
-    from sandbox.context_store import ContextStore
-    from sandbox.harness_registry import resolve
+    from agent.context_store import ContextStore
+    from agent.harnesses.harness_registry import resolve
     from importlib import import_module
     events, reads, invocations = [], [], []
     def started():

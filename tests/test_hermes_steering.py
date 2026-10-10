@@ -116,7 +116,7 @@ def test_real_hermes_background_compaction_preserves_tools(runtime, workspace, t
 def test_real_hermes_tool_read_recovers_and_continues_without_replaying_write(runtime, recovery_catalog, tmp_path, monkeypatch):
     import shlex
     from http.server import BaseHTTPRequestHandler
-    from sandbox.agent import hermes_config
+    from agent.agent import hermes_config
     from sandbox.broker_transport import unseal
     from test_broker_transport import diagnostic_relay
     from test_harnesses import background_chat_response
@@ -172,7 +172,7 @@ def test_real_hermes_tool_read_recovers_and_continues_without_replaying_write(ru
         profile.mkdir()
         monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'private-capability')
         config = hermes_config({'model': 'openai/gpt-6-astra'}, relay.url, tmp_path)
-        config['mcp_servers']['workspace'].update(command=python, args=[str(ROOT / 'sandbox/mcp_bridge.py')])
+        config['mcp_servers']['workspace'].update(command=python, args=[str(ROOT / 'agent/tools/mcp_bridge.py')])
         config['agent'] = {'auto_recovery_cycles': 0}
         (profile / 'config.yaml').write_text(json.dumps(config))
         env = {key: os.environ[key] for key in ('PATH', 'HOME', 'TMPDIR') if key in os.environ}

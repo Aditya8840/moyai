@@ -60,7 +60,7 @@ class DesktopConnection:
                     return await native(body)
                 if self.process is None:
                     self.process = await self.sandbox.exec.aio('/usr/local/bin/python',
-                        '/opt/workspace-runner/computer.py', 'bridge', timeout=3600, bufsize=1)
+                        '/opt/workspace-runner/sandbox/computer.py', 'bridge', timeout=3600, bufsize=1)
                     self.reader = self.process.stdout.__aiter__()
                 self.process.stdin.write((json.dumps(body)+'\n').encode())
                 await self.process.stdin.drain.aio()
@@ -259,7 +259,7 @@ class Computer:
 
     async def execute(self, sandbox, *args, timeout=45):
         async with self.slots:
-            proc = await sandbox.exec.aio('/usr/local/bin/python', '/opt/workspace-runner/computer.py', *args, timeout=timeout)
+            proc = await sandbox.exec.aio('/usr/local/bin/python', '/opt/workspace-runner/sandbox/computer.py', *args, timeout=timeout)
             stdout, _ = await asyncio.gather(proc.stdout.read.aio(), proc.stderr.read.aio())
             if await proc.wait.aio() != 0:
                 raise HTTPException(503, 'Computer is not ready in this workspace. Start a new response to update it.')

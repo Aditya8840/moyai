@@ -175,9 +175,9 @@ def test_git_headers_are_scoped_to_broker_url_and_do_not_persist_in_config(monke
 
 def test_public_activity_and_archives_redact_edge_credentials(monkeypatch, tmp_path):
     import zipfile
-    from sandbox.activity import public_text
+    from agent.activity import public_text
     from sandbox.artifacts import collect_archive
-    from sandbox.trace_content import trace_content
+    from agent.trace_content import trace_content
     monkeypatch.setenv('WORKSPACE_ACCESS_CLIENT_ID', 'test-sensitive-client')
     monkeypatch.setenv('WORKSPACE_ACCESS_CLIENT_SECRET', 'test-sensitive-secret')
     text = 'test-sensitive-client test-sensitive-secret'
@@ -194,9 +194,9 @@ def test_public_activity_and_archives_redact_edge_credentials(monkeypatch, tmp_p
 @pytest.mark.parametrize(('inherit_environment', 'access_enabled'), [(False, True), (True, True), (False, False)])
 def test_real_mcp_git_checkout_and_publication_through_access(
         access_origin, edge_backend, tmp_path, monkeypatch, inherit_environment, access_enabled):
-    from sandbox.agent import hermes_config
+    from agent.agent import hermes_config
     from sandbox.broker_transport import unseal
-    from sandbox.harness_tools import tools_for
+    from agent.tools.harness_tools import tools_for
 
     remote, requests = access_origin
     if not access_enabled:

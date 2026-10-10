@@ -172,9 +172,11 @@ async def test_snapshot_refresh_includes_runtime_fixes_without_touching_user_fil
     path, data = next(iter(written.items()))
     assert path.startswith('/tmp/moyai-runtime-') and path.endswith('.bundle')
     files = json.loads(zlib.decompress(base64.b64decode(data)))
-    assert 'hermes_compat.py' in files and 'hermes-steering.patch' in files and 'hermes-stop-reason.patch' in files
-    assert 'apply_hermes_patches()' in files['agent.py']
-    assert all('/' not in name and (name.endswith('.py') or name.startswith('hermes-')) for name in files)
+    assert {'sandbox/hermes_compat.py', 'sandbox/hermes-steering.patch', 'sandbox/hermes-stop-reason.patch'} <= files.keys()
+    assert 'apply_hermes_patches()' in files['sandbox/agent.py']
+    assert {'agent/__init__.py', 'agent/agent.py', 'agent/prompts/system.md', 'agent/tools/mcp_bridge.py'} <= files.keys()
+    assert any(name.startswith('agent/skills/') for name in files)
+    assert all(name.startswith(('agent/', 'sandbox/')) and name.endswith(('.py', '.md', '.patch')) for name in files)
 
 
 def ready_runtime(changed=()):
